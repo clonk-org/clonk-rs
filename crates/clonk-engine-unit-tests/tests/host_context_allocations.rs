@@ -9,6 +9,7 @@ const LOCAL_ARRAY_LEN: usize = 257;
 
 thread_local! {
     static ALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) };
+    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
     static LOCAL_ARRAY_COPIES: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -20,11 +21,58 @@ fn record_allocation(size: usize) {
     let _ = ALLOCATIONS.try_with(|count| {
         if let Some(value) = count.get() {
             count.set(Some(value + 1));
+            ALLOCATED_BYTES.with(|bytes| bytes.set(bytes.get() + size));
             if size == LOCAL_ARRAY_LEN * std::mem::size_of::<Value>() {
                 LOCAL_ARRAY_COPIES.with(|copies| copies.set(copies.get() + 1));
             }
         }
     });
+}
+
+#[test]
+fn small_terrain_callback_does_not_copy_the_world() {
+    // FnDigFree preserves native per-pixel order and immediate visibility
+    // (C4Script.cpp:3109-3112; C4Landscape.cpp:962-982). A private host
+    // preview must preserve that behavior without copying unedited terrain.
+    let measure = |width: u32, height: u32| {
+        let mut engine = Engine::new();
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\nDigFree=1\n",
+        )
+        .unwrap();
+        engine.configure_materials_from_library(&library);
+        let mut landscape = clonk_engine::Landscape::flat(width, 0);
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
+            width,
+            height,
+            vec![1; width as usize * height as usize],
+            vec![0, 100],
+            vec![None, Some("Earth".into())],
+            vec![None, None],
+        ));
+        engine.set_landscape(landscape);
+        engine
+            .register_script_definition(
+                "TEST",
+                "Test",
+                "#strict 2\nfunc Probe() { DigFree(8, 8, 2); return GetMaterial(8, 8); }",
+            )
+            .unwrap();
+        engine.spawn_object(SpawnConfig::new("TEST")).unwrap();
+        ALLOCATED_BYTES.with(|bytes| bytes.set(0));
+        ALLOCATIONS.with(|count| count.set(Some(0)));
+        let result = engine.call_object_function(0, "Probe", Vec::new());
+        ALLOCATIONS.with(|count| count.set(None));
+        let bytes = ALLOCATED_BYTES.with(Cell::get);
+        assert_eq!(result.unwrap(), Value::Int(-1));
+        assert_eq!(engine.landscape().unwrap().grid_byte_at(8, 8), Some(0));
+        bytes
+    };
+    let small = measure(512, 256);
+    let large = measure(4096, 4096);
+    eprintln!("radius-two callback allocation bytes: small={small}, large={large}");
+    assert!(large <= small + 16 * 1024, "small terrain edit allocated {large} bytes on the large world versus {small}; unedited pixels and columns must remain shared");
 }
 
 unsafe impl GlobalAlloc for CountingAllocator {

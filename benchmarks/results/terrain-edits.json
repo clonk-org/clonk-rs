@@ -1,0 +1,1995 @@
+{
+  "baseline_commit": "a9fcad417a67833fd958753983a216e52678e1e0",
+  "captured_utc": "2026-10-05T02:38:45Z",
+  "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+  "platform": "Linux-7.2.8-arch1-2-x86_64-with-glibc2.44",
+  "rust": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "content_commit": "0888b4f3bd10762c976c2fe93aa650d7909c1c6f",
+  "candidate_source_sha256": {
+    "crates/clonk-engine/src/landscape.rs": "b4b91c7a2a9a930046d5705be35edf9ed4e430c3417eb32657b2e0a4d4124978",
+    "crates/clonk-engine/src/landscape/paged_vec.rs": "77353374672e5dd7d8d9177bfe1affb16b5cba736293bc7e0a33c86372b5ea7e",
+    "crates/clonk-engine/src/compat/commands.rs": "f8da910b139d9b6af71f82d3a4fc9bb2def00fd4c066bfc5e8d02c3a663f1083",
+    "crates/clonk-engine/benches/terrain_edits.rs": "0ec5a510942e383491120810276dc925cf2da2a9b56939bdeef1cfc5b7c88beb"
+  },
+  "executable_sha256": {
+    "baseline": "45eb7bb243f2f4530fc86ed7dea81b582c0e8147b2814729af7801579fc5950f",
+    "candidate": "f996dc8ff019af3ce1d7c60e5248c108403dae9afd9532c4c265b617a2407c5d"
+  },
+  "allocation_regression": {
+    "baseline_bytes": {
+      "512x256": 273755,
+      "4096x4096": 17031167
+    },
+    "candidate_bytes": {
+      "512x256": 131358,
+      "4096x4096": 128586
+    },
+    "test": "small_terrain_callback_does_not_copy_the_world"
+  },
+  "trials": [
+    {
+      "variant": "baseline",
+      "started_utc": "2026-10-05T02:37:26Z",
+      "elapsed_seconds": 26.312972790998174,
+      "load_average_start": [
+        15.30810546875,
+        19.5087890625,
+        24.70263671875
+      ],
+      "load_average_end": [
+        11.83203125,
+        18.357421875,
+        24.18310546875
+      ],
+      "measurements": [
+        {
+          "callbacks": 200,
+          "median_ms": 2.625197,
+          "mode": "callbacks",
+          "pixels_fnv1a": "96bc42d2a67703fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            2.54771,
+            2.5592710000000003,
+            2.560584,
+            2.619687,
+            2.625197,
+            2.6960629999999997,
+            2.7024340000000002,
+            2.910523,
+            3.560335
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.903648,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "96bc42d2a67703fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.456663000000002,
+            17.538240000000002,
+            17.560642,
+            17.573566999999997,
+            17.903648,
+            17.968181,
+            17.971016,
+            18.028146,
+            18.129018
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 2.5192650000000003,
+          "mode": "callbacks",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            2.502703,
+            2.507943,
+            2.514385,
+            2.517311,
+            2.5192650000000003,
+            2.520487,
+            2.5242950000000004,
+            2.526128,
+            2.535416
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 18.308101,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.863972,
+            17.980344,
+            18.000612999999998,
+            18.084915,
+            18.308101,
+            18.402952,
+            18.436736,
+            18.550594,
+            20.764525
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 2.4867320000000004,
+          "mode": "callbacks",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            2.4538189999999998,
+            2.455443,
+            2.470041,
+            2.476663,
+            2.4867320000000004,
+            2.486913,
+            2.4912609999999997,
+            2.501731,
+            2.520206
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.869513,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            17.667797,
+            17.670030999999998,
+            17.7269,
+            17.856147,
+            17.869513,
+            18.230503,
+            18.234149000000002,
+            18.675002,
+            18.734735999999998
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 13.150423,
+          "mode": "callbacks",
+          "pixels_fnv1a": "fdccab1e4e7c37fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            12.633014999999999,
+            12.66252,
+            12.898280999999999,
+            13.059700000000001,
+            13.150423,
+            13.210068,
+            13.299168,
+            13.617817,
+            14.286594999999998
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 27.403484,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "fdccab1e4e7c37fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            27.250171,
+            27.283735,
+            27.342236999999997,
+            27.364901,
+            27.403484,
+            27.413182000000003,
+            27.540065,
+            27.57391,
+            28.339303
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 13.419768,
+          "mode": "callbacks",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            13.131948,
+            13.221027999999999,
+            13.270382000000001,
+            13.406893,
+            13.419768,
+            13.450136,
+            13.457930999999999,
+            13.663313,
+            13.761740999999999
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 28.080778000000002,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            27.424153,
+            27.47485,
+            27.539704,
+            27.881047,
+            28.080778000000002,
+            28.179267,
+            28.458750000000002,
+            28.622794,
+            29.475965
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 13.533254,
+          "mode": "callbacks",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            13.291733,
+            13.353291,
+            13.408937,
+            13.412163,
+            13.533254,
+            13.657312,
+            13.721184000000001,
+            13.792311,
+            13.798873
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 27.709609,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            27.016404,
+            27.158195,
+            27.588828,
+            27.654414,
+            27.709609,
+            27.903229000000003,
+            28.004433,
+            28.242287,
+            28.49521
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 110.145661,
+          "mode": "callbacks",
+          "pixels_fnv1a": "6ea2399cc31783fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            100.13266499999999,
+            102.101597,
+            106.041557,
+            107.74576499999999,
+            110.145661,
+            111.193553,
+            114.270244,
+            116.981666,
+            170.45501399999998
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 125.50107799999999,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "6ea2399cc31783fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            117.44623399999999,
+            122.112101,
+            122.515963,
+            122.658375,
+            125.50107799999999,
+            129.03368,
+            136.698579,
+            139.561721,
+            265.840796
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 99.227764,
+          "mode": "callbacks",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            91.094409,
+            93.18209900000001,
+            93.29216,
+            98.238212,
+            99.227764,
+            101.993319,
+            105.568553,
+            108.51966300000001,
+            110.39250200000001
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 119.655294,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            111.40594800000001,
+            112.111046,
+            112.344242,
+            117.785692,
+            119.655294,
+            119.979454,
+            121.426389,
+            123.720895,
+            124.646844
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 98.932489,
+          "mode": "callbacks",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            92.040577,
+            92.78884699999999,
+            97.025274,
+            98.484462,
+            98.932489,
+            102.76218800000001,
+            104.33827,
+            108.547775,
+            119.549061
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 115.846645,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            108.96262800000001,
+            112.369399,
+            112.926133,
+            113.19629,
+            115.846645,
+            119.651476,
+            120.310726,
+            122.113692,
+            141.057257
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "checksum": 500459,
+          "median_ms": 0.983319,
+          "mode": "flat_pixel_reads",
+          "operations": 1000000,
+          "samples_ms": [
+            0.974723,
+            0.9779190000000001,
+            0.97867,
+            0.9792519999999999,
+            0.983319,
+            0.9839899999999999,
+            0.9843409999999999,
+            0.9854340000000001,
+            0.985463
+          ],
+          "size": [
+            1488,
+            1536
+          ]
+        },
+        {
+          "checksum": 500459,
+          "median_ms": 0.9157,
+          "mode": "shared_pixel_reads",
+          "operations": 1000000,
+          "samples_ms": [
+            0.9104300000000001,
+            0.912404,
+            0.913146,
+            0.914768,
+            0.9157,
+            0.9161710000000001,
+            0.919577,
+            0.919908,
+            0.934646
+          ],
+          "size": [
+            1488,
+            1536
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "started_utc": "2026-10-05T02:37:53Z",
+      "elapsed_seconds": 13.385822023999935,
+      "load_average_start": [
+        11.83203125,
+        18.357421875,
+        24.18310546875
+      ],
+      "load_average_end": [
+        10.6806640625,
+        17.78369140625,
+        23.9013671875
+      ],
+      "measurements": [
+        {
+          "callbacks": 200,
+          "median_ms": 1.824767,
+          "mode": "callbacks",
+          "pixels_fnv1a": "96bc42d2a67703fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            1.7975949999999998,
+            1.8085060000000002,
+            1.809378,
+            1.8247179999999998,
+            1.824767,
+            1.837172,
+            1.928516,
+            2.122637,
+            2.5568470000000003
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.075254,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "96bc42d2a67703fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            16.948041,
+            16.949433,
+            16.985903,
+            17.039835999999998,
+            17.075254,
+            17.137403,
+            17.190654,
+            17.204259999999998,
+            17.288010999999997
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.6200459999999999,
+          "mode": "callbacks",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            1.612041,
+            1.614776,
+            1.6186429999999998,
+            1.6198860000000002,
+            1.6200459999999999,
+            1.620708,
+            1.63291,
+            1.6350449999999999,
+            1.646858
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.038905,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            16.969611999999998,
+            16.986795,
+            17.034536,
+            17.035488,
+            17.038905,
+            17.09404,
+            17.160417000000002,
+            17.740516000000003,
+            19.0197
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.754774,
+          "mode": "callbacks",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            1.747801,
+            1.750585,
+            1.750926,
+            1.751207,
+            1.754774,
+            1.765264,
+            1.777517,
+            1.781255,
+            1.8214819999999998
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.808245,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            17.492471,
+            17.619544,
+            17.663719,
+            17.74821,
+            17.808245,
+            17.873369,
+            17.925539,
+            18.290767,
+            18.411247
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 3.0621530000000003,
+          "mode": "callbacks",
+          "pixels_fnv1a": "fdccab1e4e7c37fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            3.024891,
+            3.031464,
+            3.037906,
+            3.048967,
+            3.0621530000000003,
+            3.090757,
+            3.119602,
+            3.367817,
+            3.465864
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 19.132766,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "fdccab1e4e7c37fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            18.553169,
+            18.556756,
+            18.692705,
+            18.757448,
+            19.132766,
+            19.24472,
+            19.396771,
+            20.209273,
+            20.592586
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.630877,
+          "mode": "callbacks",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            1.614276,
+            1.621358,
+            1.625136,
+            1.625687,
+            1.630877,
+            1.631338,
+            1.634714,
+            1.636046,
+            1.639042
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.268002000000003,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.050427,
+            17.142091,
+            17.184964,
+            17.247253,
+            17.268002000000003,
+            17.681913,
+            17.719876,
+            17.822822,
+            18.715179
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.8312599999999999,
+          "mode": "callbacks",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            1.8083859999999998,
+            1.81591,
+            1.827653,
+            1.829346,
+            1.8312599999999999,
+            1.8801539999999999,
+            1.885524,
+            1.925801,
+            1.954075
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 20.022506,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            17.706179,
+            17.949845,
+            18.685902000000002,
+            19.093401,
+            20.022506,
+            20.916585,
+            21.171612999999997,
+            21.465083,
+            22.13774
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 10.093971999999999,
+          "mode": "callbacks",
+          "pixels_fnv1a": "6ea2399cc31783fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            8.867197,
+            8.977538000000001,
+            9.359007,
+            9.374837000000001,
+            10.093971999999999,
+            10.297541,
+            10.777849000000002,
+            10.941500999999999,
+            11.175689
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 25.998478,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "6ea2399cc31783fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            25.482041,
+            25.492359999999998,
+            25.633901,
+            25.695789,
+            25.998478,
+            26.135549,
+            26.29777,
+            26.846649,
+            28.060779
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.652588,
+          "mode": "callbacks",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            1.638482,
+            1.639564,
+            1.643111,
+            1.6492930000000001,
+            1.652588,
+            1.689279,
+            1.713816,
+            1.795221,
+            1.9513200000000002
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 18.687434999999997,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.287479,
+            17.532487999999997,
+            17.561493000000002,
+            17.656194,
+            18.687434999999997,
+            18.818536,
+            20.125042,
+            22.927819,
+            24.996582
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.777587,
+          "mode": "callbacks",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            1.750726,
+            1.752139,
+            1.757779,
+            1.7625790000000001,
+            1.777587,
+            1.7779580000000001,
+            1.81032,
+            1.8802429999999999,
+            2.272703
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 18.191506999999998,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            17.489735999999997,
+            17.788727,
+            17.817202,
+            17.919878,
+            18.191506999999998,
+            18.242244,
+            18.328529,
+            19.488065,
+            20.472296
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "checksum": 500459,
+          "median_ms": 1.1303509999999999,
+          "mode": "flat_pixel_reads",
+          "operations": 1000000,
+          "samples_ms": [
+            1.119108,
+            1.119279,
+            1.126253,
+            1.1279350000000001,
+            1.1303509999999999,
+            1.131362,
+            1.137814,
+            1.1532339999999999,
+            1.174575
+          ],
+          "size": [
+            1488,
+            1536
+          ]
+        },
+        {
+          "checksum": 500459,
+          "median_ms": 1.365099,
+          "mode": "shared_pixel_reads",
+          "operations": 1000000,
+          "samples_ms": [
+            1.353066,
+            1.36028,
+            1.361552,
+            1.363166,
+            1.365099,
+            1.370679,
+            1.37626,
+            1.3786239999999998,
+            1.395327
+          ],
+          "size": [
+            1488,
+            1536
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "started_utc": "2026-10-05T02:38:06Z",
+      "elapsed_seconds": 13.484997859995929,
+      "load_average_start": [
+        10.6806640625,
+        17.78369140625,
+        23.9013671875
+      ],
+      "load_average_end": [
+        9.5693359375,
+        17.18994140625,
+        23.60888671875
+      ],
+      "measurements": [
+        {
+          "callbacks": 200,
+          "median_ms": 1.8380919999999998,
+          "mode": "callbacks",
+          "pixels_fnv1a": "96bc42d2a67703fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            1.7867549999999999,
+            1.794179,
+            1.805891,
+            1.8185250000000002,
+            1.8380919999999998,
+            1.8471309999999999,
+            1.858282,
+            1.859424,
+            1.878019
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.859582,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "96bc42d2a67703fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.107194,
+            17.389785,
+            17.758468999999998,
+            17.82661,
+            17.859582,
+            18.220052,
+            18.311687,
+            19.182541,
+            19.931041
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.66414,
+          "mode": "callbacks",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            1.64807,
+            1.655103,
+            1.655203,
+            1.655263,
+            1.66414,
+            1.668809,
+            1.669631,
+            2.1620530000000002,
+            2.2117370000000003
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.584247,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.189192,
+            17.242764,
+            17.289071999999997,
+            17.451182,
+            17.584247,
+            18.425314,
+            18.927624,
+            19.058675,
+            20.839928
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.808156,
+          "mode": "callbacks",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            1.780232,
+            1.785853,
+            1.794579,
+            1.8028359999999999,
+            1.808156,
+            1.818105,
+            1.851608,
+            1.8769369999999999,
+            1.9377330000000001
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.749031,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            17.595778,
+            17.634382000000002,
+            17.687774,
+            17.709867,
+            17.749031,
+            17.883939,
+            17.995302000000002,
+            19.011565,
+            19.143826999999998
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 3.010985,
+          "mode": "callbacks",
+          "pixels_fnv1a": "fdccab1e4e7c37fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            2.9258420000000003,
+            2.932635,
+            2.990936,
+            2.99278,
+            3.010985,
+            3.025282,
+            3.030452,
+            3.215004,
+            3.229212
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 19.041059999999998,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "fdccab1e4e7c37fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            18.604125999999997,
+            18.628893,
+            18.656747000000003,
+            18.922734,
+            19.041059999999998,
+            19.133137,
+            21.541739,
+            24.902102,
+            26.019969
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.739855,
+          "mode": "callbacks",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            1.644312,
+            1.6498229999999998,
+            1.652658,
+            1.699749,
+            1.739855,
+            1.7443039999999999,
+            2.247375,
+            2.257615,
+            2.2634450000000004
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.672225,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.328578,
+            17.380557,
+            17.494263999999998,
+            17.575159,
+            17.672225,
+            17.738581,
+            17.98386,
+            18.848472,
+            19.993600999999998
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.812634,
+          "mode": "callbacks",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            1.765324,
+            1.7771569999999999,
+            1.794519,
+            1.801563,
+            1.812634,
+            1.81529,
+            1.910341,
+            1.953052,
+            2.0787430000000002
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 18.869553,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            17.787324,
+            17.813193000000002,
+            17.923043999999997,
+            18.341925,
+            18.869553,
+            19.341886,
+            20.266883,
+            20.515759000000003,
+            23.190140000000003
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 11.606,
+          "mode": "callbacks",
+          "pixels_fnv1a": "6ea2399cc31783fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            9.922293999999999,
+            11.171089,
+            11.526329,
+            11.602013,
+            11.606,
+            11.711041999999999,
+            11.777278,
+            11.824097,
+            12.42187
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 26.588214999999998,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "6ea2399cc31783fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            24.733829999999998,
+            25.119277,
+            26.100953,
+            26.300234,
+            26.588214999999998,
+            27.9359,
+            28.060408,
+            28.237917000000003,
+            28.95086
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.659602,
+          "mode": "callbacks",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            1.62222,
+            1.636708,
+            1.64328,
+            1.648741,
+            1.659602,
+            1.794028,
+            1.795893,
+            2.160529,
+            2.215144
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 18.399264,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.509853999999997,
+            17.564909,
+            18.107466,
+            18.380528,
+            18.399264,
+            19.772548,
+            22.033469,
+            22.624759,
+            23.683412
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 1.837171,
+          "mode": "callbacks",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            1.799098,
+            1.811422,
+            1.822844,
+            1.827593,
+            1.837171,
+            1.847982,
+            1.850987,
+            1.865034,
+            2.081828
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 17.64895,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            17.506608,
+            17.545993,
+            17.573966,
+            17.647647999999997,
+            17.64895,
+            18.182049,
+            19.372534,
+            20.735068,
+            21.082933
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "checksum": 500459,
+          "median_ms": 1.1301690000000002,
+          "mode": "flat_pixel_reads",
+          "operations": 1000000,
+          "samples_ms": [
+            1.021563,
+            1.042723,
+            1.04634,
+            1.0683610000000001,
+            1.1301690000000002,
+            1.190986,
+            1.327928,
+            1.3763,
+            1.420455
+          ],
+          "size": [
+            1488,
+            1536
+          ]
+        },
+        {
+          "checksum": 500459,
+          "median_ms": 1.350551,
+          "mode": "shared_pixel_reads",
+          "operations": 1000000,
+          "samples_ms": [
+            1.262583,
+            1.263806,
+            1.304623,
+            1.3381969999999999,
+            1.350551,
+            1.382833,
+            1.384936,
+            1.439952,
+            1.979934
+          ],
+          "size": [
+            1488,
+            1536
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "started_utc": "2026-10-05T02:38:19Z",
+      "elapsed_seconds": 26.00525445799576,
+      "load_average_start": [
+        9.5693359375,
+        17.18994140625,
+        23.60888671875
+      ],
+      "load_average_end": [
+        7.685546875,
+        16.130859375,
+        23.08642578125
+      ],
+      "measurements": [
+        {
+          "callbacks": 200,
+          "median_ms": 2.651047,
+          "mode": "callbacks",
+          "pixels_fnv1a": "96bc42d2a67703fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            2.47466,
+            2.514245,
+            2.566405,
+            2.5665660000000003,
+            2.651047,
+            2.659523,
+            2.66333,
+            2.829377,
+            3.072422
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 18.01498,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "96bc42d2a67703fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.653489,
+            17.949113,
+            17.975735,
+            17.982156999999997,
+            18.01498,
+            18.212648,
+            18.343237,
+            18.916042,
+            20.337408
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 2.592324,
+          "mode": "callbacks",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            2.504877,
+            2.524033,
+            2.5293930000000002,
+            2.549753,
+            2.592324,
+            3.06648,
+            3.106327,
+            3.106517,
+            3.127407
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 18.248095,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            17.59151,
+            17.996494,
+            18.077149000000002,
+            18.126582,
+            18.248095,
+            18.496950000000002,
+            22.629789000000002,
+            23.342792000000003,
+            23.570026000000002
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 2.634965,
+          "mode": "callbacks",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            2.503475,
+            2.5041059999999997,
+            2.54259,
+            2.564541,
+            2.634965,
+            2.672498,
+            2.684681,
+            2.7059010000000003,
+            2.708767
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 18.190585,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "5abf7f51b4270782",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            17.594176,
+            17.990443,
+            18.162782,
+            18.183812,
+            18.190585,
+            19.362765,
+            19.517731,
+            21.595683,
+            23.137429
+          ],
+          "size": [
+            512,
+            256
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 13.831494,
+          "mode": "callbacks",
+          "pixels_fnv1a": "fdccab1e4e7c37fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            13.638565,
+            13.656249,
+            13.697848,
+            13.803751,
+            13.831494,
+            13.833276999999999,
+            13.857825,
+            14.05947,
+            14.153861000000001
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 28.577866,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "fdccab1e4e7c37fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            28.058925,
+            28.412551,
+            28.429482999999998,
+            28.545313999999998,
+            28.577866,
+            28.649642999999998,
+            28.892487000000003,
+            30.090397000000003,
+            32.249784
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 13.690554,
+          "mode": "callbacks",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            13.495151,
+            13.507345,
+            13.649727,
+            13.683962,
+            13.690554,
+            13.739037000000001,
+            13.758234,
+            13.767602,
+            13.77685
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 27.869172000000002,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            27.369286,
+            27.489056,
+            27.550774,
+            27.581362000000002,
+            27.869172000000002,
+            28.193562,
+            28.402952,
+            28.880565,
+            31.885116999999997
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 13.467238,
+          "mode": "callbacks",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            13.334294,
+            13.339854,
+            13.342629,
+            13.376274,
+            13.467238,
+            13.475544000000001,
+            13.496203,
+            13.678322,
+            14.013632
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 27.741868999999998,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "a0ef4c7ad91d4442",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            27.162512,
+            27.504495,
+            27.53833,
+            27.545935,
+            27.741868999999998,
+            27.761827,
+            28.138987,
+            28.429403,
+            29.471044
+          ],
+          "size": [
+            1488,
+            1536
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 113.96291,
+          "mode": "callbacks",
+          "pixels_fnv1a": "6ea2399cc31783fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            103.32677199999999,
+            105.646977,
+            108.21791999999999,
+            109.020434,
+            113.96291,
+            124.950558,
+            143.260541,
+            147.590366,
+            166.41254899999998
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 121.496898,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "6ea2399cc31783fb",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            106.56965,
+            115.406939,
+            119.309878,
+            119.65231299999999,
+            121.496898,
+            122.708123,
+            123.525044,
+            124.649553,
+            130.30434
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": false
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 89.515727,
+          "mode": "callbacks",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            83.627674,
+            84.244794,
+            84.671519,
+            85.056094,
+            89.515727,
+            89.545323,
+            91.952164,
+            100.87728999999999,
+            106.754142
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 112.045855,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": false,
+          "samples_ms": [
+            101.584722,
+            102.77394500000001,
+            106.144557,
+            107.331966,
+            112.045855,
+            112.417575,
+            117.10833,
+            122.164333,
+            122.988378
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 101.548412,
+          "mode": "callbacks",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            86.665509,
+            87.023553,
+            97.740165,
+            99.916904,
+            101.548412,
+            103.280703,
+            105.710758,
+            106.507059,
+            106.711029
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "callbacks": 200,
+          "median_ms": 117.751048,
+          "mode": "effect_tick",
+          "pixels_fnv1a": "13627caaecdc4f82",
+          "random_count": 500,
+          "retained_snapshot": true,
+          "samples_ms": [
+            107.943183,
+            108.865486,
+            110.647392,
+            114.52915,
+            117.751048,
+            121.356368,
+            133.651024,
+            145.900053,
+            146.42807299999998
+          ],
+          "size": [
+            4096,
+            4096
+          ],
+          "warm": true
+        },
+        {
+          "checksum": 500459,
+          "median_ms": 0.998708,
+          "mode": "flat_pixel_reads",
+          "operations": 1000000,
+          "samples_ms": [
+            0.995452,
+            0.9957220000000001,
+            0.997075,
+            0.9982579999999999,
+            0.998708,
+            0.99927,
+            1.006624,
+            1.079623,
+            1.1355899999999999
+          ],
+          "size": [
+            1488,
+            1536
+          ]
+        },
+        {
+          "checksum": 500459,
+          "median_ms": 0.967128,
+          "mode": "shared_pixel_reads",
+          "operations": 1000000,
+          "samples_ms": [
+            0.961267,
+            0.961908,
+            0.964583,
+            0.9654149999999999,
+            0.967128,
+            0.9680599999999999,
+            0.968622,
+            1.028335,
+            1.151221
+          ],
+          "size": [
+            1488,
+            1536
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -3258,11 +3258,36 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
 
     let synchronize = || NetworkControl::Synchronize(saves_fixture!(synchronize: true, false));
+    // Hold the worker explicitly: without this barrier it may finish the
+    // queued save before the test can inspect the pre-persistence file.
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+    app.saves
+        .submit_background_job(Box::new(move || {
+            started_tx.send(()).expect("report held save worker");
+            release_rx.recv().expect("release held save worker");
+            save_worker::BackgroundSaveCompletion::PlayerFile(
+                save_worker::PlayerFileSaveCompletion {
+                    player_number: -1,
+                    info_id: -1,
+                    path: std::path::PathBuf::new(),
+                    official_derivation: false,
+                    derivation: None,
+                    result: Ok(()),
+                    persistence: Duration::ZERO,
+                },
+            )
+        }))
+        .test_value();
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker reached barrier");
     app.apply_synchronized_controls(0, vec![synchronize()])
         .test_value();
 
     let pending = PlayerFile::load_from_path(&profile_path).test_value();
-    main_assert_eq!(pending.name => "Stale", "physical persistence runs after the synchronized control returns");
+    main_assert_eq!(pending.name => "Stale", "the synchronized control returns while physical persistence is held");
+    release_tx.send(()).expect("release player-file persistence");
     app.finish_background_save_jobs();
 
     let saved = PlayerFile::load_from_path(&profile_path).test_value();
