@@ -81,3 +81,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "regist
 name = "engine_tick"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "terrain_edits"
+harness = false

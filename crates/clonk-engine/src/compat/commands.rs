@@ -340,6 +340,10 @@ pub(crate) fn preview_dig_circle_pixels(
         return counts;
     }
     if landscape.pixel_grid().is_some() {
+        let start = center.x.saturating_sub(radius).saturating_sub(1).max(0) as usize;
+        let end = center.x.saturating_add(radius).saturating_add(2).max(0) as usize;
+        landscape.prepare_raster_columns(start..end);
+
         let mut line_width = 0;
         for ycnt in -radius..radius {
             let remaining =
@@ -436,6 +440,10 @@ pub(crate) fn preview_dig_rect_pixels(
         return counts;
     }
     if landscape.pixel_grid().is_some() {
+        let start = origin.x.max(0) as usize;
+        let end = origin.x.saturating_add(width).max(0) as usize;
+        landscape.prepare_raster_columns(start..end);
+
         for x in origin.x..origin.x.saturating_add(width) {
             for y in origin.y..origin.y.saturating_add(height) {
                 if let Some(material) = landscape.dig_free_pix(x, y, materials) {

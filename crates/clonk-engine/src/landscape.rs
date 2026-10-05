@@ -4,6 +4,9 @@ use std::mem;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+mod paged_vec;
+use paged_vec::PagedVec;
+
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -42,6 +45,8 @@ const RENDER_TOKEN_PRIME: u64 = 0x0000_0100_0000_01b3;
 #[cfg(test)]
 std::thread_local! {
     static MATERIAL_COUNT_FULL_REBUILDS: Cell<usize> = const { Cell::new(0) };
+    static RASTER_COLUMN_FULL_SCANS: Cell<usize> = const { Cell::new(0) };
+    static RASTER_SURFACE_PROBES: Cell<usize> = const { Cell::new(0) };
     pub(crate) static MASK_WRITE_BATCH_ACTIVATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -136,13 +141,15 @@ impl<T> MaskWrite<T> {
 pub(crate) struct PixelGridMaskReadView<'a> {
     width: u32,
     height: u32,
-    bytes: &'a [u8],
+    bytes: &'a PagedVec<u8, 256>,
     densities: &'a [i32],
     materials: &'a [Option<MaterialId>],
 }
 
 impl PixelGridMaskReadView<'_> {
     fn byte_at(&self, x: i32, y: i32) -> Option<u8> {
+        #[cfg(test)]
+        RASTER_SURFACE_PROBES.with(|probes| probes.set(probes.get() + 1));
         if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
             return None;
         }
@@ -357,13 +364,13 @@ impl PixelGridDirtyGeneration {
 /// Hex-string serde for the pixel byte plane (a JSON number array would be
 /// ~10MB for a real map; hex keeps state exports tractable).
 mod hex_bytes {
-    use std::sync::Arc;
+    use super::PagedVec;
 
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(
-        bytes: &Arc<Vec<u8>>,
+        bytes: &PagedVec<u8, 256>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         let mut text = String::with_capacity(bytes.len() * 2);
@@ -376,7 +383,7 @@ mod hex_bytes {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<Arc<Vec<u8>>, D::Error> {
+    ) -> Result<PagedVec<u8, 256>, D::Error> {
         let text = String::deserialize(deserializer)?;
         if text.len() % 2 != 0 {
             return Err(D::Error::custom("odd hex length"));
@@ -393,7 +400,7 @@ mod hex_bytes {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Arc::new(bytes))
+        Ok(bytes.into())
     }
 }
 
@@ -435,7 +442,9 @@ pub struct PixelGrid {
     /// Row-major texmap-index bytes. Landscape clones made for script host
     /// contexts and snapshots share this large plane until a terrain write.
     #[serde(with = "hex_bytes")]
-    bytes: Arc<Vec<u8>>,
+    bytes: PagedVec<u8, 256>,
+    #[serde(skip)]
+    column_summaries: RuntimeColumnSummaries,
     /// Sparse direct writes into C4Landscape's presentation-only Surface32.
     /// C++ saves Surface32 as Landscape.png alongside Surface8, so preserve
     /// these replacements across EngineState and snapshot serialization.
@@ -448,7 +457,7 @@ pub struct PixelGrid {
     /// TEXTURE name per texmap index (presentation only: the frontend
     /// samples the texture png per pixel).
     #[serde(default)]
-    texture_names: Vec<Option<String>>,
+    texture_names: Arc<Vec<Option<String>>>,
     /// Bumped on every pixel change — the frontend's render cache key.
     #[serde(default)]
     revision: u64,
@@ -487,13 +496,13 @@ pub struct PixelGrid {
     mask_background: RuntimeMaskBackground,
     /// Pix2Dens: density per texmap index (IFT stripped); index 0 and
     /// unmapped entries are sky (density 0).
-    densities: Vec<i32>,
+    densities: Arc<Vec<i32>>,
     /// Material NAME per texmap index — resolved into [`Self::materials`]
     /// once the engine's `MaterialSet` exists (`Engine::set_landscape`).
-    material_names: Vec<Option<String>>,
+    material_names: Arc<Vec<Option<String>>>,
     /// Pix2Mat: the engine `MaterialId` per texmap index.
     #[serde(default)]
-    materials: Vec<Option<MaterialId>>,
+    materials: Arc<Vec<Option<MaterialId>>>,
     /// C4Landscape::MatCount, rebuilt from the byte plane after material
     /// resolution and updated incrementally on every pixel write.
     #[serde(skip)]
@@ -553,7 +562,7 @@ impl Eq for RuntimeRenderLineage {}
 /// `UpdatePixCnt` keep C++'s table. Runtime-only and derived, so equality
 /// and serialization ignore it like [`RuntimeRenderLineage`].
 #[derive(Debug, Clone, Default)]
-struct RuntimePixCnt(std::sync::OnceLock<Vec<u8>>);
+struct RuntimePixCnt(std::sync::OnceLock<PagedVec<u8, 256>>);
 
 impl PartialEq for RuntimePixCnt {
     fn eq(&self, _other: &Self) -> bool {
@@ -622,13 +631,14 @@ impl PixelGrid {
             texmap_identity: identity,
             width,
             height,
-            bytes: Arc::new(bytes),
+            bytes: bytes.into(),
+            column_summaries: RuntimeColumnSummaries::new(width as usize),
             surface32_pixels: Arc::new(HashMap::new()),
-            densities,
-            material_names,
-            materials,
+            densities: Arc::new(densities),
+            material_names: Arc::new(material_names),
+            materials: Arc::new(materials),
             material_counts: Vec::new(),
-            texture_names,
+            texture_names: Arc::new(texture_names),
             revision: 0,
             render_token,
             render_lineage: RuntimeRenderLineage::default(),
@@ -753,7 +763,7 @@ impl PixelGrid {
             let view = PixelGridMaskReadView {
                 width: self.width,
                 height: self.height,
-                bytes: self.bytes.as_slice(),
+                bytes: &self.bytes,
                 densities: &self.densities,
                 materials: &self.materials,
             };
@@ -782,6 +792,7 @@ impl PixelGrid {
             width,
             height,
             bytes,
+            column_summaries,
             densities,
             materials,
             material_counts,
@@ -793,7 +804,6 @@ impl PixelGrid {
             ..
         } = self;
         let pix_cnt_pitch = (*height as usize).div_ceil(15);
-        let bytes = Arc::make_mut(bytes);
         let mask_background = Arc::make_mut(&mut mask_background.0);
         let mut first_actual_change = true;
 
@@ -846,6 +856,19 @@ impl PixelGrid {
                     pix_cnt,
                     densities,
                     (x as usize / 17) * pix_cnt_pitch + y as usize / 15,
+                    old,
+                    byte,
+                );
+                column_summaries.note_change(
+                    &PixelGridMaskReadView {
+                        width: *width,
+                        height: *height,
+                        bytes,
+                        densities,
+                        materials,
+                    },
+                    x,
+                    y,
                     old,
                     byte,
                 );
@@ -1103,7 +1126,7 @@ impl PixelGrid {
         let same_surface8 =
             (self.revision, self.render_token) == (previous.revision, previous.render_token);
         if same_surface8
-            && !Arc::ptr_eq(&self.bytes, &previous.bytes)
+            && !self.bytes.shares_storage(&previous.bytes)
             && self.bytes.as_slice() != previous.bytes.as_slice()
         {
             return None;
@@ -1170,6 +1193,7 @@ impl PixelGrid {
         None
     }
 
+    #[inline]
     pub fn byte_at(&self, x: i32, y: i32) -> Option<u8> {
         self.slot(x, y).map(|slot| self.bytes[slot])
     }
@@ -1249,7 +1273,8 @@ impl PixelGrid {
             .material_names
             .iter()
             .map(|name| name.as_deref().and_then(&mut lookup))
-            .collect();
+            .collect::<Vec<_>>()
+            .into();
         self.rebuild_material_counts();
     }
 
@@ -1261,6 +1286,7 @@ impl PixelGrid {
     }
 
     fn rebuild_material_counts(&mut self) {
+        self.reset_column_summaries();
         #[cfg(test)]
         MATERIAL_COUNT_FULL_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
         let count = self
@@ -1319,8 +1345,8 @@ impl PixelGrid {
         let right = (cell_x * 17 + 17).min(width);
         let bottom = (cell_y * 15 + 15).min(self.height as usize);
         (cell_y * 15..bottom)
-            .flat_map(|y| self.bytes[y * width + cell_x * 17..y * width + right].iter())
-            .filter(|&&byte| self.density_of(byte) != 0)
+            .flat_map(|y| (cell_x * 17..right).map(move |x| self.bytes[y * width + x]))
+            .filter(|&byte| self.density_of(byte) != 0)
             .fold(0u8, |count, _| count.wrapping_add(1))
     }
 
@@ -1334,13 +1360,15 @@ impl PixelGrid {
     }
 
     /// The maintained `PixCnt` table, built from the plane on first use.
-    fn pix_cnt_cells(&self) -> &[u8] {
-        self.pix_cnt.0.get_or_init(|| self.recount_pix_cnt_cells())
+    fn pix_cnt_cells(&self) -> &PagedVec<u8, 256> {
+        self.pix_cnt
+            .0
+            .get_or_init(|| self.recount_pix_cnt_cells().into())
     }
 
     pub(crate) fn runtime_pix_cnt(&self) -> (usize, &[u8]) {
         let (_, pitch) = self.pix_cnt_dimensions();
-        (pitch, self.pix_cnt_cells())
+        (pitch, self.pix_cnt_cells().as_slice())
     }
 
     /// `_SetPix`'s count maintenance (C4Landscape.cpp:788-798): a pixel joins
@@ -1436,16 +1464,16 @@ impl PixelGrid {
     /// Existing resolved material ids follow their material NAME to newly
     /// allocated texture slots; no pixel byte or render revision changes.
     fn sync_runtime_texmap(&mut self, texmap: &RuntimeTexMapState) {
-        if self.densities == texmap.densities
-            && self.material_names == texmap.material_names
-            && self.texture_names == texmap.texture_names
+        if self.densities.as_ref() == &texmap.densities
+            && self.material_names.as_ref() == &texmap.material_names
+            && self.texture_names.as_ref() == &texmap.texture_names
         {
             return;
         }
         let old_materials = self
             .material_names
             .iter()
-            .zip(&self.materials)
+            .zip(self.materials.iter())
             .filter_map(|(name, material)| Some((name.as_deref()?, (*material)?)))
             .collect::<Vec<_>>();
         let materials = texmap
@@ -1462,12 +1490,13 @@ impl PixelGrid {
                 })
             })
             .collect::<Vec<_>>();
-        let material_mapping_changed = self.materials != materials;
-        self.materials = materials;
-        self.densities.clone_from(&texmap.densities);
+        let material_mapping_changed = self.materials.as_ref() != &materials;
+        self.materials = Arc::new(materials);
+        self.densities = Arc::new(texmap.densities.clone());
+        self.reset_column_summaries();
         self.reset_pix_cnt();
-        self.material_names.clone_from(&texmap.material_names);
-        self.texture_names.clone_from(&texmap.texture_names);
+        self.material_names = Arc::new(texmap.material_names.clone());
+        self.texture_names = Arc::new(texmap.texture_names.clone());
         // The only site that moves either name table after construction.
         self.texmap_identity = texmap_identity(&self.material_names, &self.texture_names);
         if material_mapping_changed {
@@ -1476,7 +1505,7 @@ impl PixelGrid {
     }
 
     fn begin_surface8_change(&mut self) -> bool {
-        let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
+        let storage_was_shared = self.bytes.is_shared();
         let lineage_was_shared = Arc::strong_count(&self.render_lineage.0) > 1;
         if lineage_was_shared {
             self.render_lineage = RuntimeRenderLineage::default();
@@ -1850,7 +1879,7 @@ impl PixelGrid {
         for y in rect.y..rect.y.saturating_add(rect.height) {
             let start = (y * self.width + rect.x) as usize;
             let end = start.saturating_add(rect.width as usize);
-            token = render_token_bytes(token, self.bytes[start..end].iter().copied());
+            token = render_token_bytes(token, (start..end).map(|slot| self.bytes[slot]));
         }
         token
     }
@@ -1873,11 +1902,12 @@ impl PixelGrid {
         let base_revision = self.revision;
         let base_token = self.render_token;
         self.adjust_material_counts_in_rect(rect, false);
-        let bytes = mem::take(Arc::make_mut(&mut self.bytes));
+        let bytes = mem::take(self.bytes.make_contiguous_mut());
         let mut surface =
             crate::chunky::Surface8::from_bytes(self.width as i32, self.height as i32, bytes);
         crate::chunky::polygon(&mut surface, vertices, byte);
-        self.bytes = Arc::new(surface.into_bytes());
+        self.bytes = surface.into_bytes().into();
+        self.reset_column_summaries();
         self.adjust_material_counts_in_rect(rect, true);
         self.update_pix_cnt_in_rect(rect);
         self.revision = self.revision.wrapping_add(1);
@@ -1914,7 +1944,7 @@ impl PixelGrid {
         let base_revision = self.revision;
         let base_token = self.render_token;
         self.adjust_material_counts_in_rect(rect, false);
-        let bytes = mem::take(Arc::make_mut(&mut self.bytes));
+        let bytes = mem::take(self.bytes.make_contiguous_mut());
         let mut surface =
             crate::chunky::Surface8::from_bytes(self.width as i32, self.height as i32, bytes);
         surface.clip(
@@ -1947,7 +1977,8 @@ impl PixelGrid {
         }
         debug_assert!(offsets.next().is_none());
 
-        self.bytes = Arc::new(surface.into_bytes());
+        self.bytes = surface.into_bytes().into();
+        self.reset_column_summaries();
         self.adjust_material_counts_in_rect(rect, true);
         self.update_pix_cnt_in_rect(rect);
         self.revision = self.revision.wrapping_add(1);
@@ -1967,7 +1998,7 @@ impl PixelGrid {
     fn name_for_material(&self, material: MaterialId) -> Option<&str> {
         self.material_names
             .iter()
-            .zip(&self.materials)
+            .zip(self.materials.iter())
             .find_map(|(name, slot)| {
                 (*slot == Some(material))
                     .then_some(name.as_deref())
@@ -2051,7 +2082,9 @@ impl PixelGrid {
                 // PrepareChange normally lifts the masks first
                 // (C4Landscape.cpp:2851-2880); one that lands anyway must not
                 // keep showing the byte a mask saved before it.
-                Arc::make_mut(&mut self.mask_background.0).remove(&slot);
+                if self.mask_background.0.contains_key(&slot) {
+                    Arc::make_mut(&mut self.mask_background.0).remove(&slot);
+                }
             }
             if write == PixelWrite::SetPix {
                 self.schedule_surface32_relight_around(x, y);
@@ -2086,7 +2119,20 @@ impl PixelGrid {
                 old,
                 byte,
             );
-            Arc::make_mut(&mut self.bytes)[slot] = byte;
+            self.column_summaries.note_change(
+                &PixelGridMaskReadView {
+                    width: self.width,
+                    height: self.height,
+                    bytes: &self.bytes,
+                    densities: &self.densities,
+                    materials: &self.materials,
+                },
+                x,
+                y,
+                old,
+                byte,
+            );
+            self.bytes[slot] = byte;
             self.revision = self.revision.wrapping_add(1);
             self.render_token =
                 Self::advance_pixel_render_token(base_token, self.revision, x, y, old, byte);
@@ -2149,6 +2195,34 @@ impl PixelGrid {
     }
 
     fn derived_column(&self, x: usize) -> Option<RasterColumnSummary> {
+        let view = PixelGridMaskReadView {
+            width: self.width,
+            height: self.height,
+            bytes: &self.bytes,
+            densities: &self.densities,
+            materials: &self.materials,
+        };
+        self.column_summaries.0.get(x).map_or_else(
+            || view.scan_column(x),
+            |entry| {
+                Some(
+                    entry
+                        .get_or_init(|| view.scan_column(x).expect("column in bounds"))
+                        .clone(),
+                )
+            },
+        )
+    }
+
+    fn reset_column_summaries(&mut self) {
+        self.column_summaries = RuntimeColumnSummaries::new(self.width as usize);
+    }
+}
+
+impl PixelGridMaskReadView<'_> {
+    fn scan_column(&self, x: usize) -> Option<RasterColumnSummary> {
+        #[cfg(test)]
+        RASTER_COLUMN_FULL_SCANS.with(|scans| scans.set(scans.get() + 1));
         if x >= self.width as usize {
             return None;
         }
@@ -2156,17 +2230,46 @@ impl PixelGrid {
         let width = self.width as usize;
         let byte_at = |y: i32| self.bytes[y as usize * width + x];
         let surface = (0..height)
-            .find(|&y| self.density_of(byte_at(y)) >= C4M_SOLID)
+            .find(|&y| {
+                self.densities
+                    .get((byte_at(y) & 0x7f) as usize)
+                    .copied()
+                    .unwrap_or(0)
+                    >= C4M_SOLID
+            })
             .unwrap_or(height);
+        let mut solid_segments = Vec::new();
+        let mut solid_start = None;
         let mut liquid_segments = Vec::new();
         let mut tunnel_ranges = Vec::new();
         let mut liquid_run = None;
         let mut tunnel_start = None;
         for y in 0..=height {
             let pixel = (y < height).then(|| byte_at(y));
+            let solid = pixel.is_some_and(|byte| {
+                self.densities
+                    .get((byte & 0x7f) as usize)
+                    .copied()
+                    .unwrap_or(0)
+                    >= C4M_SOLID
+            });
+            match (solid, solid_start) {
+                (true, None) => solid_start = Some(y),
+                (false, Some(start)) => {
+                    solid_segments.push(LiquidSegment::new(start, y - 1));
+                    solid_start = None;
+                }
+                _ => {}
+            }
             let liquid_material = pixel.and_then(|byte| {
                 (C4M_LIQUID..C4M_SOLID)
-                    .contains(&self.density_of(byte))
+                    .contains(
+                        &self
+                            .densities
+                            .get((byte & 0x7f) as usize)
+                            .copied()
+                            .unwrap_or(0),
+                    )
                     .then(|| {
                         self.materials
                             .get((byte & 0x7f) as usize)
@@ -2198,17 +2301,117 @@ impl PixelGrid {
         }
         Some(RasterColumnSummary {
             surface,
+            solid_segments,
             liquid_segments,
             tunnel_ranges,
         })
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RasterColumnSummary {
     surface: i32,
+    solid_segments: Vec<LiquidSegment>,
     liquid_segments: Vec<LiquidSegment>,
     tunnel_ranges: Vec<(i32, i32)>,
 }
+
+#[derive(Debug, Clone, Default)]
+struct RuntimeColumnSummaries(PagedVec<Arc<OnceLock<RasterColumnSummary>>>);
+
+impl RuntimeColumnSummaries {
+    fn new(width: usize) -> Self {
+        Self(
+            (0..width)
+                .map(|_| Arc::new(OnceLock::new()))
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    }
+
+    fn note_change(&mut self, view: &PixelGridMaskReadView<'_>, x: i32, y: i32, old: u8, new: u8) {
+        if self.0.len() != view.width as usize {
+            *self = Self::new(view.width as usize);
+        }
+        let x = x as usize;
+        let entry = &mut self.0[x];
+        if entry.get().is_none() {
+            // An unused cache must not turn a PXS/mass-mover write into a
+            // full-height scan. Detach its empty cell before later readers
+            // initialize it from this branch's pixels.
+            if Arc::strong_count(entry) > 1 {
+                *entry = Arc::new(OnceLock::new());
+            }
+            return;
+        }
+        let summary = Arc::make_mut(entry).get_mut().expect("initialized column");
+        let density = |byte: u8| {
+            view.densities
+                .get((byte & 0x7f) as usize)
+                .copied()
+                .unwrap_or(0)
+        };
+        if (density(old) >= C4M_SOLID) != (density(new) >= C4M_SOLID) {
+            let mut column = LiquidColumn {
+                segments: mem::take(&mut summary.solid_segments),
+            };
+            if density(new) >= C4M_SOLID {
+                column.insert_pixel(y, None);
+            } else {
+                column.remove_pixel(y);
+            }
+            summary.surface = column
+                .segments
+                .first()
+                .map_or(view.height as i32, |segment| segment.top);
+            summary.solid_segments = column.segments;
+        }
+        let liquid = |byte: u8| {
+            (C4M_LIQUID..C4M_SOLID).contains(&density(byte)).then(|| {
+                view.materials
+                    .get((byte & 0x7f) as usize)
+                    .copied()
+                    .flatten()
+            })
+        };
+        if liquid(old) != liquid(new) {
+            let mut column = LiquidColumn {
+                segments: mem::take(&mut summary.liquid_segments),
+            };
+            column.remove_pixel(y);
+            if let Some(material) = liquid(new) {
+                column.insert_pixel(y, material);
+            }
+            summary.liquid_segments = column.segments;
+        }
+        if (old ^ new) & 0x80 != 0 {
+            let mut column = LiquidColumn {
+                segments: summary
+                    .tunnel_ranges
+                    .iter()
+                    .map(|&(top, bottom)| LiquidSegment::new(top, bottom))
+                    .collect(),
+            };
+            if new & 0x80 != 0 {
+                column.insert_pixel(y, None);
+            } else {
+                column.remove_pixel(y);
+            }
+            summary.tunnel_ranges = column
+                .segments
+                .into_iter()
+                .map(|segment| (segment.top, segment.bottom))
+                .collect();
+        }
+    }
+}
+
+impl PartialEq for RuntimeColumnSummaries {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for RuntimeColumnSummaries {}
 
 /// The material properties needed when a runtime landscape operation adds a
 /// texture-map entry. This is deliberately narrower than the complete
@@ -3172,7 +3375,7 @@ pub(crate) enum InsertMaterialDestination {
 struct LandscapeInitialPixels {
     width: u32,
     height: u32,
-    bytes: Arc<Vec<u8>>,
+    bytes: PagedVec<u8, 256>,
 }
 
 /// The background byte under every currently-put `C4SolidMask` pixel, keyed by
@@ -3234,10 +3437,14 @@ impl PartialEq for RuntimeEstimatedHeight {
 
 impl Eq for RuntimeEstimatedHeight {}
 
+fn tunnels_are_empty(tunnels: &Arc<HashMap<u32, Vec<(i32, i32)>>>) -> bool {
+    tunnels.is_empty()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Landscape {
     width: u32,
-    surface: Vec<i32>,
+    surface: PagedVec<i32>,
     /// C4Landscape::Mode. Synthetic/old snapshots default to the native
     /// pre-initialization value; scenario loading assigns the actual mode.
     #[serde(default, skip_serializing_if = "landscape_mode_is_undefined")]
@@ -3254,9 +3461,9 @@ pub struct Landscape {
     )]
     shade_materials: bool,
     #[serde(default)]
-    liquids: Vec<LiquidColumn>,
+    liquids: PagedVec<LiquidColumn>,
     #[serde(default)]
-    solid_materials: Vec<Option<MaterialId>>,
+    solid_materials: PagedVec<Option<MaterialId>>,
     #[serde(default)]
     default_solid_material: Option<MaterialId>,
     #[serde(default)]
@@ -3266,8 +3473,8 @@ pub struct Landscape {
     /// Wind is dead inside (`GBackWind`, C4Wrappers.h:189-192). The map
     /// renderer that paints IFT from Landscape.txt still needs the pixel
     /// landscape; scenarios populate this via `set_tunnel_column`.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    tunnels: HashMap<u32, Vec<(i32, i32)>>,
+    #[serde(default, skip_serializing_if = "tunnels_are_empty")]
+    tunnels: Arc<HashMap<u32, Vec<(i32, i32)>>>,
     /// The real landscape height (`GBackHgt`, C4Landscape.h): the column
     /// model can only estimate it from surface depths, which undershoots
     /// when no column is all-sky. Search loops and border rules bound on
@@ -3309,7 +3516,7 @@ pub struct Landscape {
     /// Runtime texmap/map-creator inputs required by DrawMap and direct
     /// material raster writes. Old saves and synthetic landscapes omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    raster_state: Option<LandscapeRasterState>,
+    raster_state: Option<Arc<LandscapeRasterState>>,
     /// Raw base Surface8 used by SaveDiff. This is C++'s runtime-only
     /// `pInitial`; legacy scenario loading recreates it before ApplyDiff.
     #[serde(skip)]
@@ -3600,15 +3807,15 @@ impl Landscape {
         let size = width as usize;
         Ok(Self {
             width,
-            surface,
+            surface: surface.into(),
             mode: LANDSCAPE_MODE_UNDEFINED,
             modulation: 0,
             shade_materials: true,
-            liquids: vec![LiquidColumn::default(); size],
-            solid_materials: vec![default_material; size],
+            liquids: vec![LiquidColumn::default(); size].into(),
+            solid_materials: vec![default_material; size].into(),
             default_solid_material: default_material,
             default_liquid_material: None,
-            tunnels: HashMap::new(),
+            tunnels: Arc::new(HashMap::new()),
             world_height: None,
             estimated_height_cache: RuntimeEstimatedHeight::default(),
             pixels: None,
@@ -3665,24 +3872,24 @@ impl Landscape {
 
     pub fn map_seed(&self) -> i32 {
         self.raster_state
-            .as_ref()
+            .as_deref()
             .map_or(0, LandscapeRasterState::map_seed)
     }
 
     pub(crate) fn set_map_seed(&mut self, map_seed: i32) {
-        if let Some(state) = self.raster_state.as_mut() {
+        if let Some(state) = self.raster_state.as_mut().map(Arc::make_mut) {
             state.set_map_seed(map_seed);
         }
     }
 
     pub fn map_changed(&self) -> bool {
         self.raster_state
-            .as_ref()
+            .as_deref()
             .is_some_and(LandscapeRasterState::map_changed)
     }
 
     pub(crate) fn set_map_changed(&mut self) {
-        if let Some(state) = self.raster_state.as_mut() {
+        if let Some(state) = self.raster_state.as_mut().map(Arc::make_mut) {
             state.set_map_changed();
         }
     }
@@ -3755,7 +3962,7 @@ impl Landscape {
     ) -> Result<bool, LandscapePersistenceError> {
         let Some(texmap) = self
             .raster_state
-            .as_ref()
+            .as_deref()
             .map(LandscapeRasterState::texmap)
             .filter(|texmap| texmap.entries_added())
         else {
@@ -3852,7 +4059,7 @@ impl Landscape {
         self.initial_pixels.0 = Some(LandscapeInitialPixels {
             width: grid.width,
             height: grid.height,
-            bytes: Arc::clone(&grid.bytes),
+            bytes: grid.bytes.clone(),
         });
         Ok(())
     }
@@ -3889,7 +4096,7 @@ impl Landscape {
             return Ok(Some(clonk_resources::bitmap::IndexedBitmap {
                 width: grid.width,
                 height: grid.height,
-                indices: grid.bytes.as_ref().clone(),
+                indices: grid.bytes.as_vec().clone(),
             }));
         }
 
@@ -4006,19 +4213,19 @@ impl Landscape {
     }
 
     pub(crate) fn set_raster_state(&mut self, state: LandscapeRasterState) {
-        self.raster_state = Some(state);
+        self.raster_state = Some(Arc::new(state));
     }
 
     pub(crate) fn raster_state(&self) -> Option<&LandscapeRasterState> {
-        self.raster_state.as_ref()
+        self.raster_state.as_deref()
     }
 
     pub(crate) fn raster_state_mut(&mut self) -> Option<&mut LandscapeRasterState> {
-        self.raster_state.as_mut()
+        self.raster_state.as_mut().map(Arc::make_mut)
     }
 
     pub(crate) fn clear_retained_map(&mut self) {
-        if let Some(state) = self.raster_state.as_mut() {
+        if let Some(state) = self.raster_state.as_mut().map(Arc::make_mut) {
             state.clear_map();
         }
     }
@@ -4044,7 +4251,7 @@ impl Landscape {
             raster_state,
             ..
         } = self;
-        let Some(state) = raster_state.as_mut() else {
+        let Some(state) = raster_state.as_mut().map(Arc::make_mut) else {
             return false;
         };
         state.replace_texmap(texmap, force_repaint);
@@ -4071,7 +4278,7 @@ impl Landscape {
                 initial_pixels,
                 ..
             } = self;
-            let Some(state) = raster_state.as_mut() else {
+            let Some(state) = raster_state.as_mut().map(Arc::make_mut) else {
                 return false;
             };
             let (merged, remap) = RuntimeTexMapState::replay_section_lookups(live, lookups);
@@ -4085,14 +4292,14 @@ impl Landscape {
                 creator.remap_material_colors(&remap);
             }
             if let Some(initial) = initial_pixels.0.as_mut() {
-                for byte in Arc::make_mut(&mut initial.bytes) {
+                for byte in initial.bytes.make_contiguous_mut() {
                     remap_byte(byte);
                 }
                 if let Some(pixels) = pixels.as_mut() {
-                    pixels.bytes = Arc::clone(&initial.bytes);
+                    pixels.bytes = initial.bytes.clone();
                 }
             } else if let Some(pixels) = pixels.as_mut() {
-                for byte in Arc::make_mut(&mut pixels.bytes) {
+                for byte in pixels.bytes.make_contiguous_mut() {
                     remap_byte(byte);
                 }
             }
@@ -4100,6 +4307,9 @@ impl Landscape {
             if let Some(pixels) = pixels.as_mut() {
                 pixels.sync_runtime_texmap(state.texmap());
             }
+        }
+        if let Some(grid) = self.pixels.as_mut() {
+            grid.reset_column_summaries();
         }
         self.refresh_all_raster_columns();
         if let Some(diff) = raw_diff {
@@ -4119,7 +4329,7 @@ impl Landscape {
             raster_state,
             ..
         } = self;
-        let Some(state) = raster_state.as_mut() else {
+        let Some(state) = raster_state.as_mut().map(Arc::make_mut) else {
             return None;
         };
         let (replayed, remap) =
@@ -4172,7 +4382,7 @@ impl Landscape {
         let target_height = map_height.saturating_mul(map_zoom).max(0) as usize;
         let grid_width = grid.width as usize;
         let grid_height = grid.height as usize;
-        let bytes = Arc::make_mut(&mut grid.bytes);
+        let bytes = grid.bytes.make_contiguous_mut();
         bytes.fill(0);
         let copy_width = target_width.min(grid_width);
         let copy_height = target_height.min(grid_height);
@@ -4183,6 +4393,7 @@ impl Landscape {
                 .copy_from_slice(&synthesized[source..source + copy_width]);
         }
         grid.reset_pix_cnt();
+        grid.reset_column_summaries();
         self.refresh_all_raster_columns();
         if self.save_initial().is_err() {
             return false;
@@ -4204,7 +4415,7 @@ impl Landscape {
         old_index: u8,
         new_index: u8,
     ) -> bool {
-        let Some(state) = self.raster_state.as_mut() else {
+        let Some(state) = self.raster_state.as_mut().map(Arc::make_mut) else {
             return false;
         };
         state.replace_map_color(old_index, new_index);
@@ -4215,7 +4426,7 @@ impl Landscape {
     /// Replay C4TextureMap::RemoveEntry without HandleTexMapUpdate: retained
     /// entries change, but Surface8 and its Pix2* cache tables remain intact.
     pub(crate) fn clear_runtime_texmap_entries(&mut self, slots: &[u8]) -> bool {
-        let Some(state) = self.raster_state.as_mut() else {
+        let Some(state) = self.raster_state.as_mut().map(Arc::make_mut) else {
             return false;
         };
         let texmap = state.texmap_mut();
@@ -4235,7 +4446,7 @@ impl Landscape {
         let Some(texture_usage) = self.texture_index_usage() else {
             return false;
         };
-        let Some(state) = self.raster_state.as_mut() else {
+        let Some(state) = self.raster_state.as_mut().map(Arc::make_mut) else {
             return false;
         };
         state.texmap_mut().remove_unused_entries(texture_usage);
@@ -4246,7 +4457,7 @@ impl Landscape {
         &mut self,
         creator: crate::map_creator_s2::MapCreatorS2State,
     ) -> bool {
-        let Some(state) = self.raster_state.as_mut() else {
+        let Some(state) = self.raster_state.as_mut().map(Arc::make_mut) else {
             return false;
         };
         state.set_map_creator(Some(creator));
@@ -4507,6 +4718,17 @@ impl Landscape {
         self.refresh_raster_columns(0..width);
     }
 
+    /// Share the pre-edit column baseline with callback clones and their
+    /// authoritative replay. Unused columns stay lazy for native pixel writers.
+    pub(crate) fn prepare_raster_columns(&self, columns: Range<usize>) {
+        if let Some(grid) = self.pixels.as_ref() {
+            let width = grid.width as usize;
+            for x in columns.start.min(width)..columns.end.min(width) {
+                let _ = grid.derived_column(x);
+            }
+        }
+    }
+
     pub(crate) fn refresh_raster_columns(&mut self, columns: Range<usize>) {
         self.invalidate_estimated_height();
         let end = columns.end.min(self.surface.len());
@@ -4516,12 +4738,18 @@ impl Landscape {
             let Some(summary) = self.pixels.as_ref().and_then(|grid| grid.derived_column(x)) else {
                 continue;
             };
-            self.surface[x] = summary.surface;
-            self.liquids[x] = LiquidColumn::from_segments(summary.liquid_segments);
+            if self.surface[x] != summary.surface {
+                self.surface[x] = summary.surface;
+            }
+            if self.liquids[x].segments != summary.liquid_segments {
+                self.liquids[x] = LiquidColumn::from_segments(summary.liquid_segments);
+            }
             if summary.tunnel_ranges.is_empty() {
-                self.tunnels.remove(&(x as u32));
-            } else {
-                self.tunnels.insert(x as u32, summary.tunnel_ranges);
+                if self.tunnels.contains_key(&(x as u32)) {
+                    Arc::make_mut(&mut self.tunnels).remove(&(x as u32));
+                }
+            } else if self.tunnels.get(&(x as u32)) != Some(&summary.tunnel_ranges) {
+                Arc::make_mut(&mut self.tunnels).insert(x as u32, summary.tunnel_ranges);
             }
         }
     }
@@ -4553,7 +4781,7 @@ impl Landscape {
     ) -> Option<R> {
         let result = {
             let pixels = self.pixels.as_mut()?;
-            let state = self.raster_state.as_mut()?;
+            let state = self.raster_state.as_mut().map(Arc::make_mut)?;
             let result = change(pixels, state);
             pixels.sync_runtime_texmap(state.texmap());
             // FinishChange relights synchronously, so a later direct
@@ -4580,7 +4808,7 @@ impl Landscape {
             raster_state,
             ..
         } = self;
-        let Some(state) = raster_state.as_mut() else {
+        let Some(state) = raster_state.as_mut().map(Arc::make_mut) else {
             return 0;
         };
         let occupied_before = state
@@ -4622,7 +4850,7 @@ impl Landscape {
             raster_state,
             ..
         } = self;
-        let state = raster_state.as_mut()?;
+        let state = raster_state.as_mut().map(Arc::make_mut)?;
         let occupied_before = state
             .texmap()
             .material_names
@@ -5145,9 +5373,9 @@ impl Landscape {
     /// Mark inclusive y ranges of a column as tunnel background (IFT).
     pub fn set_tunnel_column(&mut self, x: u32, ranges: Vec<(i32, i32)>) {
         if ranges.is_empty() {
-            self.tunnels.remove(&x);
+            Arc::make_mut(&mut self.tunnels).remove(&x);
         } else {
-            self.tunnels.insert(x, ranges);
+            Arc::make_mut(&mut self.tunnels).insert(x, ranges);
         }
     }
 
@@ -5198,7 +5426,7 @@ impl Landscape {
         self.default_solid_material = material;
         let desired_len = self.surface.len();
         if self.solid_materials.len() != desired_len {
-            self.solid_materials = vec![material; desired_len];
+            self.solid_materials = vec![material; desired_len].into();
         } else {
             for slot in &mut self.solid_materials {
                 *slot = material;
@@ -8448,10 +8676,10 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.modulation = data.modulation;
         landscape.shade_materials = data.shade_materials;
         landscape.mode = data.mode;
-        landscape.liquids = data.liquids;
-        landscape.solid_materials = data.solid_materials;
+        landscape.liquids = data.liquids.into();
+        landscape.solid_materials = data.solid_materials.into();
         landscape.default_liquid_material = data.default_liquid_material;
-        landscape.tunnels = data.tunnels;
+        landscape.tunnels = Arc::new(data.tunnels);
         landscape.world_height = data.world_height;
         landscape.pixels = data.pixels;
         if let Some(grid) = landscape.pixels.as_mut() {
@@ -8463,7 +8691,7 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.top_open = data.top_open;
         landscape.bottom_open = data.bottom_open;
         landscape.vehicle_material = data.vehicle_material;
-        landscape.raster_state = data.raster_state;
+        landscape.raster_state = data.raster_state.map(Arc::new);
         Ok(landscape)
     }
 }
@@ -8472,6 +8700,108 @@ impl<'de> Deserialize<'de> for Landscape {
 mod tests {
     use super::*;
     use clonk_resources::MaterialLibrary;
+
+    #[test]
+    fn warm_terrain_edits_do_not_rescan_column_height() {
+        let mut landscape = raster_grid_landscape(64, 1536, vec![1; 64 * 1536]);
+        landscape.refresh_all_raster_columns();
+        RASTER_COLUMN_FULL_SCANS.with(|scans| scans.set(0));
+        for y in 700..720 {
+            let mut preview = landscape.clone();
+            preview.clear_pix(8, y);
+            preview.refresh_raster_columns(8..9);
+            assert_eq!(preview.surface_height(8), Some(0));
+            assert_eq!(preview.grid_byte_at(8, y), Some(0));
+            assert_eq!(landscape.grid_byte_at(8, y), Some(1));
+        }
+        RASTER_COLUMN_FULL_SCANS.with(|scans| {
+            assert_eq!(
+                scans.get(),
+                0,
+                "a warm interior edit must update its derived column without a full-height scan"
+            )
+        });
+    }
+
+    #[test]
+    fn removing_a_floating_surface_pixel_does_not_scan_the_empty_gap() {
+        let mut bytes = vec![0; 1536];
+        bytes[0] = 1;
+        bytes[1500] = 1;
+        let mut landscape = raster_grid_landscape(1, 1536, bytes);
+        landscape.refresh_all_raster_columns();
+        RASTER_SURFACE_PROBES.with(|probes| probes.set(0));
+        landscape.clear_pix(0, 0);
+        landscape.refresh_raster_columns(0..1);
+        assert_eq!(landscape.surface_height(0), Some(1500));
+        RASTER_SURFACE_PROBES.with(|probes| {
+            assert_eq!(
+                probes.get(),
+                0,
+                "a cached surface removal must jump to the next solid span"
+            )
+        });
+    }
+
+    #[test]
+    fn cached_columns_match_full_scans_after_ordered_pixel_writes() {
+        // SetPix/_SetPix preserve Surface8 and IFT exactly
+        // (C4Landscape.cpp:755-761,782-800). The former full scan remains
+        // the reference for this Rust-only derived-column acceleration.
+        let mut grid = PixelGrid::new(
+            33,
+            67,
+            vec![0; 33 * 67],
+            vec![0, 100, 25, 49, 0],
+            vec![None; 5],
+            vec![None; 5],
+        );
+        grid.materials = Arc::new(vec![
+            None,
+            MaterialId::new(0),
+            MaterialId::new(1),
+            MaterialId::new(2),
+            None,
+        ]);
+        for x in 0..33 {
+            let _ = grid.derived_column(x);
+        }
+        let original = grid.clone();
+        let mut random = 12345u32;
+        for index in 0..4000 {
+            random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+            let x = (random % 33) as i32;
+            let y = ((random / 33) % 67) as i32;
+            let byte = ((random / 2211) % 5) as u8 | if index % 3 == 0 { 0x80 } else { 0 };
+            if index % 4 == 0 {
+                grid.write_mask_byte(x, y, byte);
+            } else {
+                grid.write_byte(x, y, byte);
+            }
+            let view = PixelGridMaskReadView {
+                width: grid.width,
+                height: grid.height,
+                bytes: &grid.bytes,
+                densities: &grid.densities,
+                materials: &grid.materials,
+            };
+            assert_eq!(
+                grid.derived_column(x as usize),
+                view.scan_column(x as usize),
+                "write {index}"
+            );
+        }
+        assert_eq!(original.bytes(), &[0; 33 * 67]);
+        let json = serde_json::to_string(&grid).unwrap();
+        let restored: PixelGrid = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&grid).unwrap()
+        );
+        for x in 0..33 {
+            assert_eq!(restored.derived_column(x), grid.derived_column(x));
+        }
+    }
 
     /// A 100-wide world with ground from y=50 down and an explicit world
     /// height (GBackHgt) of 400, mirroring a real zoomed map landscape.
@@ -8962,9 +9292,9 @@ mod tests {
         let mut synced = grid(&["Earth"], &["earth"]);
         let before = synced.texmap_identity();
         let mut texmap = RuntimeTexMapState::default();
-        texmap.densities = synced.densities.clone();
-        texmap.material_names = synced.material_names.clone();
-        texmap.texture_names = synced.texture_names.clone();
+        texmap.densities = synced.densities.as_ref().clone();
+        texmap.material_names = synced.material_names.as_ref().clone();
+        texmap.texture_names = synced.texture_names.as_ref().clone();
         synced.sync_runtime_texmap(&texmap);
         assert_eq!(
             synced.texmap_identity(),
@@ -10071,12 +10401,12 @@ func MoveMask(int x, int y)
         // per-pixel mutation sequence, including doubled MCVehic writes.
         let grid = || {
             let mut grid = blank_pixel_grid(4, 2, vec![1, 1, 3, 3, 1, 1, 3, 3], 128);
-            grid.materials = vec![
+            grid.materials = Arc::new(vec![
                 None,
                 MaterialId::new(0),
                 MaterialId::new(1),
                 MaterialId::new(2),
-            ];
+            ]);
             grid.rebuild_material_counts();
             grid
         };
@@ -10124,8 +10454,8 @@ func MoveMask(int x, int y)
         // a storage batching seam must not turn that no-op into a snapshot or
         // render-lineage split.
         let mut grid = blank_pixel_grid(2, 2, vec![2; 4], 128);
-        grid.materials = vec![None, None, MaterialId::new(0)];
-        let bytes = Arc::clone(&grid.bytes);
+        grid.materials = Arc::new(vec![None, None, MaterialId::new(0)]);
+        let bytes = grid.bytes.clone();
         let background = Arc::clone(&grid.mask_background.0);
         let lineage = Arc::clone(&grid.render_lineage.0);
         let anchor = grid.render_anchor();
@@ -10148,7 +10478,7 @@ func MoveMask(int x, int y)
             callbacks,
             vec![(7, Some(2), false), (8, None, false), (9, None, false)]
         );
-        assert!(Arc::ptr_eq(&grid.bytes, &bytes));
+        assert!(grid.bytes.shares_storage(&bytes));
         assert!(Arc::ptr_eq(&grid.mask_background.0, &background));
         assert!(Arc::ptr_eq(&grid.render_lineage.0, &lineage));
         assert_eq!(
@@ -11556,7 +11886,7 @@ func TransactionThenRaw()
         // C4Landscape.cpp:2881-2896). Either way the maintained table must
         // equal a fresh count over the plane.
         let mut grid = pix_cnt_fixture_grid();
-        assert_eq!(grid.pix_cnt_cells(), &[0; 9][..]);
+        assert_eq!(grid.pix_cnt_cells().as_slice(), &[0; 9][..]);
 
         grid.set_byte(20, 20, 1);
         grid.set_byte(21, 20, 1 | 0x80);
@@ -11578,7 +11908,7 @@ func TransactionThenRaw()
         // plane to clear every pixel (it clips the draw to the plane).
         grid.draw_polygon(&[(-1, -1), (41, -1), (41, 41), (-1, 41)], 0);
         assert_eq!(grid.pix_cnt_cells().to_vec(), grid.recount_pix_cnt_cells());
-        assert_eq!(grid.pix_cnt_cells(), &[0; 9][..]);
+        assert_eq!(grid.pix_cnt_cells().as_slice(), &[0; 9][..]);
     }
 
     #[test]
@@ -12081,7 +12411,7 @@ func TransactionThenRaw()
 
         let mut stale_cache = frozen_temperature_pixel_landscape(&materials);
         let grid = stale_cache.pixels.as_mut().expect("pixel grid exists");
-        grid.material_names[40] = Some("Stale".to_string());
+        Arc::make_mut(&mut grid.material_names)[40] = Some("Stale".to_string());
         grid.resolve_materials(|name| materials.id_of(name));
         assert_eq!(grid.material_for_byte(40), Some(stale));
         let action = stale_cache
