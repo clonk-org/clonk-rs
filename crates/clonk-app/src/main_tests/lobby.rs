@@ -6366,6 +6366,10 @@ fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
 
 #[test]
 fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
+    initial_full_lobby_network_join_sample();
+}
+
+fn initial_full_lobby_network_join_sample() {
     // C++ enters DoLobby only after network initialization, initial PlayerInfo
     // publication, and resource registration, then reaches and acknowledges
     // GS_Lobby with MainDlg alive (src/C4Game.cpp:361-409,3823-3844;
@@ -6724,6 +6728,10 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
 
 #[test]
 fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
+    selected_clonkmars_host_reference_sample();
+}
+
+fn selected_clonkmars_host_reference_sample() {
     // Native opens the scenario, initializes the host, and enters DoLobby
     // before the full InitGame load begins (src/C4Game.cpp:422-457,3872-3906).
     let _lock = env_lock().lock();
