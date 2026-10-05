@@ -4,6 +4,20 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-10-05
+
+### Bug fixes
+
+- Resample latency without retrying functional failures (#1854)
+
+### Features
+
+- Use modern character keyboard defaults (#1855)
+
+### Performance
+
+- Avoid whole-world copies for small terrain edits (#1853)
+
 ## [1.4.1] - 2026-10-03
 
 ### Bug fixes
