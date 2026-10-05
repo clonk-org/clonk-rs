@@ -7,6 +7,8 @@ use clonk_engine::{
 use clonk_graphics::{clonk_font::ClonkFont, Color};
 use std::collections::HashMap;
 
+pub mod latency;
+
 pub fn packed_test_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
     const HEADER_SIZE: usize = 204;
     const ENTRY_SIZE: usize = 316;
