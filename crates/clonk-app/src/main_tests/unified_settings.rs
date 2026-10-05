@@ -752,7 +752,7 @@ fn unified_settings_names_a_rebound_keys_default_by_its_key() {
         .unwrap();
     let details = &app.unified_settings.as_ref().unwrap().controller.settings[index].details;
     assert_eq!(details.display_value.as_deref(), Some("F12"));
-    assert_eq!(details.default_display.as_deref(), Some("Q"));
+    assert_eq!(details.default_display.as_deref(), Some("1"));
 }
 
 #[test]
@@ -917,6 +917,68 @@ fn unified_settings_turn_on_controller_menus_with_a_check_box() {
     assert_eq!(
         app.config.deferred.get("Controls", "GamepadGuiControl"),
         Some("1")
+    );
+}
+
+#[test]
+fn unified_settings_start_on_the_selected_characters_keyboard() {
+    use clonk_frontend::settings_overlay::{ControlDevice, ControlSet, SettingsCategory};
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.app_paths = None;
+    app.players.selected_file = Some(clonk_engine::player_file::PlayerFile {
+        name: "Player".into(),
+        pref_control: 3,
+        ..Default::default()
+    });
+    app.open_unified_settings(SettingsCategory::Controls)
+        .unwrap();
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert_eq!(
+        controller.current_control_set(),
+        Some(ControlSet {
+            device: ControlDevice::Keyboard,
+            index: 3,
+        })
+    );
+    assert_eq!(
+        controller.control_set_caption().as_deref(),
+        Some("Keyboard 4 · used by Player")
+    );
+}
+
+#[test]
+fn unified_settings_new_character_uses_keyboard_one_with_wasd() {
+    use clonk_frontend::settings_overlay::{ControlDevice, ControlSet, SettingsCategory};
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.app_paths = None;
+    app.players.selected_file = Some(clonk_engine::player_file::PlayerFile {
+        pref_control: 3,
+        ..Default::default()
+    });
+    app.open_new_startup_player_properties();
+    assert_eq!(
+        app.startup
+            .player_properties_dialog
+            .as_ref()
+            .unwrap()
+            .controller
+            .player()
+            .pref_control,
+        0
+    );
+    app.open_unified_settings(SettingsCategory::Controls)
+        .unwrap();
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert_eq!(
+        controller.current_control_set(),
+        Some(ControlSet {
+            device: ControlDevice::Keyboard,
+            index: 0,
+        })
+    );
+    assert_eq!(
+        app.bindings.key_for(ControlBindingId::Up),
+        Some(VirtualKeyCode::KeyW)
     );
 }
 

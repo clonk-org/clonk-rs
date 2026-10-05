@@ -2836,7 +2836,7 @@ impl GameApp {
             })
             .unwrap_or_default();
         let show_folder_maps = load_show_folder_maps(paths);
-        let bindings = KeyboardBindings::load(paths);
+        let bindings = KeyboardBindings::load(paths, compat_profile);
         let gamepad_bindings = GamepadBindings::load(paths);
         let gamepads = if cfg!(test) || !gamepads_enabled {
             // Global disable mirrors native's null C4GamePadControl. Synthetic

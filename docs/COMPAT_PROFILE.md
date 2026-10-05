@@ -135,6 +135,13 @@ It is a recorded measurement, not a gate: 6 of 6 rounds measurable and 0
 desynced each way on 2026-08-27, after clonk-org/clonk-rs#1369, and it needs a
 locally built oracle to repeat.
 
+Normal installs start Keyboard 1 with WASD movement, Q to throw, E to dig,
+1/2/3 for selection, Z for the player menu, Tab for Special 1, and F for
+Special 2. New characters use Keyboard 1; settings initially show the current
+character's selected control set. The compatibility profile keeps the oracle's
+platform/locale keyboard defaults. Explicit saved bindings override either
+profile's defaults, and reset restores the active profile's layout.
+
 ### Transport
 
 The port speaks the pinned C++ wire protocol: `C4Network` PID admission with the
@@ -324,6 +331,7 @@ restores C++'s definition-transfer default.
 | --- | --- | --- |
 | `pres-remaster-family` | reverted | `Graphics.Remaster` is the master switch for ten opt-in presentation divergences (HighDpiCursor, Mipmaps, SmoothLandscape, FineFogOfWar, HDExactBlits, ShaderLandscape, LoaderAspect, SnapTextToPixels, SkyDither, SmoothPresentation). Each is off by default; the profile forces the whole family off. |
 | `pres-render-inactive` | reverted | `Graphics.RenderInactive` defaults to both bits so an Alt-Tabbed game keeps drawing; C++ adapts `Console` alone. Only the default diverges — a written value is honoured verbatim, and `RenderInactive=2` restores C++ exactly. The profile reverts the default at startup, once the command line has resolved the requested profile, and still honours a written value under either profile: no overlay in the profile overrules a choice the player made explicitly. The advanced-config editor keeps materializing the port default, because the profile never rewrites a saved key. Owned by clonk-org/clonk-rs#57. |
+| `pres-keyboard-one-wasd` | reverted | Normal installs use WASD and the 1/2/3, Q/E, Z, Tab and F layout for Keyboard 1. The profile retains C++'s platform/locale defaults; explicit saved keys and keyboard sets 2–4 stay unchanged. |
 | `pres-first-run-scale` | reverted | The first-run application scale is seeded from the monitor's pixel density; C++ starts every install at `Scale=100`, which on a 2x panel is an 800x600 device-pixel window with a 14px font. |
 | `pres-scale-cap` | reverted | The Options scale spinbox and slider cap at 400 rather than C++'s 300, so a 4x panel can express the classic 800x600 logical layout. The slider mapping and scale-test flow are unchanged. |
 | `pres-monitor-selection` | kept | `Config.Graphics.Monitor` selects the startup monitor. The oracle's SDL/GL build stores the row but never reads it back, so the default and every value below it keep the pre-existing behaviour; only an explicit positive index diverges. |

@@ -1,5 +1,6 @@
 use std::{fs, io::ErrorKind};
 
+use crate::settings::CompatProfile;
 use clonk_core::std_config::Config;
 use clonk_engine::{CommandKind, ControlButton, ControlCommand, ControlEvent};
 use clonk_platform::AppPaths;
@@ -38,8 +39,8 @@ impl ControlBindingId {
         ControlBindingId::Special2,
     ];
 
-    pub fn default_key(self) -> VirtualKeyCode {
-        cpp_default_keyboard_keys(is_german_system())[0][self.spec().index]
+    pub fn default_key(self, profile: CompatProfile) -> VirtualKeyCode {
+        default_keyboard_keys(profile)[0][self.spec().index]
     }
 
     fn spec(self) -> &'static ControlBindingSpec {
@@ -50,6 +51,7 @@ impl ControlBindingId {
 /// Keyboard control bindings backed by the legacy `Config.Controls` section.
 #[derive(Debug, Clone)]
 pub struct KeyboardBindings {
+    profile: CompatProfile,
     keys: [[VirtualKeyCode; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT],
 }
 
@@ -166,15 +168,15 @@ impl KeyboardBindings {
 
     /// Loads bindings from the user config, falling back to the built-in defaults when parsing
     /// fails or no user configuration is available.
-    pub fn load(paths: Option<&AppPaths>) -> Self {
-        let mut bindings = KeyboardBindings::default_bindings();
+    pub fn load(paths: Option<&AppPaths>, profile: CompatProfile) -> Self {
+        let mut bindings = KeyboardBindings::default_bindings(profile);
         let Some(paths) = paths else {
             return bindings;
         };
         let config_path = paths.config_file();
         match Config::load(&config_path) {
             Ok(config) => {
-                if let Some(overrides) = KeyboardBindings::from_config(&config) {
+                if let Some(overrides) = KeyboardBindings::from_config(&config, profile) {
                     bindings = overrides;
                 }
             }
@@ -191,8 +193,8 @@ impl KeyboardBindings {
         bindings
     }
 
-    fn from_config(config: &Config) -> Option<Self> {
-        let mut bindings = KeyboardBindings::default_bindings();
+    fn from_config(config: &Config, profile: CompatProfile) -> Option<Self> {
+        let mut bindings = KeyboardBindings::default_bindings(profile);
         let mut any_override = false;
 
         for set_index in 0..KEYBOARD_SET_COUNT {
@@ -211,9 +213,10 @@ impl KeyboardBindings {
         }
     }
 
-    fn default_bindings() -> Self {
+    fn default_bindings(profile: CompatProfile) -> Self {
         Self {
-            keys: cpp_default_keyboard_keys(is_german_system()),
+            profile,
+            keys: default_keyboard_keys(profile),
         }
     }
 
@@ -225,8 +228,12 @@ impl KeyboardBindings {
         self.keys.get(control_set).map(|keys| keys[id.spec().index])
     }
 
-    pub fn default_key_for_set(control_set: usize, id: ControlBindingId) -> Option<VirtualKeyCode> {
-        cpp_default_keyboard_keys(is_german_system())
+    pub fn default_key_for_set(
+        control_set: usize,
+        id: ControlBindingId,
+        profile: CompatProfile,
+    ) -> Option<VirtualKeyCode> {
+        default_keyboard_keys(profile)
             .get(control_set)
             .map(|keys| keys[id.spec().index])
     }
@@ -251,11 +258,11 @@ impl KeyboardBindings {
     }
 
     pub fn reset_binding(&mut self, id: ControlBindingId) {
-        self.assign_binding(0, id, id.default_key());
+        self.assign_binding(0, id, id.default_key(self.profile));
     }
 
     pub fn reset_all(&mut self) {
-        self.keys = cpp_default_keyboard_keys(is_german_system());
+        self.keys = default_keyboard_keys(self.profile);
     }
 
     pub fn is_supported_key(key: VirtualKeyCode) -> bool {
@@ -754,6 +761,31 @@ const CONTROL_BINDING_SPECS: &[ControlBindingSpec] = &[
     ),
 ];
 
+// Normal installs use the WASD layout; the compatibility profile keeps the
+// oracle's platform/locale defaults. Saved keys override either table.
+fn default_keyboard_keys(
+    profile: CompatProfile,
+) -> [[VirtualKeyCode; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT] {
+    let mut keys = cpp_default_keyboard_keys(is_german_system());
+    if profile == CompatProfile::Normal {
+        keys[0] = [
+            VirtualKeyCode::Digit1,
+            VirtualKeyCode::Digit2,
+            VirtualKeyCode::Digit3,
+            VirtualKeyCode::KeyQ,
+            VirtualKeyCode::KeyW,
+            VirtualKeyCode::KeyE,
+            VirtualKeyCode::KeyA,
+            VirtualKeyCode::KeyS,
+            VirtualKeyCode::KeyD,
+            VirtualKeyCode::KeyZ,
+            VirtualKeyCode::Tab,
+            VirtualKeyCode::KeyF,
+        ];
+    }
+    keys
+}
+
 fn cpp_default_keyboard_keys(
     german_system: bool,
 ) -> [[VirtualKeyCode; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT] {
@@ -893,8 +925,15 @@ pub(super) fn is_german_system() -> bool {
 /// overrides are applied. Keeping the editor on this table prevents its
 /// platform/locale view from drifting from the live controls loader.
 pub(crate) fn advanced_config_default_raw_keyboard_keys(
+    profile: CompatProfile,
 ) -> [[i32; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT] {
-    cpp_default_raw_keyboard_keys(is_german_system())
+    let mut keys = cpp_default_raw_keyboard_keys(is_german_system());
+    if profile == CompatProfile::Normal {
+        keys[0] = default_keyboard_keys(profile)[0].map(|key| {
+            encode_virtual_key_code(key).expect("default keyboard keys have platform codes")
+        });
+    }
+    keys
 }
 
 fn read_keyboard_entry(
@@ -1751,12 +1790,122 @@ mod tests {
     }
 
     #[test]
+    fn legacy_keyboard_reset_in_settings_retains_the_cpp_default() {
+        // Pinned oracle C4Config.cpp:624 declares Q for Keyboard 1's first control.
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "CompatProfile",
+            CompatProfile::LEGACY_CLONK,
+        );
+        let catalog = crate::settings_catalog::catalog(&config);
+        let profile = catalog
+            .iter()
+            .find(|setting| setting.id.section == "General" && setting.id.key == "CompatProfile")
+            .expect("compatibility profile setting");
+        assert_eq!(profile.default.serialized(), CompatProfile::NORMAL);
+        let setting = catalog
+            .iter()
+            .find(|setting| setting.id.section == "Controls" && setting.id.key == "Kbd1Key1")
+            .expect("keyboard control in settings");
+        assert_eq!(
+            setting.default.serialized(),
+            encode_virtual_key_code(VirtualKeyCode::KeyQ)
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn fresh_normal_profile_uses_wasd_keyboard_one() {
+        let bindings = KeyboardBindings::load(None, CompatProfile::Normal);
+        let expected = [
+            VirtualKeyCode::Digit1,
+            VirtualKeyCode::Digit2,
+            VirtualKeyCode::Digit3,
+            VirtualKeyCode::KeyQ,
+            VirtualKeyCode::KeyW,
+            VirtualKeyCode::KeyE,
+            VirtualKeyCode::KeyA,
+            VirtualKeyCode::KeyS,
+            VirtualKeyCode::KeyD,
+            VirtualKeyCode::KeyZ,
+            VirtualKeyCode::Tab,
+            VirtualKeyCode::KeyF,
+        ];
+        for (id, key) in ControlBindingId::ALL.into_iter().zip(expected) {
+            assert_eq!(bindings.key_for(id), Some(key), "{id:?}");
+        }
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::KeyA, ElementState::Pressed),
+            Some(ControlEvent::Press(ControlButton::Left)),
+        );
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::KeyA, ElementState::Released),
+            Some(ControlEvent::Release(ControlButton::Left)),
+        );
+    }
+
+    #[test]
+    fn saved_keyboard_overrides_survive_both_profiles_and_normal_reset_restores_wasd() {
+        let mut config = Config::new();
+        config.set_in(
+            Some("Controls"),
+            "Kbd1Key7",
+            encode_virtual_key_code(VirtualKeyCode::F12)
+                .unwrap()
+                .to_string(),
+        );
+        config.set_in(
+            Some("Controls"),
+            "Kbd4Key9",
+            encode_virtual_key_code(VirtualKeyCode::F11)
+                .unwrap()
+                .to_string(),
+        );
+        for profile in [CompatProfile::Normal, CompatProfile::LegacyClonk] {
+            let mut bindings = KeyboardBindings::from_config(&config, profile).unwrap();
+            assert_eq!(
+                bindings.key_for(ControlBindingId::Left),
+                Some(VirtualKeyCode::F12)
+            );
+            assert_eq!(
+                bindings.key_for_set(3, ControlBindingId::Right),
+                Some(VirtualKeyCode::F11)
+            );
+            bindings.reset_binding(ControlBindingId::Left);
+            assert_eq!(
+                bindings.key_for(ControlBindingId::Left),
+                Some(if profile == CompatProfile::Normal {
+                    VirtualKeyCode::KeyA
+                } else {
+                    cpp_default_keyboard_keys(is_german_system())[0]
+                        [ControlBindingId::Left as usize]
+                })
+            );
+            bindings.reset_all();
+            assert_eq!(bindings.keys, default_keyboard_keys(profile));
+        }
+        let normal = KeyboardBindings::load(None, CompatProfile::Normal);
+        normal.write_to_config(&mut config);
+        // Fully saved layouts are retained even if the launch profile changes.
+        for profile in [CompatProfile::Normal, CompatProfile::LegacyClonk] {
+            let loaded = KeyboardBindings::from_config(&config, profile).unwrap();
+            assert_eq!(loaded.keys, normal.keys);
+        }
+        assert_eq!(
+            &normal.keys[1..],
+            &cpp_default_keyboard_keys(is_german_system())[1..]
+        );
+    }
+
+    #[test]
     fn default_player_bindings_do_not_turn_space_into_clear_pressed() {
         // Space belongs to FullscreenMenuOpen/MenuOK by scope; the player
         // control registrations contain only the configured 48 callbacks and
         // never synthesize COM_ClearPressedComs (pristine 9ffa0a5d
         // src/C4Game.cpp:3388-3437; src/C4PlayerList.cpp:588-594).
-        let bindings = KeyboardBindings::default_bindings();
+        let bindings = KeyboardBindings::default_bindings(CompatProfile::LegacyClonk);
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::KeyS, ElementState::Pressed),
             Some(ControlEvent::Press(ControlButton::Up))
@@ -1776,7 +1925,7 @@ mod tests {
         // C++ parity: pristine 9ffa0a5d src/C4Config.cpp:332-343 defines the
         // complete keyboard set 1; movement is S/Z/X/C and does not include
         // arrow-key aliases.
-        let bindings = KeyboardBindings::default_bindings();
+        let bindings = KeyboardBindings::default_bindings(CompatProfile::LegacyClonk);
         for (id, key, button) in [
             (
                 ControlBindingId::Up,
@@ -1856,7 +2005,7 @@ mod tests {
         // C4Viewport::DrawPlayerControls indexes the first ten CON_* slots
         // (C4Viewport.cpp:1394-1441). The Rust overlay follows this exact
         // ControlBindingId::ALL order before formatting each configured key.
-        let bindings = KeyboardBindings::default_bindings();
+        let bindings = KeyboardBindings::default_bindings(CompatProfile::LegacyClonk);
         let labels: Vec<_> = ControlBindingId::ALL
             .iter()
             .take(10)
@@ -1894,14 +2043,14 @@ mod tests {
             ControlBindingId::Right,
         ]
         .into_iter()
-        .map(|binding| format_key_label(binding.default_key()))
+        .map(|binding| format_key_label(binding.default_key(CompatProfile::LegacyClonk)))
         .collect();
         assert_eq!(fallback_movement, movement);
     }
 
     #[test]
     fn cursor_toggle_binding_produces_command() {
-        let bindings = KeyboardBindings::default_bindings();
+        let bindings = KeyboardBindings::default_bindings(CompatProfile::LegacyClonk);
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::KeyW, ElementState::Pressed),
             Some(ControlEvent::Command {
@@ -1920,7 +2069,7 @@ mod tests {
 
     #[test]
     fn player_menu_binding_has_no_release() {
-        let bindings = KeyboardBindings::default_bindings();
+        let bindings = KeyboardBindings::default_bindings(CompatProfile::LegacyClonk);
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::KeyR, ElementState::Pressed),
             Some(ControlEvent::Command {
@@ -2259,7 +2408,8 @@ mod tests {
                     .to_string(),
             );
         }
-        let bindings = KeyboardBindings::from_config(&cfg).expect("overrides present");
+        let bindings = KeyboardBindings::from_config(&cfg, CompatProfile::LegacyClonk)
+            .expect("overrides present");
 
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::KeyW, ElementState::Pressed),
@@ -2433,7 +2583,8 @@ mod tests {
         for name in ["Kbd1Key1", "Kbd1Key5", "Kbd2Key1", "Kbd3Key10", "Kbd4Key12"] {
             config.set_in(Some("Controls"), name, raw_g);
         }
-        let bindings = KeyboardBindings::from_config(&config).expect("configured bindings");
+        let bindings = KeyboardBindings::from_config(&config, CompatProfile::LegacyClonk)
+            .expect("configured bindings");
 
         assert_eq!(
             bindings
@@ -2490,7 +2641,8 @@ mod tests {
         let mut config = Config::new();
         config.set_in(Some("Controls"), "Kbd1Key10", raw_g);
         config.set_in(Some("Controls"), "Kbd2Key1", raw_g);
-        let bindings = KeyboardBindings::from_config(&config).expect("configured bindings");
+        let bindings = KeyboardBindings::from_config(&config, CompatProfile::LegacyClonk)
+            .expect("configured bindings");
 
         assert_eq!(
             bindings
@@ -2553,7 +2705,7 @@ mod tests {
 
     #[test]
     fn rebind_updates_and_resets() {
-        let mut bindings = KeyboardBindings::default_bindings();
+        let mut bindings = KeyboardBindings::default_bindings(CompatProfile::LegacyClonk);
         assert_eq!(
             bindings.key_for(ControlBindingId::Throw),
             Some(VirtualKeyCode::KeyA)
@@ -2578,13 +2730,13 @@ mod tests {
         bindings.reset_binding(ControlBindingId::Throw);
         assert_eq!(
             bindings.key_for(ControlBindingId::Throw),
-            Some(ControlBindingId::Throw.default_key())
+            Some(ControlBindingId::Throw.default_key(CompatProfile::LegacyClonk))
         );
     }
 
     #[test]
     fn keyboard_set_three_and_four_rebinds_round_trip_through_config() {
-        let mut bindings = KeyboardBindings::default_bindings();
+        let mut bindings = KeyboardBindings::default_bindings(CompatProfile::LegacyClonk);
         assert!(bindings.rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::F11));
         assert!(bindings.rebind_for_set(3, ControlBindingId::Special2, VirtualKeyCode::Digit9));
         assert!(!bindings.rebind_for_set(4, ControlBindingId::Up, VirtualKeyCode::F12));
@@ -2620,7 +2772,8 @@ mod tests {
             }
         }
 
-        let loaded = KeyboardBindings::from_config(&config).expect("all bindings persisted");
+        let loaded = KeyboardBindings::from_config(&config, CompatProfile::LegacyClonk)
+            .expect("all bindings persisted");
         assert_eq!(
             loaded.key_for_set(2, ControlBindingId::Dig),
             Some(VirtualKeyCode::F11)
@@ -2633,7 +2786,7 @@ mod tests {
 
     #[test]
     fn keyboard_reset_all_restores_every_control_in_all_four_sets() {
-        let defaults = KeyboardBindings::default_bindings();
+        let defaults = KeyboardBindings::default_bindings(CompatProfile::LegacyClonk);
         let mut bindings = defaults.clone();
         for set in 0..KeyboardBindings::SET_COUNT {
             for id in ControlBindingId::ALL {

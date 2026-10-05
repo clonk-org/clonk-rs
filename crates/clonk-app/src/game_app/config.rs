@@ -1499,7 +1499,7 @@ impl GameApp {
         self.config.persisted_mission_access = self.config.mission_access.snapshot();
         self.engine
             .set_mission_access_store(self.config.mission_access.clone());
-        self.bindings = KeyboardBindings::load(paths);
+        self.bindings = KeyboardBindings::load(paths, self.config.compat_profile);
         self.input_routing.gamepad_bindings = GamepadBindings::load(paths);
         self.input_routing
             .live

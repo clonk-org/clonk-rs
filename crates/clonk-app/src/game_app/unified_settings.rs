@@ -345,8 +345,8 @@ impl GameApp {
                 .unwrap_or_default(),
         );
         controller.set_users = self.local_control_set_users();
-        // In a game, start on the sets its players use, the first player's
-        // device showing.
+        // Start on the current character's set, or the first running player's
+        // assigned set.
         for (set, _) in controller.set_users.clone().into_iter().rev() {
             controller.choose_set(set);
             controller.controls_page = ControlsPage::for_device(set.device);
@@ -394,10 +394,33 @@ impl GameApp {
         self.update_unified_settings(Instant::now());
         Ok(())
     }
-    /// The local players' control sets in a running game, in join order.
+    /// Running players' assigned sets, or the startup character's preference.
     fn local_control_set_users(&self) -> Vec<(ControlSet, String)> {
         if self.mode != AppMode::Running {
-            return Vec::new();
+            let player = self
+                .startup
+                .player_properties_dialog
+                .as_ref()
+                .map(|pending| pending.controller.player())
+                .or_else(|| {
+                    self.startup
+                        .player_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.selected_index())
+                        .and_then(|index| self.startup.player_files.get(index))
+                        .map(|entry| &entry.player_file)
+                })
+                .or(self.players.selected_file.as_ref());
+            return player
+                .and_then(|player| {
+                    let (device, index) = match player.pref_control {
+                        0..=3 => (ControlDevice::Keyboard, player.pref_control as usize),
+                        4..=7 => (ControlDevice::Gamepad, (player.pref_control - 4) as usize),
+                        _ => return None,
+                    };
+                    Some(vec![(ControlSet { device, index }, player.name.clone())])
+                })
+                .unwrap_or_default();
         }
         self.local_controls
             .assignments()

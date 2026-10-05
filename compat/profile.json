@@ -635,6 +635,20 @@
       "owner": "clonk-org/clonk-rs#57"
     },
     {
+      "id": "pres-keyboard-one-wasd",
+      "area": "presentation",
+      "summary": "Normal installs use WASD movement and 1/2/3, Q/E, Z, Tab and F for Keyboard 1. The compatibility profile retains the oracle platform/locale defaults. Saved key overrides are honored under either profile; reset restores the active profile defaults. Keyboard sets 2-4 and synchronized control events are unchanged.",
+      "cited_in": [
+        "crates/clonk-app/src/input.rs",
+        "crates/clonk-app/src/advanced_config.rs"
+      ],
+      "cpp_reference": "C4Config.cpp:611-674",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": false,
+      "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
+    },
+    {
       "id": "pres-first-run-scale",
       "area": "presentation",
       "summary": "The first-run application scale is seeded from the monitor's pixel density (rounded, integer); C++ starts every install at Scale=100, which on a 2x panel is an 800x600 device-pixel window with a 14px font.",
