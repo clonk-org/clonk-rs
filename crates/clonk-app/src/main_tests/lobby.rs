@@ -6366,6 +6366,16 @@ fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
 
 #[test]
 fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
+    // Instrumented joins and rendering retain correctness and progress checks,
+    // but cannot measure shipped-binary latency.
+    clonk_test_support::latency::assert_latency_budget(
+        "initial full-lobby network join",
+        (!cfg!(coverage)).then_some(Duration::from_millis(500)),
+        initial_full_lobby_network_join_sample,
+    );
+}
+
+fn initial_full_lobby_network_join_sample() -> Duration {
     // C++ enters DoLobby only after network initialization, initial PlayerInfo
     // publication, and resource registration, then reaches and acknowledges
     // GS_Lobby with MainDlg alive (src/C4Game.cpp:361-409,3823-3844;
@@ -6712,18 +6722,25 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         "initial full-lobby network game join completed in {elapsed:?}; render={render_duration:?}; coverage={}; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}",
         cfg!(coverage)
     );
-    // cargo-llvm-cov instruments both the join and software rendering. Keep
-    // all eight readiness checks and the progress deadline in those builds,
-    // but enforce the product's 500ms performance contract without coverage.
-    #[cfg(not(coverage))]
-    main_assert!(
-        elapsed <= Duration::from_millis(500),
-        "initial network game join took {elapsed:?}, exceeding the inclusive 500ms lobby budget; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}"
-    );
+    elapsed
 }
 
 #[test]
 fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
+    // The same selection measured 389ms normally and 1.918s under llvm-cov.
+    // Keep correctness checks in coverage; enforce latency in the ordinary
+    // queue shard, where only a completed slow sample may be repeated.
+    let budget = std::env::var_os("LLVM_PROFILE_FILE")
+        .is_none()
+        .then_some(Duration::from_secs(1));
+    clonk_test_support::latency::assert_latency_budget(
+        "selected ClonkMars host reference",
+        budget,
+        selected_clonkmars_host_reference_sample,
+    );
+}
+
+fn selected_clonkmars_host_reference_sample() -> Duration {
     // Native opens the scenario, initializes the host, and enters DoLobby
     // before the full InitGame load begins (src/C4Game.cpp:422-457,3872-3906).
     let _lock = env_lock().lock();
@@ -6881,19 +6898,6 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     eprintln!(
         "selected ClonkMars host staged in {staging_elapsed:?} and exposed its reference in {elapsed:?} before the first lobby render"
     );
-    // The budget is a product claim about the shipped binary, and an
-    // llvm-cov-instrumented one is not it: the same selection measures 389ms
-    // here and 1.918s under `cargo llvm-cov`, so the coverage row would be
-    // timing the instrumentation rather than the host. `cargo llvm-cov` names
-    // the profile file for every test process it runs, so its presence is the
-    // instrumented build. The uninstrumented `Linux / app 5/12` queue shard
-    // runs this same test and keeps the budget a required gate.
-    if std::env::var_os("LLVM_PROFILE_FILE").is_none() {
-        main_assert!(
-            elapsed <= Duration::from_secs(1),
-            "selected ClonkMars host took {elapsed:?}, exceeding the inclusive one-second reference-query budget"
-        );
-    }
     // Keep the rendering assertion, but do it after the publication budget is
     // measured. A frame is produced by the main-loop scheduler and is not part
     // of the host's reference-publication work; including its first-frame
@@ -6980,6 +6984,7 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     // clonk-org/clonk-rs#1603 retains the one-second reference-query budget.
     // Later registration/admission measurements include rendering, event-loop
     // polling and HTTP scheduling; their contract is the ordering proved above.
+    elapsed
 }
 
 #[test]
