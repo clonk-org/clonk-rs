@@ -1553,79 +1553,17 @@ pub(crate) fn multicast_interface_indices() -> Vec<u32> {
 /// discovered interface.
 #[cfg(windows)]
 pub(crate) fn multicast_interface_indices() -> Vec<u32> {
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-        GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
-    };
-    use windows_sys::Win32::Networking::WinSock::AF_INET6;
-
     use std::collections::BTreeSet;
 
-    // Ask only for what is read below. The address lists are skipped outright:
-    // the index is all the join needs.
-    const FLAGS: u32 = GAA_FLAG_SKIP_ANYCAST
-        | GAA_FLAG_SKIP_MULTICAST
-        | GAA_FLAG_SKIP_DNS_SERVER
-        | GAA_FLAG_SKIP_FRIENDLY_NAME;
-    // The documented retry shape: size the buffer, then fill it. The table can
-    // grow between the two calls, so this retries rather than trusting the
-    // first answer, and gives up rather than looping forever.
-    const ATTEMPTS: usize = 3;
+    use windows_sys::Win32::Networking::WinSock::AF_INET6;
 
-    let mut size: u32 = 0;
-    let mut buffer: Vec<u8> = Vec::new();
-    for _ in 0..ATTEMPTS {
-        // SAFETY: a null buffer with `size == 0` is the documented way to ask
-        // for the required length; Windows writes it through `size` and returns
-        // ERROR_BUFFER_OVERFLOW without touching the buffer.
-        let needed = unsafe {
-            GetAdaptersAddresses(
-                AF_INET6 as u32,
-                FLAGS,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                &mut size,
-            )
-        };
-        // ERROR_BUFFER_OVERFLOW (111) is the expected answer to the sizing
-        // call; anything else means there is nothing to enumerate.
-        if needed != 111 || size == 0 {
-            return Vec::new();
+    let mut indices = BTreeSet::new();
+    crate::windows_adapters::for_each_adapter(AF_INET6, |adapter| {
+        if adapter.Ipv6IfIndex != DEFAULT_MULTICAST_INTERFACE {
+            indices.insert(adapter.Ipv6IfIndex);
         }
-        buffer.clear();
-        buffer.resize(size as usize, 0);
-        // SAFETY: `buffer` holds `size` bytes and outlives the walk below.
-        // Windows fills it with a linked list whose `Next` chain terminates at
-        // null, and every node is inside the buffer it just sized.
-        let result = unsafe {
-            GetAdaptersAddresses(
-                AF_INET6 as u32,
-                FLAGS,
-                std::ptr::null(),
-                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
-                &mut size,
-            )
-        };
-        if result == 0 {
-            let mut indices = BTreeSet::new();
-            let mut adapter = buffer.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
-            // SAFETY: walking the chain Windows just wrote, stopping at its
-            // null terminator.
-            while !adapter.is_null() {
-                let index = unsafe { (*adapter).Ipv6IfIndex };
-                if index != DEFAULT_MULTICAST_INTERFACE {
-                    indices.insert(index);
-                }
-                adapter = unsafe { (*adapter).Next };
-            }
-            return indices.into_iter().collect();
-        }
-        // ERROR_BUFFER_OVERFLOW again: the table grew, so size and retry.
-        if result != 111 {
-            return Vec::new();
-        }
-    }
-    Vec::new()
+    });
+    indices.into_iter().collect()
 }
 
 #[cfg(not(any(unix, windows)))]

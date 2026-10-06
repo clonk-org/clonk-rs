@@ -57,6 +57,8 @@ mod upnp;
 mod voice;
 mod voice_inbox;
 mod voice_route_health;
+#[cfg(windows)]
+mod windows_adapters;
 
 pub use voice_inbox::{voice_inbox, ReceivedVoiceFrame, VoiceInboxReceiver, VoiceInboxSender};
 
