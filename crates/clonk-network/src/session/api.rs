@@ -353,6 +353,9 @@ pub struct HostConfig {
     /// listener-port behavior of direct API callers.
     pub configured_tcp_port: Option<u16>,
     pub configured_udp_port: Option<u16>,
+    /// Injected interface snapshot for local address publication. `None`
+    /// enumerates the OS interfaces when the host starts.
+    pub local_interface_endpoints: Option<Vec<SocketAddr>>,
     /// Requests C++-style best-effort UPnP IGD mappings for each successfully
     /// bound host transport. Direct API callers opt in explicitly; the app
     /// applies the stock `Config.Network.EnableUPnP` default.
@@ -398,6 +401,31 @@ pub struct HostJoinSnapshot {
     pub parameters: crate::JoinGameParametersEnvelope,
 }
 
+impl HostConfig {
+    /// Captures the interface snapshot once and projects successfully bound
+    /// transports into AddLocalAddrs order for both the session and reference.
+    pub fn initial_local_addresses(
+        &mut self,
+        tcp_bound: Option<SocketAddr>,
+        udp_bound: Option<SocketAddr>,
+    ) -> Vec<crate::NetworkAddress> {
+        let advertised = |bound: Option<SocketAddr>, configured_port: Option<u16>| {
+            bound
+                .map(|mut address| {
+                    address.set_port(configured_port.unwrap_or(address.port()));
+                    address
+                })
+                .filter(|address| address.port() != 0)
+        };
+        let tcp_bound = advertised(tcp_bound, self.configured_tcp_port);
+        let udp_bound = advertised(udp_bound, self.configured_udp_port);
+        let interfaces = self
+            .local_interface_endpoints
+            .get_or_insert_with(crate::client_mesh::client_mesh_os_interface_endpoints);
+        crate::client_mesh_local_addresses(tcp_bound, udp_bound, interfaces.iter().copied())
+    }
+}
+
 impl Default for HostConfig {
     fn default() -> Self {
         let name = clonk_protocol::LegacyCString::from_bytes(b"Host".to_vec())
@@ -429,6 +457,7 @@ impl Default for HostConfig {
             netpuncher_addresses: Vec::new(),
             configured_tcp_port: None,
             configured_udp_port: None,
+            local_interface_endpoints: None,
             enable_upnp: false,
             voice_enabled: true,
             initial_join_snapshot: Some(synthetic_join_snapshot(local_core, 8)),

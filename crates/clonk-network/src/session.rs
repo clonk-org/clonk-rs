@@ -13552,6 +13552,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn host_advertises_ranked_interface_addresses_after_join_data() {
+        // AddLocalAddrs adds wildcard TCP/UDP, then ranked per-interface
+        // TCP/UDP entries (pinned oracle src/C4Network2Client.cpp:281-317).
+        let listener = TcpListener::bind("0.0.0.0:0").await.test_value();
+        let port = listener.local_addr().test_value().port();
+        let host = start_host(
+            listener,
+            host_config!(
+                udp_bind_address: Some("0.0.0.0:0".parse().test_value()),
+                configured_tcp_port: Some(31_112),
+                configured_udp_port: Some(31_113),
+                local_interface_endpoints: Some(vec![
+                    "[fe80::7%7]:0".parse().test_value(),
+                    "192.168.1.7:0".parse().test_value(),
+                ]),
+            ),
+        )
+        .await
+        .test_value();
+        let stream = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .test_value();
+        let mut transport = crate::ControlTransport::new(stream);
+        run_client_connection_handshake(
+            &mut transport,
+            test_connection_request(compatibility_test_core(-1, b"LAN client"), 0, false),
+        )
+        .await
+        .test_value();
+
+        for (protocol, endpoint) in [
+            (crate::NetworkProtocol::Tcp, "0.0.0.0:31112"),
+            (crate::NetworkProtocol::Udp, "0.0.0.0:31113"),
+            (crate::NetworkProtocol::Tcp, "192.168.1.7:31112"),
+            (crate::NetworkProtocol::Udp, "192.168.1.7:31113"),
+        ] {
+            assert_eq!(
+                await_test(transport.read_message()).await,
+                ControlMessage::Address(crate::AddressPacket {
+                    client_id: 0,
+                    address: crate::NetworkAddress::new(protocol, endpoint.parse().test_value()),
+                }),
+            );
+        }
+        drop(transport);
+        host.shutdown().await.test_value();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn host_sends_cpp_address_packets_immediately_after_join_data() {
         // SendJoinData writes PID_JoinData and then every known PID_Addr on the
         // accepted message connection before resource discovery begins

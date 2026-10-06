@@ -321,7 +321,7 @@ pub(crate) async fn run_host(
     mut listener: Option<TcpListener>,
     mut udp_hub: Option<crate::ReliableUdpSessionHub>,
     udp_start_error: Option<String>,
-    config: HostConfig,
+    mut config: HostConfig,
     resource_backend: Option<crate::ResourceTransferBackend>,
     io_statistics: crate::NetworkIoStatistics,
     mut commands: mpsc::Receiver<HostCommand>,
@@ -379,43 +379,7 @@ pub(crate) async fn run_host(
         [config.local_core.name.clone()],
     );
     let client_cores = BTreeMap::from([(0, config.local_core.clone())]);
-    let mut host_addresses = Vec::new();
-    if let Some(listener_addr) = listener_addr {
-        let port = config.configured_tcp_port.unwrap_or(listener_addr.port());
-        if port != 0 {
-            host_addresses.push(crate::NetworkAddress::new(
-                crate::NetworkProtocol::Tcp,
-                SocketAddr::from(([0, 0, 0, 0], port)),
-            ));
-            if !listener_addr.ip().is_unspecified() {
-                crate::append_received_address(
-                    &mut host_addresses,
-                    crate::NetworkAddress::new(
-                        crate::NetworkProtocol::Tcp,
-                        SocketAddr::new(listener_addr.ip(), port),
-                    ),
-                );
-            }
-        }
-    }
-    if let Some(listener_addr) = udp_listener_addr {
-        let port = config.configured_udp_port.unwrap_or(listener_addr.port());
-        if port != 0 {
-            host_addresses.push(crate::NetworkAddress::new(
-                crate::NetworkProtocol::Udp,
-                SocketAddr::from(([0, 0, 0, 0], port)),
-            ));
-            if !listener_addr.ip().is_unspecified() {
-                crate::append_received_address(
-                    &mut host_addresses,
-                    crate::NetworkAddress::new(
-                        crate::NetworkProtocol::Udp,
-                        SocketAddr::new(listener_addr.ip(), port),
-                    ),
-                );
-            }
-        }
-    }
+    let host_addresses = config.initial_local_addresses(listener_addr, udp_listener_addr);
     let client_addresses = BTreeMap::from([(0, host_addresses)]);
     let mut resource_catalog = crate::ResourceCatalog::new(0);
     config
