@@ -288,63 +288,25 @@ impl NetworkGameReference {
     }
 }
 
-#[cfg(unix)]
 fn local_join_capabilities() -> (bool, Vec<u32>) {
-    let mut addresses = std::ptr::null_mut();
-    // SAFETY: `getifaddrs` initializes a linked list owned by the caller on
-    // success. Every pointer is checked before access and the list is released
-    // exactly once with `freeifaddrs` below.
-    if unsafe { libc::getifaddrs(&mut addresses) } != 0 {
-        return (false, Vec::new());
-    }
-    let mut have_global_ipv6 = false;
-    let mut interface_ids = BTreeSet::new();
-    let mut current = addresses;
-    while !current.is_null() {
-        // SAFETY: `current` belongs to the live list returned above.
-        let interface = unsafe { &*current };
-        let address = interface.ifa_addr;
-        if !address.is_null()
-            // SAFETY: all sockaddr variants begin with `sa_family`.
-            && unsafe { (*address).sa_family as i32 } == libc::AF_INET6
-            && interface.ifa_flags & (libc::IFF_LOOPBACK as u32) == 0
-        {
-            // SAFETY: the family check establishes an IPv6 sockaddr.
-            let address = unsafe { &*(address.cast::<libc::sockaddr_in6>()) };
-            let ip = Ipv6Addr::from(address.sin6_addr.s6_addr);
-            have_global_ipv6 |= cpp_is_global_ipv6(ip);
-            if ip.is_unicast_link_local() && !interface.ifa_name.is_null() {
-                // SAFETY: `ifa_name` is a NUL-terminated interface name for
-                // the lifetime of the enclosing `ifaddrs` node.
-                let index = if address.sin6_scope_id != 0 {
-                    address.sin6_scope_id
-                } else {
-                    unsafe { libc::if_nametoindex(interface.ifa_name) }
-                };
-                if index != 0 {
-                    interface_ids.insert(index);
-                }
-            }
-        }
-        current = interface.ifa_next;
-    }
-    // SAFETY: this is the successful allocation returned by `getifaddrs`.
-    unsafe { libc::freeifaddrs(addresses) };
-    (have_global_ipv6, interface_ids.into_iter().collect())
+    join_capabilities(&crate::client_mesh::client_mesh_os_interface_endpoints())
 }
 
-#[cfg(not(unix))]
-fn local_join_capabilities() -> (bool, Vec<u32>) {
-    // Conservative fallback: IPv4/global routes remain usable and global IPv6
-    // is ranked after them. Link-local expansion requires platform interface
-    // enumeration and is therefore omitted rather than guessing a scope.
-    (false, Vec::new())
+/// Derives the two inputs C++ joins with from this machine's interface
+/// addresses: whether any is global IPv6 (`ContainsGlobalIpv6`, pinned oracle
+/// `src/C4NetIO.cpp:233-241`) and the scope IDs `AddLocalAddrs` records as
+/// `InterfaceIDs` (`src/C4Network2Client.cpp:312-315`).
+fn join_capabilities(interface_endpoints: &[SocketAddr]) -> (bool, Vec<u32>) {
+    let have_global_ipv6 = interface_endpoints.iter().any(|endpoint| match endpoint {
+        SocketAddr::V6(endpoint) => cpp_is_global_ipv6(*endpoint.ip()),
+        SocketAddr::V4(_) => false,
+    });
+    (
+        have_global_ipv6,
+        crate::client_mesh::client_mesh_interface_ids(interface_endpoints),
+    )
 }
 
-// Only the unix `local_join_capabilities` above classifies addresses; the
-// `not(unix)` arm reports no global IPv6 because it enumerates nothing, so this
-// is gated with its caller rather than left dead on those platforms.
-#[cfg(unix)]
 fn cpp_is_global_ipv6(ip: Ipv6Addr) -> bool {
     let first = ip.octets()[0];
     !ip.is_unspecified()
@@ -1591,79 +1553,17 @@ pub(crate) fn multicast_interface_indices() -> Vec<u32> {
 /// discovered interface.
 #[cfg(windows)]
 pub(crate) fn multicast_interface_indices() -> Vec<u32> {
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-        GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
-    };
-    use windows_sys::Win32::Networking::WinSock::AF_INET6;
-
     use std::collections::BTreeSet;
 
-    // Ask only for what is read below. The address lists are skipped outright:
-    // the index is all the join needs.
-    const FLAGS: u32 = GAA_FLAG_SKIP_ANYCAST
-        | GAA_FLAG_SKIP_MULTICAST
-        | GAA_FLAG_SKIP_DNS_SERVER
-        | GAA_FLAG_SKIP_FRIENDLY_NAME;
-    // The documented retry shape: size the buffer, then fill it. The table can
-    // grow between the two calls, so this retries rather than trusting the
-    // first answer, and gives up rather than looping forever.
-    const ATTEMPTS: usize = 3;
+    use windows_sys::Win32::Networking::WinSock::AF_INET6;
 
-    let mut size: u32 = 0;
-    let mut buffer: Vec<u8> = Vec::new();
-    for _ in 0..ATTEMPTS {
-        // SAFETY: a null buffer with `size == 0` is the documented way to ask
-        // for the required length; Windows writes it through `size` and returns
-        // ERROR_BUFFER_OVERFLOW without touching the buffer.
-        let needed = unsafe {
-            GetAdaptersAddresses(
-                AF_INET6 as u32,
-                FLAGS,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                &mut size,
-            )
-        };
-        // ERROR_BUFFER_OVERFLOW (111) is the expected answer to the sizing
-        // call; anything else means there is nothing to enumerate.
-        if needed != 111 || size == 0 {
-            return Vec::new();
+    let mut indices = BTreeSet::new();
+    crate::windows_adapters::for_each_adapter(AF_INET6, |adapter| {
+        if adapter.Ipv6IfIndex != DEFAULT_MULTICAST_INTERFACE {
+            indices.insert(adapter.Ipv6IfIndex);
         }
-        buffer.clear();
-        buffer.resize(size as usize, 0);
-        // SAFETY: `buffer` holds `size` bytes and outlives the walk below.
-        // Windows fills it with a linked list whose `Next` chain terminates at
-        // null, and every node is inside the buffer it just sized.
-        let result = unsafe {
-            GetAdaptersAddresses(
-                AF_INET6 as u32,
-                FLAGS,
-                std::ptr::null(),
-                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
-                &mut size,
-            )
-        };
-        if result == 0 {
-            let mut indices = BTreeSet::new();
-            let mut adapter = buffer.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
-            // SAFETY: walking the chain Windows just wrote, stopping at its
-            // null terminator.
-            while !adapter.is_null() {
-                let index = unsafe { (*adapter).Ipv6IfIndex };
-                if index != DEFAULT_MULTICAST_INTERFACE {
-                    indices.insert(index);
-                }
-                adapter = unsafe { (*adapter).Next };
-            }
-            return indices.into_iter().collect();
-        }
-        // ERROR_BUFFER_OVERFLOW again: the table grew, so size and retry.
-        if result != 111 {
-            return Vec::new();
-        }
-    }
-    Vec::new()
+    });
+    indices.into_iter().collect()
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2535,6 +2435,61 @@ Title=Recovered game\n"
         );
         assert_eq!(route_plan.dial_attempts, expected_attempts);
         assert_eq!(reference.join_attempts(false, &[3, 7]), expected_attempts);
+    }
+
+    #[test]
+    fn join_capabilities_read_global_ipv6_and_link_local_scopes_from_interfaces() {
+        // ContainsGlobalIpv6 counts any IPv6 address that is neither local nor
+        // private, and AddLocalAddrs records every scoped address's interface
+        // once (pinned oracle src/C4NetIO.cpp:233-241;
+        // src/C4Network2Client.cpp:312-315).
+        let interfaces = [
+            "192.168.1.2:0".parse().unwrap(),
+            ipv6_address("fe80::1", 0, 0, 7),
+            ipv6_address("fe80::2", 0, 0, 3),
+            ipv6_address("fe80::3", 0, 0, 7),
+            ipv6_address("fe80::4", 0, 0, 0),
+            ipv6_address("fd00::1", 0, 0, 0),
+        ];
+        assert_eq!(join_capabilities(&interfaces), (false, vec![3, 7]));
+
+        let with_global = [
+            interfaces.as_slice(),
+            &[ipv6_address("2001:db8::1", 0, 0, 0)],
+        ]
+        .concat();
+        assert_eq!(join_capabilities(&with_global), (true, vec![3, 7]));
+    }
+
+    #[test]
+    fn the_local_host_dials_a_link_local_reference_route() {
+        // An offline LAN reference is all link-local: discovery answers from
+        // fe80::, so the source fills the wildcard routes with it. InitClient
+        // dials such a route once per local interface ID (pinned oracle
+        // src/C4Network2.cpp:382-387), and C++ enumerates those IDs on every
+        // platform, Windows included (src/C4NetIO.cpp:278-305).
+        let interfaces = crate::client_mesh::client_mesh_os_interface_endpoints();
+        let interface_ids = crate::client_mesh::client_mesh_interface_ids(&interfaces);
+        assert!(
+            !interface_ids.is_empty(),
+            "no link-local interface among {interfaces:?}"
+        );
+        let reference = NetworkGameReference {
+            addresses: vec![network_address(NetworkProtocol::Tcp, "[fe80::1]:11112")],
+            source_address: ipv6_address("fe80::1", 11_111, 0, interface_ids[0]),
+            ..NetworkGameReference::default()
+        };
+
+        assert_eq!(
+            reference.join_route_plan_for_local_host().dial_attempts,
+            interface_ids
+                .iter()
+                .map(|&scope_id| NetworkAddress::new(
+                    NetworkProtocol::Tcp,
+                    ipv6_address("fe80::1", 11_112, 0, scope_id),
+                ))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
