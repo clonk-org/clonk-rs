@@ -10335,6 +10335,177 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn relay_client_downloads_another_clients_player_resource_from_host() {
+        // Admitting PlayerInfo starts LoadResources on the host as well as
+        // clients, so the host can serve a player's file without a mesh route
+        // (oracle 7d43b47b src/C4Network2Players.cpp:234-260;
+        // src/C4PlayerInfo.cpp:275-292).
+        let directories = SessionResourceDirectories::new();
+        let owner_directory = directories.root.join("owner");
+        let source = directories.root.join("Bob.c4p");
+        let player_core = b"[Player]\nName=Bob\n[Preferences]\nColorDw=1193046\n";
+        let mut group = MutableGroup::new("Bob.c4p");
+        group
+            .add_file("Player.txt", player_core.to_vec())
+            .test_value();
+        let original = group.pack().test_value();
+        fs::write(&source, &original).test_value();
+
+        let (address, mut host) = start_test_host(host_config!(
+            resource_directory: Some(directories.host.clone())
+        ))
+        .await;
+        let mut host_events = host.take_event_receiver();
+        let observer_config = ClientConfig::new("Alice", ParticipantKind::Player)
+            .with_resource_directory(directories.client.clone());
+        let owner_config = ClientConfig::new("Bob", ParticipantKind::Player)
+            .with_resource_directory(owner_directory);
+        for config in [&observer_config, &owner_config] {
+            assert!(config.mesh_tcp_bind_address.is_none());
+            assert!(config.mesh_udp_bind_address.is_none());
+        }
+        let mut observer = connect_client(address, observer_config).await.test_value();
+        let mut observer_events = observer.take_event_receiver();
+        let owner = connect_client(address, owner_config).await.test_value();
+        let owner_id = i32::try_from(owner.client_id()).test_value();
+        assert!(observer.mesh_peer_ids().await.is_empty());
+        assert!(owner.mesh_peer_ids().await.is_empty());
+
+        let core = owner
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: source.clone(),
+                wire_name: c4(b"Bob.c4p"),
+                group_maker: c4(b"Bob"),
+            })
+            .await
+            .test_value();
+        assert_eq!(core.resource_type, crate::HostResourceType::Player as u8);
+        assert_eq!(core.id >> 16, owner_id);
+        let request = crate::PlayerInfoUpdateRequest::new(
+            owner_id,
+            clonk_protocol::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_protocol::ControlPlayerInfoEntry {
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                name: c4(b"Bob"),
+                filename: c4(b"Bob.c4p"),
+                resource: Some(core.clone()),
+                ..Default::default()
+            }],
+        );
+        owner.submit_player_info_update(request).await.test_value();
+        let mut admitted = await_test(async {
+            loop {
+                match host_events.recv().await.test_value() {
+                    HostEvent::PlayerInfoUpdate {
+                        client_id,
+                        request: received,
+                    } if client_id == owner.client_id() => {
+                        assert_eq!(received.client_id, owner_id);
+                        assert_eq!(received.players.len(), 1);
+                        assert_eq!(received.players[0].resource.as_ref(), Some(&core));
+                        break Some(received);
+                    }
+                    HostEvent::TransportError { error, .. } => {
+                        panic!("player resource admission failed: {error}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        admitted.players[0].id = 1;
+        host.submit_packet(
+            ControlDelivery::Direct,
+            encode_control_entry_payload(&EngineControlPacket::PlayerInfo(
+                clonk_protocol::PlayerInfoControlData::new(
+                    admitted.client_id,
+                    admitted.flags,
+                    admitted.players,
+                    HOST_CLIENT_ID as i32,
+                ),
+            ))
+            .test_value(),
+        )
+        .await
+        .test_value();
+
+        let (host_path, observer_path) = timeout(EVENT_WAIT, async {
+            let host_completion = async {
+                loop {
+                    match host_events.recv().await.test_value() {
+                        HostEvent::ResourceComplete {
+                            resource_id,
+                            core: completed,
+                            path,
+                            local,
+                        } if resource_id == core.id => {
+                            assert_eq!(completed, core);
+                            assert!(!local, "host must download the owner's resource");
+                            break path;
+                        }
+                        HostEvent::ResourceLoadFailed { resource_id } if resource_id == core.id => {
+                            panic!("host failed to download the player's resource");
+                        }
+                        HostEvent::TransportError { error, .. } => {
+                            panic!("host resource transfer failed: {error}");
+                        }
+                        _ => {}
+                    }
+                }
+            };
+            let observer_completion = async {
+                loop {
+                    match observer_events.recv().await.test_value() {
+                        ClientEvent::ResourceComplete {
+                            resource_id,
+                            core: completed,
+                            path,
+                            local,
+                        } if resource_id == core.id => {
+                            assert_eq!(completed, core);
+                            assert!(!local, "observer must download through the host");
+                            break path;
+                        }
+                        ClientEvent::ResourceLoadFailed { resource_id }
+                            if resource_id == core.id =>
+                        {
+                            panic!("relay client failed to download the player's resource");
+                        }
+                        ClientEvent::Disconnected { reason } => {
+                            panic!(
+                                "relay client disconnected during resource transfer: {reason:?}"
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            };
+            tokio::join!(host_completion, observer_completion)
+        })
+        .await
+        .expect("host and relay client finish downloading the player's resource");
+        assert_eq!(host_path.parent(), Some(directories.host.as_path()));
+        assert_eq!(observer_path.parent(), Some(directories.client.as_path()));
+        assert_eq!(
+            fs::read(&observer_path).test_value(),
+            fs::read(host_path).test_value()
+        );
+        assert_eq!(
+            Group::open(observer_path)
+                .test_value()
+                .read_file("Player.txt")
+                .test_value(),
+            player_core
+        );
+        assert_eq!(fs::read(source).test_value(), original);
+        assert!(observer.mesh_peer_ids().await.is_empty());
+        assert!(owner.mesh_peer_ids().await.is_empty());
+
+        owner.shutdown().await.test_value();
+        shutdown_test_session(observer, host).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn client_resolves_local_player_resource_before_exposing_direct_control() {
         let directories = SessionResourceDirectories::new();
         let host_root = directories.root.join("host-local");
