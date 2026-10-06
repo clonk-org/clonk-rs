@@ -533,7 +533,15 @@ pub(crate) fn sample_channel(
 }
 
 pub(crate) fn store_channel(value: f32) -> u8 {
-    value.round().clamp(0.0, 255.0) as u8
+    round_channel(value)
+}
+
+fn round_channel(value: f32) -> u8 {
+    // Saturating conversion supplies the nonnegative integer part. Subtracting
+    // it is exact near a half-integer; adding 0.5 before truncation would round
+    // the f32 immediately below 0.5 up incorrectly. Preserve NaN -> 0 too.
+    let integer = value as u8;
+    integer.saturating_add(u8::from(value - f32::from(integer) >= 0.5))
 }
 
 /// Applies the C++ shader's independent normalized R16 lookups to one source
@@ -1252,4 +1260,34 @@ pub(crate) fn rect_contains(rect: SurfaceRect, point: GuiPoint, tolerance: f32) 
     let right = rect.x as f32 + rect.width as f32 + tolerance;
     let bottom = rect.y as f32 + rect.height as f32 + tolerance;
     point.x >= left && point.x < right && point.y >= top && point.y < bottom
+}
+
+#[cfg(test)]
+mod channel_rounding_tests {
+    use super::*;
+
+    #[test]
+    fn channel_rounding_preserves_half_boundaries_and_saturation() {
+        for integer in 0..256 {
+            let half = integer as f32 + 0.5;
+            for value in [half.next_down(), half, half.next_up(), integer as f32] {
+                assert_eq!(
+                    round_channel(value),
+                    value.round().clamp(0.0, 255.0) as u8,
+                    "value={value:?} bits={:08x}",
+                    value.to_bits(),
+                );
+            }
+        }
+        for value in [
+            f32::NEG_INFINITY,
+            -1.5,
+            -0.0,
+            256.0,
+            f32::INFINITY,
+            f32::NAN,
+        ] {
+            assert_eq!(round_channel(value), value.round().clamp(0.0, 255.0) as u8);
+        }
+    }
 }

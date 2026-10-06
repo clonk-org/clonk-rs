@@ -945,7 +945,7 @@ fn capture_gpu_sprite_impl(
         vec![(
             (0.0, source.width),
             (0.0, source.height),
-            blit.fog_modulation.map(|sample| sample.modulation),
+            blit.fog_modulation.map(|sample| sample.vertex_modulation()),
         )]
     };
 
@@ -1350,16 +1350,18 @@ pub(crate) fn draw_image_region_transformed_float_source(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            dest,
-            (source.x, source.y, source.width, source.height),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| transform.transform_point(x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                dest,
+                (source.x, source.y, source.width, source.height),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| transform.transform_point(x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
     let prepared_fog = fog_sampler
         .as_ref()
         .filter(|_| mask.is_none() || owner_color.is_none())
@@ -1518,21 +1520,23 @@ pub(crate) fn draw_image_region_float_source(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            (
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-            ),
-            (source.x, source.y, source.width, source.height),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| (x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                (
+                    rect.origin.x,
+                    rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                ),
+                (source.x, source.y, source.width, source.height),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| (x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
 
     if sampling == BlitSampling::Nearest
         && (mask.is_none() || owner_color.is_none())
@@ -1720,16 +1724,18 @@ fn draw_image_region_float_source_adjusted(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            dest,
-            (source.x, source.y, source.width, source.height),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| (x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                dest,
+                (source.x, source.y, source.width, source.height),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| (x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
     let bounds = surface.bounds();
     let min_x = ((dest.0 - 0.5).ceil() as i32).max(bounds.x);
     let min_y = ((dest.1 - 0.5).ceil() as i32).max(bounds.y);
@@ -1863,26 +1869,28 @@ pub(crate) fn draw_image_region(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            (
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-            ),
-            (
-                source.x as f32,
-                source.y as f32,
-                source.width as f32,
-                source.height as f32,
-            ),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| (x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                (
+                    rect.origin.x,
+                    rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                ),
+                (
+                    source.x as f32,
+                    source.y as f32,
+                    source.width as f32,
+                    source.height as f32,
+                ),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| (x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
 
     let bounds = surface.bounds();
     let image_width = image.width() as i32;
@@ -2083,33 +2091,35 @@ pub(crate) fn draw_image_region_rotated(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            (
-                center_x - half_w,
-                center_y - half_h,
-                dest_width,
-                dest_height,
-            ),
-            (
-                source.x as f32,
-                source.y as f32,
-                source.width as f32,
-                source.height as f32,
-            ),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| {
-                let dx = x - center_x;
-                let dy = y - center_y;
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
                 (
-                    center_x + dx * cos_theta - dy * sin_theta,
-                    center_y + dx * sin_theta + dy * cos_theta,
-                )
-            },
-        )
-    });
+                    center_x - half_w,
+                    center_y - half_h,
+                    dest_width,
+                    dest_height,
+                ),
+                (
+                    source.x as f32,
+                    source.y as f32,
+                    source.width as f32,
+                    source.height as f32,
+                ),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| {
+                    let dx = x - center_x;
+                    let dy = y - center_y;
+                    (
+                        center_x + dx * cos_theta - dy * sin_theta,
+                        center_y + dx * sin_theta + dy * cos_theta,
+                    )
+                },
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
 
     let corners = [
         (-half_w, -half_h),

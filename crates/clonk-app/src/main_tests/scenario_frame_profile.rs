@@ -223,6 +223,7 @@ fn profile_one_pass(
     scenario_key: &str,
     path: FrameProfilePath,
 ) {
+    clonk_engine::particles::set_presentation_safe_random_seed(1);
     let mut fixture = prepared.instantiate_with_window(
         "Frame Profile",
         false,
@@ -235,6 +236,23 @@ fn profile_one_pass(
         app.test_update();
         present_frame(app, path, &mut frame);
     }
+    // Pixel evidence is deliberately opt-in: disk I/O between frames is not
+    // part of a timing run. Concatenated RGBA frames permit an exact `cmp`
+    // against another revision, rather than comparing only a final screenshot.
+    let output = std::env::var_os("LC_FRAME_PROFILE_OUTPUT").map(std::path::PathBuf::from);
+    let stem = format!("{}-{}", scenario_key.replace('/', "_"), path.label());
+    if let Some(output) = &output {
+        std::fs::create_dir_all(output).test_value();
+    }
+    let mut pixels = output.as_ref().and_then(|output| {
+        (path == FrameProfilePath::Software
+            && std::env::var_os("LC_FRAME_PROFILE_PIXELS").is_some())
+        .then(|| {
+            std::io::BufWriter::new(
+                std::fs::File::create(output.join(format!("{stem}.rgba"))).test_value(),
+            )
+        })
+    });
     let mut digest = 0xcbf2_9ce4_8422_2325_u64;
     let reference = std::env::var_os("CLONK_FRAME_PROFILE_SPRITE_REFERENCE").is_some();
     let mut comparison = (path == FrameProfilePath::Software
@@ -261,9 +279,31 @@ fn profile_one_pass(
                     (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
                 });
             }
+            if let Some(pixels) = &mut pixels {
+                std::io::Write::write_all(pixels, &frame).test_value();
+            }
             sample
         })
         .collect::<Vec<_>>();
+    if let Some(mut pixels) = pixels {
+        std::io::Write::flush(&mut pixels).test_value();
+    }
+    if let Some(output) = output {
+        let mut csv = String::from("frame,update_ns,snapshot_ns,render_ns\n");
+        for (index, sample) in samples.iter().enumerate() {
+            use std::fmt::Write;
+            writeln!(
+                csv,
+                "{},{},{},{}",
+                FRAME_PROFILE_WARMUP_FRAMES + index + 1,
+                sample.update.as_nanos(),
+                sample.snapshot.as_nanos(),
+                sample.render.as_nanos(),
+            )
+            .test_value();
+        }
+        std::fs::write(output.join(format!("{stem}.csv")), csv).test_value();
+    }
     report_frame_profile(scenario_key, path, app, &samples);
     if let Some(directory) = std::env::var_os("CLONK_FRAME_PROFILE_OUTPUT_DIR") {
         let directory = std::path::PathBuf::from(directory);
@@ -308,6 +348,7 @@ fn profile_one_pass(
     if path == FrameProfilePath::Software {
         eprintln!("scenario_frame_pixels scenario={scenario_key} seed={} measured_rgba_fnv64={digest:016x}", app.engine.random_seed());
     }
+    clonk_engine::particles::clear_presentation_safe_random_seed();
 }
 
 fn profile_one_scenario(scenario_key: &str) {
