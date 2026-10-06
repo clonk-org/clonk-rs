@@ -28,7 +28,7 @@ const NATIVE_GAME_TICK: Duration = Duration::from_millis(28);
 const CONTROL_RATE: u32 = 2;
 const WARMUP_SECONDS: u32 = 2;
 const DEFAULT_MEASUREMENT_SECONDS: u64 = 60;
-const NETWORK_LOAD_REPORT_SCHEMA_VERSION: u32 = 6;
+const NETWORK_LOAD_REPORT_SCHEMA_VERSION: u32 = 7;
 const APPLICATION_RTT_ROUNDS_PER_CLIENT: usize = 8;
 const APPLICATION_RTT_BUDGET: Duration = Duration::from_secs(30);
 const ISOLATED_RTT_WARMUP_SAMPLES: usize = 128;
@@ -44,9 +44,9 @@ const LOOPBACK_RTT_P99_LIMIT_MS: i64 = 25;
 const LOAD_WORKLOAD: &str =
     "same-process Tokio IPv4-loopback real-socket HarpoonRace-shaped control transport";
 const LOAD_WORKLOAD_SCOPE: &str =
-    "HarpoonRace-shaped lobby/control parameters only; no scenario/resource loading or game simulation";
+    "HarpoonRace-shaped lobby/control parameters only; host-served placeholder scenario/dynamic downloads, no scenario loading or game simulation";
 const LOAD_SEQUENCE: &str =
-    "synthetic max_players=24 JoinData -> 24 PlayerInfo joins -> activate all -> GO";
+    "synthetic max_players=24 JoinData -> 24 PlayerInfo joins -> activate all -> host-served scenario/dynamic downloads -> GO";
 const LOAD_APPLICATION_RTT_SEQUENCE: &str =
     "diagnostic loaded 24-client fanout after control measurement: sequential host Ready(client_id) broadcast -> addressed client Ready echo -> host receipt over selected message routes";
 const LOAD_ISOLATED_RTT_SEQUENCE: &str =
@@ -282,6 +282,7 @@ struct ClientProbe {
     events: mpsc::UnboundedReceiver<ProbeEvent>,
     rtt_samples_ms: Arc<Mutex<Vec<i64>>>,
     player_infos: Arc<Mutex<ControlPlayerInfoRegistry>>,
+    downloaded_resources: Arc<Mutex<BTreeSet<i32>>>,
     collector: tokio::task::JoinHandle<()>,
 }
 
@@ -294,6 +295,8 @@ impl ClientProbe {
         let collector_rtt = Arc::clone(&rtt_samples_ms);
         let player_infos = Arc::new(Mutex::new(initial_player_infos));
         let collector_player_infos = Arc::clone(&player_infos);
+        let downloaded_resources = Arc::new(Mutex::new(BTreeSet::new()));
+        let collector_downloaded_resources = Arc::clone(&downloaded_resources);
         let collector = tokio::spawn(async move {
             while let Some(event) = source.recv().await {
                 let forwarded = match event {
@@ -336,6 +339,17 @@ impl ClientProbe {
                             "client {client_id} received unhandled packet type {packet_type:#04x}"
                         )))
                     }
+                    ClientEvent::ResourceComplete {
+                        resource_id,
+                        local: false,
+                        ..
+                    } => {
+                        collector_downloaded_resources
+                            .lock()
+                            .expect("downloaded resource lock poisoned")
+                            .insert(resource_id);
+                        None
+                    }
                     ClientEvent::ResourceLoadFailed { resource_id } => Some(ProbeEvent::Failure(
                         format!("client {client_id} failed to load resource {resource_id}"),
                     )),
@@ -355,6 +369,7 @@ impl ClientProbe {
             events,
             rtt_samples_ms,
             player_infos,
+            downloaded_resources,
             collector,
         }
     }
@@ -437,6 +452,15 @@ impl ClientProbe {
                 .lock()
                 .expect("player-info roster lock poisoned"),
         )
+    }
+
+    fn has_downloaded_bootstrap_resources(&self) -> bool {
+        BOOTSTRAP_RESOURCE_IDS.iter().all(|resource_id| {
+            self.downloaded_resources
+                .lock()
+                .expect("downloaded resource lock poisoned")
+                .contains(resource_id)
+        })
     }
 
     async fn shutdown(self) -> Result<(), String> {
@@ -541,6 +565,8 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         join_snapshot.parameters.scenario.filename = legacy_string("HarpoonRace.c4s");
         join_snapshot.parameters.clients.clients[0] = host_config.local_core.clone();
     }
+    let resource_directories = BootstrapResourceDirectories::new();
+    host_bootstrap_resources(&mut host_config, &resource_directories.host());
     let mut published_join_snapshot = host_config
         .initial_join_snapshot
         .clone()
@@ -560,7 +586,8 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         let client_config = configure_client_transport(
             ClientConfig::new(&player_name, ParticipantKind::Player),
             topology,
-        );
+        )
+        .with_resource_directory(resource_directories.client(player_index));
         let join_started = Instant::now();
         let mut client = timeout(EVENT_WAIT, async {
             match topology {
@@ -659,6 +686,7 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         "host must retain at least one selected transport route per joined player"
     );
     wait_for_exact_synthetic_rosters(&probes).await;
+    wait_for_bootstrap_downloads(&probes).await;
 
     let mesh_started = Instant::now();
     let mesh_establishment_us = if topology.is_direct_mesh() {
@@ -1625,6 +1653,28 @@ async fn wait_for_exact_synthetic_rosters(probes: &[ClientProbe]) {
     }
 }
 
+/// Requires every client to complete its download rather than merely not
+/// report a failure: in a mesh, loading peers keep one another's discovery
+/// alive indefinitely, so the absence of `ResourceLoadFailed` proves nothing.
+async fn wait_for_bootstrap_downloads(probes: &[ClientProbe]) {
+    let deadline = Instant::now() + EVENT_WAIT;
+    loop {
+        let incomplete = probes
+            .iter()
+            .filter(|probe| !probe.has_downloaded_bootstrap_resources())
+            .map(|probe| probe.client_id)
+            .collect::<Vec<_>>();
+        if incomplete.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "clients missing host-served bootstrap resources {BOOTSTRAP_RESOURCE_IDS:?} before GO: {incomplete:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 fn has_exact_synthetic_roster(player_infos: &ControlPlayerInfoRegistry) -> bool {
     let (last_player_id, rows) = player_infos.retained_rows_snapshot();
     last_player_id == PLAYER_COUNT as i32
@@ -1644,6 +1694,89 @@ fn has_exact_synthetic_roster(player_infos: &ControlPlayerInfoRegistry) -> bool 
                         }]
             },
         )
+}
+
+/// Resource IDs of the synthetic JoinData's dynamic and scenario cores.
+const BOOTSTRAP_RESOURCE_IDS: [i32; 2] = [1, 2];
+
+/// Per-run working directories for the host's bootstrap files and each
+/// client's downloads.
+struct BootstrapResourceDirectories {
+    root: PathBuf,
+}
+
+impl BootstrapResourceDirectories {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "clonk-network-load-24-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        Self { root }
+    }
+
+    fn host(&self) -> PathBuf {
+        self.directory("host")
+    }
+
+    fn client(&self, client_index: usize) -> PathBuf {
+        self.directory(&format!("client-{client_index:02}"))
+    }
+
+    fn directory(&self, name: &str) -> PathBuf {
+        let path = self.root.join(name);
+        std::fs::create_dir_all(&path).expect("create load-test resource directory");
+        path
+    }
+}
+
+impl Drop for BootstrapResourceDirectories {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Serves real bytes for the synthetic JoinData's dynamic and scenario cores,
+/// as a real host does for the round it publishes. Without a holder every
+/// client's discovery of them times out into `ResourceLoadFailed`; the mesh
+/// topologies only hid that because loading peers answer one another's
+/// Discover with an empty Status, which restarts the timeout
+/// (clonk-org/clonk-rs#1870). The bytes and core mirror the session fixture
+/// `restart_ack_starts_transfer_of_a_replaced_dynamic_resource`.
+fn host_bootstrap_resources(config: &mut HostConfig, directory: &Path) {
+    const BYTES: &[u8] = b"local";
+    let snapshot = config
+        .initial_join_snapshot
+        .as_mut()
+        .expect("load test uses the synthetic socket JoinData");
+    for core in [&mut snapshot.dynamic, &mut snapshot.parameters.scenario] {
+        core.file_size = BYTES.len() as _;
+        core.file_crc = 0x8bd6_88e8;
+        core.contents_crc = 0x8bd6_88e8;
+        core.chunk_size = 2;
+        let path = directory.join(String::from_utf8_lossy(core.filename.as_bytes()).as_ref());
+        std::fs::write(&path, BYTES).expect("write hosted bootstrap resource");
+        config
+            .resource_registrations
+            .push(clonk_network::ResourceRegistration::from_core(
+                core, true, false,
+            ));
+        config
+            .resource_files
+            .push(clonk_network::HostedResourceFile {
+                core: core.clone(),
+                path,
+                ownership: clonk_network::ResourceFileOwnership::Temporary,
+                binary_compatible: true,
+            });
+    }
+    assert_eq!(
+        [snapshot.dynamic.id, snapshot.parameters.scenario.id],
+        BOOTSTRAP_RESOURCE_IDS
+    );
+    config.resource_directory = Some(directory.to_path_buf());
 }
 
 fn configure_host_transport(config: &mut HostConfig, topology: LoadTopology) {
@@ -2443,11 +2576,11 @@ fn load_report_metadata_limits_harpoonrace_and_rtt_claims_to_measured_transport(
     );
     assert_eq!(
         LOAD_WORKLOAD_SCOPE,
-        "HarpoonRace-shaped lobby/control parameters only; no scenario/resource loading or game simulation"
+        "HarpoonRace-shaped lobby/control parameters only; host-served placeholder scenario/dynamic downloads, no scenario loading or game simulation"
     );
     assert_eq!(
         LOAD_SEQUENCE,
-        "synthetic max_players=24 JoinData -> 24 PlayerInfo joins -> activate all -> GO"
+        "synthetic max_players=24 JoinData -> 24 PlayerInfo joins -> activate all -> host-served scenario/dynamic downloads -> GO"
     );
     assert_eq!(
         LOAD_RTT_SCOPE,
@@ -2525,6 +2658,56 @@ fn application_rtt_assertions_pin_aggregate_and_every_client_sample_count() {
     assert!(assertions.iter().all(|assertion| assertion.passed));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_client_downloads_the_host_held_bootstrap_resources() {
+    let directories = BootstrapResourceDirectories::new();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind bootstrap resource host");
+    let address = listener
+        .local_addr()
+        .expect("bootstrap resource host address");
+    let mut config = HostConfig::default();
+    host_bootstrap_resources(&mut config, &directories.host());
+    let mut host = clonk_network::start_host(listener, config)
+        .await
+        .expect("start bootstrap resource host");
+    let _host_events = host.take_event_receiver();
+    let mut client = connect_client(
+        address,
+        configure_client_transport(
+            ClientConfig::new("RelayLoader", ParticipantKind::Player),
+            LoadTopology::Relay,
+        )
+        .with_resource_directory(directories.client(1)),
+    )
+    .await
+    .expect("connect relay bootstrap client");
+    let mut events = client.take_event_receiver();
+
+    let mut completed = BTreeSet::new();
+    while completed != BOOTSTRAP_RESOURCE_IDS.into_iter().collect() {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(ClientEvent::ResourceComplete {
+                resource_id,
+                local: false,
+                ..
+            })) => {
+                completed.insert(resource_id);
+            }
+            Ok(Some(ClientEvent::ResourceLoadFailed { resource_id })) => {
+                panic!("relay client found no holder for bootstrap resource {resource_id}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("relay bootstrap client event stream ended"),
+            Err(_) => panic!("relay client downloaded only {completed:?} within {EVENT_WAIT:?}"),
+        }
+    }
+
+    client.shutdown().await.expect("shut down bootstrap client");
+    host.shutdown().await.expect("shut down bootstrap host");
+}
+
 #[tokio::test]
 async fn application_rtt_client_wait_filters_ready_checks_for_other_clients() {
     let expected = application_round_trip_packet(7);
@@ -2555,7 +2738,7 @@ fn isolated_ping_contract_pins_schema_sequence_samples_and_two_message_token() {
     // ReadyCheck retains Other(int32_t), and ActivationRequest carries its
     // signed tick unchanged (oracle src/C4Network2.h:480-502;
     // src/C4Network2.cpp:949-953,982-991).
-    assert_eq!(NETWORK_LOAD_REPORT_SCHEMA_VERSION, 6);
+    assert_eq!(NETWORK_LOAD_REPORT_SCHEMA_VERSION, 7);
     assert_eq!(ISOLATED_RTT_WARMUP_SAMPLES, 128);
     assert_eq!(ISOLATED_RTT_MEASURED_SAMPLES, 256);
     assert_eq!(ISOLATED_RTT_CLIENT_ID, 1);

@@ -219,7 +219,7 @@ incapable of proving a 50% change. Both diagnostic metrics are excluded from
 ## Validation and artifacts
 
 Runner artifacts use contract schema 5; the embedded harness reports use schema
-6. The runner independently checks the exact workload strings, 24 joined
+7. The runner independently checks the exact workload strings, 24 joined
 players, 25 control participants, selected route topology, 36 warmup ticks,
 requested duration and wall-time tolerance, measured tick and ready-delivery
 counts, all required harness assertions, and the exact diagnostic 24-by-8
