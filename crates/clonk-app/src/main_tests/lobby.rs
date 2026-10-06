@@ -7171,18 +7171,35 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     );
     main_assert!(app.lobby.classic_host.is_some());
     let local_addresses = some(&app.netplay.manager).local_addresses();
-    main_assert!(matches!(local_addresses.len(), 1 | 2));
     let tcp = local_addresses.first().test_value();
     main_assert_eq!(tcp.protocol => clonk_network::NetworkProtocol::Tcp);
     main_assert_ne!(tcp.endpoint.port() => 0);
-    if let Some(udp) = local_addresses.get(1) {
+    // AddLocalAddrs publishes wildcard TCP/UDP before each concrete host's
+    // TCP/UDP entries (pinned oracle src/C4Network2Client.cpp:281-317).
+    main_assert!(tcp.endpoint.ip().is_unspecified());
+    let udp = local_addresses
+        .iter()
+        .find(|address| address.protocol == clonk_network::NetworkProtocol::Udp);
+    let mut expected_addresses = vec![*tcp];
+    if let Some(udp) = udp {
         // C4Network2IO starts TCP and UDP independently and publishes only
         // live transports. A parallel test or process may own PortUDP;
         // that is a valid TCP-only host, not an admission failure.
-        main_assert_eq!(udp.protocol => clonk_network::NetworkProtocol::Udp);
         main_assert_eq!(udp.endpoint.ip() => tcp.endpoint.ip());
         main_assert_eq!(udp.endpoint.port() => 11_113);
+        expected_addresses.push(*udp);
     }
+    expected_addresses.push(clonk_network::NetworkAddress::new(
+        clonk_network::NetworkProtocol::Tcp,
+        SocketAddr::from(([127, 0, 0, 1], tcp.endpoint.port())),
+    ));
+    if udp.is_some() {
+        expected_addresses.push(clonk_network::NetworkAddress::new(
+            clonk_network::NetworkProtocol::Udp,
+            SocketAddr::from(([127, 0, 0, 1], 11_113)),
+        ));
+    }
+    main_assert_eq!(local_addresses => expected_addresses);
     let advertised = some(&app.netplay.advertised_game_reference);
     main_assert!(app.netplay.game_advertiser.is_some());
     main_assert!(advertised.summary().join_allowed);

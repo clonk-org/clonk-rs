@@ -6858,34 +6858,6 @@ fn normalize_resolved_netpuncher_addresses(
     ipv4.into_iter().chain(ipv6).collect()
 }
 
-fn host_registration_addresses(
-    tcp_address: Option<SocketAddr>,
-    configured_tcp_port: Option<u16>,
-    udp_address: Option<SocketAddr>,
-    configured_udp_port: Option<u16>,
-) -> Vec<NetworkAddress> {
-    let mut addresses = Vec::with_capacity(2);
-    if let Some(tcp_address) = tcp_address {
-        let port = configured_tcp_port.unwrap_or(tcp_address.port());
-        if port != 0 {
-            addresses.push(NetworkAddress::new(
-                NetworkProtocol::Tcp,
-                SocketAddr::new(tcp_address.ip(), port),
-            ));
-        }
-    }
-    if let Some(udp_address) = udp_address {
-        let port = configured_udp_port.unwrap_or(udp_address.port());
-        if port != 0 {
-            addresses.push(NetworkAddress::new(
-                NetworkProtocol::Udp,
-                SocketAddr::new(udp_address.ip(), port),
-            ));
-        }
-    }
-    addresses
-}
-
 // These independently owned channels form the network-thread boundary; a
 // wrapper would only move the same ownership list into an opaque aggregate.
 #[allow(clippy::too_many_arguments)]
@@ -6953,6 +6925,7 @@ async fn run_worker(
 #[allow(clippy::too_many_arguments)]
 async fn run_host_worker(
     settings: HostSettings,
+    initial_config: Option<HostConfig>,
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
@@ -6964,7 +6937,7 @@ async fn run_host_worker(
 ) -> Result<()> {
     run_host_worker_with_voice_enabled(
         settings,
-        None,
+        initial_config,
         local_owner,
         true,
         command_rx,
@@ -7086,6 +7059,7 @@ async fn run_host_worker_with_voice_enabled(
         let _ = local_id_tx.send(Err(message.clone().into()));
         return Err(anyhow!(message));
     }
+    let local_addresses = host_config.initial_local_addresses(bound_addr, udp_binding.local_addr());
     let mut league_runtime = None;
     let mut league_record_runtime = None;
     let mut league_start_response = None;
@@ -7094,21 +7068,15 @@ async fn run_host_worker_with_voice_enabled(
     if let Some(prepared_host) = prepared.as_mut() {
         if let Some(league_config) = prepared_host.league_config().cloned() {
             let record_transport_config = league_config.transport.clone();
-            let registration_addresses = host_registration_addresses(
-                bound_addr,
-                host_config.configured_tcp_port,
-                udp_binding.local_addr(),
-                host_config.configured_udp_port,
-            );
-            let reference =
-                match prepared_host.initial_host_game_reference(false, &registration_addresses) {
-                    Ok(reference) => reference,
-                    Err(error) => {
-                        let message = format!("cannot build league Start reference: {error}");
-                        let _ = local_id_tx.send(Err(message.clone().into()));
-                        return Err(anyhow!(message));
-                    }
-                };
+            let reference = match prepared_host.initial_host_game_reference(false, &local_addresses)
+            {
+                Ok(reference) => reference,
+                Err(error) => {
+                    let message = format!("cannot build league Start reference: {error}");
+                    let _ = local_id_tx.send(Err(message.clone().into()));
+                    return Err(anyhow!(message));
+                }
+            };
             // A refused registration is not a refused game: C4Network2::InitHost
             // answers a failed LeagueStart with DeinitLeague and keeps hosting,
             // and returns false only for the modal's Abort — which is all
@@ -7148,7 +7116,7 @@ async fn run_host_worker_with_voice_enabled(
                     return Err(anyhow!(message));
                 }
                 let reference = match prepared_host
-                    .initial_host_game_reference(false, &registration_addresses)
+                    .initial_host_game_reference(false, &local_addresses)
                 {
                     Ok(reference) => reference,
                     Err(error) => {
@@ -7192,7 +7160,9 @@ async fn run_host_worker_with_voice_enabled(
                 let _ = local_id_tx.send(Err(message.clone().into()));
                 return Err(anyhow!(message));
             }
+            let local_interface_endpoints = host_config.local_interface_endpoints.take();
             host_config = prepared_host.host_config().clone();
+            host_config.local_interface_endpoints = local_interface_endpoints;
             host_config.configured_tcp_port = Some(bound_addr.map_or(0, |address| address.port()));
             host_config.udp_bind_address = udp_bind_address;
         }
@@ -7205,8 +7175,6 @@ async fn run_host_worker_with_voice_enabled(
             host_config.netpuncher_addresses = resolve_netpuncher_addresses(&puncher_address).await;
         }
     }
-    let configured_tcp_port = host_config.configured_tcp_port;
-    let configured_udp_port = host_config.configured_udp_port;
     let mut host = match start_host_with_bindings(listener, host_config, udp_binding).await {
         Ok(host) => host,
         Err(err) => {
@@ -7222,25 +7190,6 @@ async fn run_host_worker_with_voice_enabled(
             return Err(anyhow!(message));
         }
     };
-    let mut local_addresses = Vec::new();
-    if let Some(bound_addr) = bound_addr {
-        let advertised_tcp_port = configured_tcp_port.unwrap_or(bound_addr.port());
-        if advertised_tcp_port != 0 {
-            local_addresses.push(NetworkAddress::new(
-                NetworkProtocol::Tcp,
-                SocketAddr::new(bound_addr.ip(), advertised_tcp_port),
-            ));
-        }
-    }
-    if let Some(udp_addr) = host.udp_local_addr() {
-        let advertised_udp_port = configured_udp_port.unwrap_or(udp_addr.port());
-        if advertised_udp_port != 0 {
-            local_addresses.push(NetworkAddress::new(
-                NetworkProtocol::Udp,
-                SocketAddr::new(udp_addr.ip(), advertised_udp_port),
-            ));
-        }
-    }
     netpuncher_state.lock().local_addresses = local_addresses.clone();
     let voice_sender = host.voice_sender();
     let voice_event_rx = host.take_voice_receiver();
@@ -10526,6 +10475,13 @@ mod tests {
     );
 
     fn start_test_host_worker(settings: HostSettings) -> TestHostWorker {
+        start_test_host_worker_with_config(settings, None)
+    }
+
+    fn start_test_host_worker_with_config(
+        settings: HostSettings,
+        initial_config: Option<HostConfig>,
+    ) -> TestHostWorker {
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
         let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
         let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
@@ -10537,6 +10493,7 @@ mod tests {
         let worker = tokio::spawn(async move {
             run_host_worker(
                 settings,
+                initial_config,
                 0,
                 &mut command_rx,
                 &mut control_tick_rx,
@@ -11557,22 +11514,36 @@ mod tests {
 
     #[test]
     fn league_start_addresses_keep_tcp_and_configured_udp_ports_distinct() {
+        // AddLocalAddrs includes wildcard entries before concrete addresses
+        // (pinned oracle src/C4Network2Client.cpp:281-317).
         let tcp = "192.0.2.4:11112".parse().test_value();
         let udp = "192.0.2.4:11113".parse().test_value();
+        let wildcard_tcp =
+            NetworkAddress::new(NetworkProtocol::Tcp, "0.0.0.0:11112".parse().test_value());
+        let wildcard_udp =
+            NetworkAddress::new(NetworkProtocol::Udp, "0.0.0.0:11113".parse().test_value());
+        let mut config = HostConfig {
+            configured_tcp_port: Some(11_112),
+            configured_udp_port: Some(11_113),
+            local_interface_endpoints: Some(Vec::new()),
+            ..HostConfig::default()
+        };
         assert_eq!(
-            host_registration_addresses(Some(tcp), Some(11_112), Some(udp), Some(11_113)),
+            config.initial_local_addresses(Some(tcp), Some(udp)),
             vec![
+                wildcard_tcp,
+                wildcard_udp,
                 NetworkAddress::new(NetworkProtocol::Tcp, tcp),
                 NetworkAddress::new(NetworkProtocol::Udp, udp),
             ]
         );
         assert_eq!(
-            host_registration_addresses(Some(tcp), Some(11_112), None, Some(11_113)),
-            vec![NetworkAddress::new(NetworkProtocol::Tcp, tcp)]
+            config.initial_local_addresses(Some(tcp), None),
+            vec![wildcard_tcp, NetworkAddress::new(NetworkProtocol::Tcp, tcp)]
         );
         assert_eq!(
-            host_registration_addresses(None, Some(0), Some(udp), Some(11_113)),
-            vec![NetworkAddress::new(NetworkProtocol::Udp, udp)]
+            config.initial_local_addresses(None, Some(udp)),
+            vec![wildcard_udp, NetworkAddress::new(NetworkProtocol::Udp, udp)]
         );
     }
 
@@ -11582,7 +11553,7 @@ mod tests {
             .await
             .test_value();
         let occupied_address = occupied.local_addr().test_value();
-        let config = HostConfig {
+        let mut config = HostConfig {
             udp_bind_address: Some(occupied_address),
             configured_udp_port: Some(occupied_address.port()),
             ..HostConfig::default()
@@ -11591,16 +11562,14 @@ mod tests {
 
         assert_eq!(binding.local_addr(), None);
         assert_eq!(
-            host_registration_addresses(
+            config.initial_local_addresses(
                 Some("127.0.0.1:11112".parse().unwrap()),
-                Some(11_112),
                 binding.local_addr(),
-                config.configured_udp_port,
             ),
-            vec![NetworkAddress::new(
-                NetworkProtocol::Tcp,
-                "127.0.0.1:11112".parse().unwrap(),
-            )]
+            vec![
+                NetworkAddress::new(NetworkProtocol::Tcp, "0.0.0.0:11112".parse().unwrap()),
+                NetworkAddress::new(NetworkProtocol::Tcp, "127.0.0.1:11112".parse().unwrap()),
+            ]
         );
     }
 
@@ -12298,6 +12267,52 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_worker_publishes_ranked_interface_addresses_in_reference() {
+        // InitLocal copies AddLocalAddrs' full local vector into the reference
+        // (pinned oracle src/C4Network2Reference.cpp:81-84;
+        // src/C4Network2Client.cpp:281-317).
+        let settings = test_host_settings("0.0.0.0:0".parse().test_value(), None);
+        let config = HostConfig {
+            local_interface_endpoints: Some(vec![
+                "[fe80::7%7]:0".parse().test_value(),
+                "192.168.1.7:0".parse().test_value(),
+            ]),
+            ..HostConfig::default()
+        };
+        let (command_tx, _event_rx, local_id_rx, netpuncher_state, worker, _telemetry_rx) =
+            start_test_host_worker_with_config(settings, Some(config));
+        local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .test_value();
+        let addresses = netpuncher_state.lock().local_addresses.clone();
+        let port = addresses[0].endpoint.port();
+        assert_ne!(port, 0);
+        let expected = [
+            (NetworkProtocol::Tcp, "0.0.0.0:0"),
+            (NetworkProtocol::Udp, "0.0.0.0:0"),
+            (NetworkProtocol::Tcp, "192.168.1.7:0"),
+            (NetworkProtocol::Udp, "192.168.1.7:0"),
+            (NetworkProtocol::Tcp, "[fe80::7%7]:0"),
+            (NetworkProtocol::Udp, "[fe80::7%7]:0"),
+        ]
+        .map(|(protocol, endpoint)| {
+            let mut endpoint: SocketAddr = endpoint.parse().test_value();
+            endpoint.set_port(port);
+            NetworkAddress::new(protocol, endpoint)
+        });
+        assert_eq!(addresses, expected);
+        let reference = PreparedHostBootstrap::transport_test_fixture(port, port, None)
+            .initial_host_game_reference(true, &addresses)
+            .test_value();
+        assert_eq!(reference.summary().addresses, expected);
+        assert_eq!(reference.metadata().addresses, expected);
+
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join host worker").test_value();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_worker_binds_and_advertises_tcp_and_udp_on_one_endpoint() {
         let settings = test_host_settings(SocketAddr::from(([127, 0, 0, 1], 0)), None);
         let (command_tx, _event_rx, local_id_rx, netpuncher_state, worker, _telemetry_rx) =
@@ -12309,11 +12324,18 @@ Message=Server says Andr\xe9\r\n\
             .test_value();
         assert_eq!(ready.local_client_id, HOST_CLIENT_ID);
         let local_addresses = netpuncher_state.lock().local_addresses.clone();
-        assert_eq!(local_addresses.len(), 2);
+        // AddLocalAddrs keeps wildcard entries even for an explicit bind
+        // (pinned oracle src/C4Network2Client.cpp:281-295).
+        assert_eq!(local_addresses.len(), 4);
         assert_eq!(local_addresses[0].protocol, NetworkProtocol::Tcp);
         assert_eq!(local_addresses[1].protocol, NetworkProtocol::Udp);
         assert_eq!(local_addresses[0].endpoint, local_addresses[1].endpoint);
         assert_ne!(local_addresses[0].endpoint.port(), 0);
+        assert!(local_addresses[0].endpoint.ip().is_unspecified());
+        assert_eq!(local_addresses[2].protocol, NetworkProtocol::Tcp);
+        assert_eq!(local_addresses[3].protocol, NetworkProtocol::Udp);
+        assert_eq!(local_addresses[2].endpoint, local_addresses[3].endpoint);
+        assert!(local_addresses[2].endpoint.ip().is_loopback());
 
         command_tx.send(NetworkCommand::Shutdown).await.test_value();
         worker.await.expect("join host worker").test_value();
@@ -12339,10 +12361,13 @@ Message=Server says Andr\xe9\r\n\
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
             .test_value();
-        let expected_addresses = vec![NetworkAddress::new(
-            NetworkProtocol::Udp,
-            configured_address,
-        )];
+        let expected_addresses = vec![
+            NetworkAddress::new(
+                NetworkProtocol::Udp,
+                SocketAddr::from(([0, 0, 0, 0], configured_address.port())),
+            ),
+            NetworkAddress::new(NetworkProtocol::Udp, configured_address),
+        ];
         assert_eq!(netpuncher_state.lock().local_addresses, expected_addresses);
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_secs(2)),
@@ -12380,10 +12405,13 @@ Message=Server says Andr\xe9\r\n\
             .test_value();
         assert_eq!(
             netpuncher_state.lock().local_addresses,
-            vec![NetworkAddress::new(
-                NetworkProtocol::Udp,
-                configured_address,
-            )]
+            vec![
+                NetworkAddress::new(
+                    NetworkProtocol::Udp,
+                    SocketAddr::from(([0, 0, 0, 0], configured_address.port())),
+                ),
+                NetworkAddress::new(NetworkProtocol::Udp, configured_address),
+            ]
         );
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_secs(2)),
