@@ -212,6 +212,46 @@ impl GameApp {
         self.classic_host_lobby_active() || self.joined_network_lobby_active()
     }
 
+    /// Who a message without a player is from. C++ names the client's nick
+    /// (C4Control.cpp:1117-1123), which falls back to the computer name
+    /// (C4Client.cpp:48-55). In the lobby the port names the client's players
+    /// instead, as the player list beside it does; a client with none (an
+    /// observer) and every message outside the lobby keep the nick.
+    pub(crate) fn player_less_message_sender(&self, client_id: i32) -> String {
+        // C4ClientCore's nick is never empty: it takes the client name
+        // (C4Client.cpp:51-54), which a lobby snapshot may not have applied yet.
+        let nick = || {
+            self.netplay
+                .control_clients
+                .state(client_id)
+                .and_then(|client| {
+                    [client.nick.as_bytes(), client.name.as_bytes()]
+                        .into_iter()
+                        .find(|text| !text.is_empty())
+                        .map(legacy_presentation_text)
+                })
+                .unwrap_or_else(|| "???".to_string())
+        };
+        let players = self
+            .control_message_has_lobby()
+            .then(|| {
+                self.players
+                    .infos
+                    .client_info_ids(client_id)
+                    .into_iter()
+                    .filter_map(|id| self.players.infos.get(id))
+                    .filter(|player| {
+                        player.player_type == clonk_engine::PLAYER_INFO_TYPE_USER
+                            && player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0
+                    })
+                    .map(|player| legacy_presentation_text(control_player_effective_name(player)))
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|names| !names.is_empty());
+        players.map_or_else(nick, |names| names.join(", "))
+    }
+
     pub(crate) fn control_message_lobby_chat_color(&self, client_id: i32) -> u32 {
         if self.netplay.control_clients.is_activated(client_id) {
             let hide_assigned_team_color = self.control_message_has_lobby()

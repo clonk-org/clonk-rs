@@ -262,12 +262,7 @@ impl GameApp {
                         (line, *color)
                     }
                     None => {
-                        let nick = self
-                            .netplay
-                            .control_clients
-                            .state(control.by_client)
-                            .map(|client| legacy_presentation_text(client.nick.as_bytes()))
-                            .unwrap_or_else(|| "???".to_string());
+                        let nick = self.player_less_message_sender(control.by_client);
                         let white = self.control_message_has_lobby() && self.lobby.white_chat;
                         let line = match (control.message_type, white) {
                             (MESSAGE_TYPE_NORMAL, true) => {

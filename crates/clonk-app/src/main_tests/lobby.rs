@@ -7941,6 +7941,65 @@ fn runtime_status_reach_uses_preflight_ready_not_raw_packet_presence() {
     main_assert_eq!(commands.take_runtime_status_commands() => vec![network::TestRuntimeStatusCommand::Reached {status: pause, actual_control_tick: 0,}]);
 }
 
+/// Port divergence. A lobby message carries no player, so C++ labels it with
+/// the sending client's nick (C4Control.cpp:1117-1123), which falls back to the
+/// computer name (C4Client.cpp:48-55): players read `<Mac.localdomain>` beside
+/// the player they picked in the same lobby. The lobby knows each client's
+/// players, so the port names them and keeps the nick for a client with none.
+#[test]
+fn lobby_chat_names_the_sending_clients_players_rather_than_its_computer() {
+    let mut app = new_menu_app(640, 480);
+    install_test_classic_host_lobby(&mut app);
+    app.lobby.white_chat = false;
+    app.chat.show_log_timestamps = false;
+    app.netplay.control_clients.replace_snapshot([
+        message_client(0, b"Local"),
+        message_client(7, b"Mac.localdomain"),
+        message_client(9, b"observer-box"),
+    ]);
+    app.players.infos.apply(lobby_fixture!(player_data:
+        7,
+        vec![lobby_fixture!(player_bytes: b"Tyler", color: 0x00ff_0000,
+            id: 1,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+        )],
+    ));
+
+    app.execute_message_control(message_control(
+        MESSAGE_TYPE_NORMAL,
+        -1,
+        -1,
+        b"bing bing bing",
+        7,
+    ));
+    app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, -1, -1, b"watching", 9));
+
+    let logs = app_classic_lobby(&app).controller.logs();
+    main_assert_eq!(logs[0].text => "<Tyler> bing bing bing");
+    main_assert_eq!(logs[1].text => "<observer-box> watching");
+}
+
+/// C4ClientCore's nick is never empty: an empty `Network.Nick` takes the
+/// client name (C4Client.cpp:51-54). A lobby snapshot that has not filled the
+/// nick in yet must not print `<>`.
+#[test]
+fn a_player_less_message_never_shows_an_empty_sender() {
+    let mut app = new_menu_app(640, 480);
+    install_test_classic_host_lobby(&mut app);
+    app.lobby.white_chat = false;
+    app.chat.show_log_timestamps = false;
+    let mut observer = message_client(9, b"observer-box");
+    observer.nick = clonk_engine::LegacyCString::default();
+    app.netplay
+        .control_clients
+        .replace_snapshot([message_client(0, b"Local"), observer]);
+
+    app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, -1, -1, b"watching", 9));
+
+    let logs = app_classic_lobby(&app).controller.logs();
+    main_assert_eq!(logs[0].text => "<observer-box> watching");
+}
+
 #[test]
 fn lobby_message_keeps_markup_timestamp_and_makes_chat_color_readable() {
     // MainDlg::OnMessage forwards the first user player's lobby color to
