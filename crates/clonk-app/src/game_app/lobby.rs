@@ -218,11 +218,18 @@ impl GameApp {
     /// instead, as the player list beside it does; a client with none (an
     /// observer) and every message outside the lobby keep the nick.
     pub(crate) fn player_less_message_sender(&self, client_id: i32) -> String {
+        // C4ClientCore's nick is never empty: it takes the client name
+        // (C4Client.cpp:51-54), which a lobby snapshot may not have applied yet.
         let nick = || {
             self.netplay
                 .control_clients
                 .state(client_id)
-                .map(|client| legacy_presentation_text(client.nick.as_bytes()))
+                .and_then(|client| {
+                    [client.nick.as_bytes(), client.name.as_bytes()]
+                        .into_iter()
+                        .find(|text| !text.is_empty())
+                        .map(legacy_presentation_text)
+                })
                 .unwrap_or_else(|| "???".to_string())
         };
         let players = self

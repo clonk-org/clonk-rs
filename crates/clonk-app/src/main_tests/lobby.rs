@@ -7979,6 +7979,27 @@ fn lobby_chat_names_the_sending_clients_players_rather_than_its_computer() {
     main_assert_eq!(logs[1].text => "<observer-box> watching");
 }
 
+/// C4ClientCore's nick is never empty: an empty `Network.Nick` takes the
+/// client name (C4Client.cpp:51-54). A lobby snapshot that has not filled the
+/// nick in yet must not print `<>`.
+#[test]
+fn a_player_less_message_never_shows_an_empty_sender() {
+    let mut app = new_menu_app(640, 480);
+    install_test_classic_host_lobby(&mut app);
+    app.lobby.white_chat = false;
+    app.chat.show_log_timestamps = false;
+    let mut observer = message_client(9, b"observer-box");
+    observer.nick = clonk_engine::LegacyCString::default();
+    app.netplay
+        .control_clients
+        .replace_snapshot([message_client(0, b"Local"), observer]);
+
+    app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, -1, -1, b"watching", 9));
+
+    let logs = app_classic_lobby(&app).controller.logs();
+    main_assert_eq!(logs[0].text => "<observer-box> watching");
+}
+
 #[test]
 fn lobby_message_keeps_markup_timestamp_and_makes_chat_color_readable() {
     // MainDlg::OnMessage forwards the first user player's lobby color to
