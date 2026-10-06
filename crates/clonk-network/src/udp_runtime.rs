@@ -877,7 +877,6 @@ pub struct ReliableUdpSocketDriver {
     receive_buffer: Vec<u8>,
     pending_voice_media: Option<(SocketAddr, Vec<u8>)>,
     protocol_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
-    last_send: Option<ReliableUdpLastSend>,
     socket_writability_established: bool,
     #[cfg(test)]
     protocol_timer_arms: usize,
@@ -1037,19 +1036,18 @@ impl ReliableUdpPuncherRoutes {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ReliableUdpLastSend {
-    Peer(SocketAddr),
-    BestEffort,
-}
-
 #[cfg(test)]
 type ReliableUdpSendHook = Box<dyn FnMut(SocketAddr, &[u8]) -> io::Result<usize> + Send + 'static>;
 
 pub(crate) enum ReliableUdpPollReady {
     Datagram(usize, SocketAddr),
     Timer,
-    SocketError(io::Error),
+    /// A failed receive. `source` is the address the OS reported alongside
+    /// the error, when it reports one.
+    SocketError {
+        error: io::Error,
+        source: Option<SocketAddr>,
+    },
 }
 
 impl ReliableUdpSocketDriver {
@@ -1087,7 +1085,6 @@ impl ReliableUdpSocketDriver {
             receive_buffer: vec![0; RECEIVE_BUFFER_BYTES],
             pending_voice_media: None,
             protocol_timer: None,
-            last_send: None,
             socket_writability_established: false,
             #[cfg(test)]
             protocol_timer_arms: 0,
@@ -1291,7 +1288,6 @@ impl ReliableUdpSocketDriver {
         let destination = self.socket_destination(punchee_address)?;
         let sent_at_ms = self.elapsed().as_millis() as u32;
         let wire = encode_netpuncher_punch(sent_at_ms);
-        self.last_send = Some(ReliableUdpLastSend::BestEffort);
         self.socket.send_to(&wire, destination).await?;
         Ok(())
     }
@@ -1334,7 +1330,6 @@ impl ReliableUdpSocketDriver {
             ));
         }
         let destination = self.socket_destination(peer)?;
-        self.last_send = Some(ReliableUdpLastSend::BestEffort);
         self.record_peer_output(peer, payload.len());
         match self.socket.try_send_to(payload, destination) {
             Ok(length) => Ok(length == payload.len()),
@@ -1367,10 +1362,10 @@ impl ReliableUdpSocketDriver {
             protocol_timer.as_mut().reset(deadline);
         }
         tokio::select! {
-            result = self.socket.recv_from(&mut self.receive_buffer) => {
+            result = reliable_udp_recv_from(&self.socket, &mut self.receive_buffer) => {
                 match result {
                     Ok((length, source)) => ReliableUdpPollReady::Datagram(length, source),
-                    Err(error) => ReliableUdpPollReady::SocketError(error),
+                    Err((error, source)) => ReliableUdpPollReady::SocketError { error, source },
                 }
             }
             _ = protocol_timer.as_mut() => ReliableUdpPollReady::Timer,
@@ -1416,21 +1411,18 @@ impl ReliableUdpSocketDriver {
                 }
             }
             ReliableUdpPollReady::Timer => self.core.timer_at(now),
-            ReliableUdpPollReady::SocketError(error) => {
+            ReliableUdpPollReady::SocketError { error, source } => {
                 if reliable_udp_unreachable_error(&error) {
-                    match self.last_send {
-                        Some(ReliableUdpLastSend::Peer(peer)) => {
-                            let step = self.core.report_unreachable(peer);
-                            if !step.events.is_empty() {
-                                return self.finish_step(step).await;
-                            }
-                        }
-                        // C++ ignores failure to send Ping replies and the
-                        // best-effort Close/AddAddr controls; it must not tear
-                        // down an unrelated or surviving peer.
-                        Some(ReliableUdpLastSend::BestEffort) => return Ok(Vec::new()),
-                        None => {}
-                    }
+                    // Native closes the peer at the address recvfrom reported
+                    // with the ICMP notification, and no other
+                    // (oracle-src-pinned src/C4NetIO.cpp:1736-1743,
+                    // 2493-2506). The socket interleaves sends to every peer,
+                    // so its last destination says nothing about who refused;
+                    // without a source no peer is known to be gone.
+                    let step = source
+                        .map(|peer| self.core.report_unreachable(peer))
+                        .unwrap_or_default();
+                    return self.finish_step(step).await;
                 } else if reliable_udp_lost_datagram_error(&error) {
                     // Nothing about the peer is known to be wrong, so the
                     // reliable layer retransmits the lost datagram itself.
@@ -1623,11 +1615,6 @@ impl ReliableUdpSocketDriver {
         let peer = canonical_reliable_udp_peer_address(datagram.destination);
         let peer_backed = !reliable_udp_send_is_best_effort(&datagram.payload)
             && self.core.peer_status(peer).is_some();
-        self.last_send = Some(if peer_backed {
-            ReliableUdpLastSend::Peer(peer)
-        } else {
-            ReliableUdpLastSend::BestEffort
-        });
         // Native charges both buckets before sendto: every peer-originated
         // datagram hits that peer, and flagged multicast hits broadcast too.
         self.record_peer_output(peer, datagram.payload.len());
@@ -1777,6 +1764,76 @@ pub enum ReliableUdpDriverError {
 pub(crate) const RELIABLE_UDP_SEND_QUEUE_FULL: i32 = libc::ENOBUFS;
 #[cfg(windows)]
 pub(crate) const RELIABLE_UDP_SEND_QUEUE_FULL: i32 = 10_055; // WSAENOBUFS
+
+/// Receives one datagram. A failure keeps the address the OS reported with it.
+#[cfg(not(windows))]
+async fn reliable_udp_recv_from(
+    socket: &UdpSocket,
+    buffer: &mut [u8],
+) -> Result<(usize, SocketAddr), (io::Error, Option<SocketAddr>)> {
+    socket
+        .recv_from(buffer)
+        .await
+        .map_err(|error| (error, None))
+}
+
+/// Receives one datagram. A failure keeps the address the OS reported with it.
+///
+/// Windows reports an ICMP port-unreachable for an earlier send as
+/// `WSAECONNRESET` from a later `recvfrom`, which still fills its address
+/// argument with the ICMP origin; `C4NetIOSimpleUDP::Execute` reads it from
+/// there (oracle-src-pinned src/C4NetIO.cpp:1734-1743). std and Tokio drop
+/// that address along with the error, so this calls `recvfrom` itself.
+#[cfg(windows)]
+async fn reliable_udp_recv_from(
+    socket: &UdpSocket,
+    buffer: &mut [u8],
+) -> Result<(usize, SocketAddr), (io::Error, Option<SocketAddr>)> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock;
+
+    let capacity = i32::try_from(buffer.len()).unwrap_or(i32::MAX);
+    let received = socket
+        .async_io(tokio::io::Interest::READABLE, || {
+            // SAFETY: `buffer` outlives the call and holds `capacity` bytes,
+            // and `try_init` hands over zeroed storage with its true length.
+            let (result, address) = unsafe {
+                socket2::SockAddr::try_init(|storage, length| {
+                    let received = WinSock::recvfrom(
+                        socket.as_raw_socket() as WinSock::SOCKET,
+                        buffer.as_mut_ptr(),
+                        capacity,
+                        0,
+                        storage.cast(),
+                        length,
+                    );
+                    Ok(if received == WinSock::SOCKET_ERROR {
+                        Err(io::Error::from_raw_os_error(WinSock::WSAGetLastError()))
+                    } else {
+                        Ok(received as usize)
+                    })
+                })
+            }?;
+            match result {
+                // Tokio must see the WouldBlock itself to clear readiness.
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(error),
+                result => Ok((result, address.as_socket())),
+            }
+        })
+        .await;
+    match received {
+        Ok((Ok(length), Some(source))) => Ok((length, source)),
+        Ok((Ok(_), None)) => Err((
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "recvfrom returned an invalid address",
+            ),
+            None,
+        )),
+        Ok((Err(error), source)) => Err((error, source)),
+        Err(error) => Err((error, None)),
+    }
+}
 
 fn reliable_udp_unreachable_error(error: &io::Error) -> bool {
     matches!(
@@ -2049,9 +2106,10 @@ mod tests {
         let destination = spy.local_addr().unwrap();
 
         let events = driver
-            .process_ready(ReliableUdpPollReady::SocketError(
-                io::Error::from_raw_os_error(RELIABLE_UDP_SEND_QUEUE_FULL),
-            ))
+            .process_ready(ReliableUdpPollReady::SocketError {
+                error: io::Error::from_raw_os_error(RELIABLE_UDP_SEND_QUEUE_FULL),
+                source: None,
+            })
             .await
             .expect("a full send queue loses the datagram, not the socket");
         udp_assert!(events.is_empty());
@@ -2068,6 +2126,114 @@ mod tests {
             .unwrap()
             .unwrap();
         udp_assert_eq!(&buffer[..length] => b"after");
+    }
+
+    #[tokio::test]
+    async fn a_connection_reset_closes_only_the_peer_it_names() {
+        // Windows reports an ICMP port-unreachable as WSAECONNRESET on a later
+        // receive and fills recvfrom's address with the ICMP origin. Native
+        // closes the peer at that address and no other, whoever the socket
+        // sent to last (oracle-src-pinned src/C4NetIO.cpp:1736-1743,
+        // 2493-2506).
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let spy_a = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let spy_b = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let a = spy_a.local_addr().unwrap();
+        let b = spy_b.local_addr().unwrap();
+        connect_spy(&mut driver, &spy_a).await;
+        connect_spy(&mut driver, &spy_b).await;
+        udp_assert!(driver.send_packet(b, b"to b").await.unwrap().is_empty());
+
+        let events = driver
+            .process_ready(ReliableUdpPollReady::SocketError {
+                error: io::ErrorKind::ConnectionReset.into(),
+                source: Some(reliable_udp_send_address(a)),
+            })
+            .await
+            .unwrap();
+
+        udp_assert_eq!(events => vec![ReliableUdpEvent::Disconnected { peer: a, reason: ReliableUdpDisconnectReason::ConnectionReset }]);
+        udp_assert_eq!(driver.core.peer_status(b) => Some(ReliableUdpPeerStatus::Working));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_windows_port_unreachable_closes_only_the_refusing_peer() {
+        // The real ICMP path behind the two tests around this one: Windows
+        // turns a datagram refused by a closed loopback port into
+        // WSAECONNRESET on a later receive, naming the refusing port.
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let refusing_spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let healthy_spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let refusing = refusing_spy.local_addr().unwrap();
+        let healthy = healthy_spy.local_addr().unwrap();
+        connect_spy(&mut driver, &refusing_spy).await;
+        connect_spy(&mut driver, &healthy_spy).await;
+        drop(refusing_spy);
+        udp_assert!(driver
+            .send_packet(refusing, b"refused")
+            .await
+            .unwrap()
+            .is_empty());
+        udp_assert!(driver
+            .send_packet(healthy, b"to healthy")
+            .await
+            .unwrap()
+            .is_empty());
+
+        let events = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = driver.poll().await.unwrap();
+                if !events.is_empty() {
+                    return events;
+                }
+            }
+        })
+        .await
+        .expect("Windows reports the refused datagram on a later receive");
+
+        udp_assert_eq!(events => vec![ReliableUdpEvent::Disconnected { peer: refusing, reason: ReliableUdpDisconnectReason::ConnectionReset }]);
+        udp_assert_eq!(driver.core.peer_status(healthy) => Some(ReliableUdpPeerStatus::Working));
+    }
+
+    #[tokio::test]
+    async fn a_connection_reset_without_a_source_closes_no_peer() {
+        // Nothing names the peer an unattributed reset belongs to, so no peer
+        // is known to be gone; the reliable layer's own timeouts still close
+        // one that is.
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let peer = spy.local_addr().unwrap();
+        connect_spy(&mut driver, &spy).await;
+        udp_assert!(driver
+            .send_packet(peer, b"to peer")
+            .await
+            .unwrap()
+            .is_empty());
+
+        let events = driver
+            .process_ready(ReliableUdpPollReady::SocketError {
+                error: io::ErrorKind::ConnectionReset.into(),
+                source: None,
+            })
+            .await
+            .expect("an unattributed reset loses no peer and keeps the socket");
+
+        udp_assert!(events.is_empty());
+        udp_assert_eq!(driver.core.peer_status(peer) => Some(ReliableUdpPeerStatus::Working));
     }
 
     #[tokio::test]
