@@ -743,7 +743,7 @@ impl MutableGroup {
         }
         let patterns = sort_list.split('|').collect::<Vec<_>>();
         self.entries
-            .sort_by(|left, right| entry_sort_order(left, right, &patterns));
+            .sort_by_cached_key(|entry| standard_name_sort_key(&entry.name_bytes, &patterns));
         true
     }
 
@@ -762,7 +762,7 @@ impl MutableGroup {
             .map(|entry| entry.name_bytes.clone())
             .collect::<Vec<_>>();
         self.entries
-            .sort_by(|left, right| entry_sort_order(left, right, &patterns));
+            .sort_by_cached_key(|entry| standard_name_sort_key(&entry.name_bytes, &patterns));
         self.entries
             .iter()
             .map(|entry| &entry.name_bytes)
@@ -821,7 +821,8 @@ impl MutableGroup {
         let mut entries = self.entries.iter().collect::<Vec<_>>();
         if let Some(sort_list) = standard_sort_list_for_filename(&self.filename) {
             let patterns = sort_list.split('|').collect::<Vec<_>>();
-            entries.sort_by(|left, right| entry_sort_order(left, right, &patterns));
+            entries
+                .sort_by_cached_key(|entry| standard_name_sort_key(&entry.name_bytes, &patterns));
         }
         entries
     }
@@ -1032,7 +1033,19 @@ fn mem_scramble(buffer: &mut [u8]) {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static SORT_RANK_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_sort_rank_evaluations() -> usize {
+    SORT_RANK_EVALUATIONS.with(|count| count.replace(0))
+}
+
 fn sort_rank_bytes(name: &[u8], patterns: &[&str]) -> usize {
+    #[cfg(test)]
+    SORT_RANK_EVALUATIONS.with(|count| count.set(count.get() + 1));
     patterns
         .iter()
         .position(|pattern| wildcard_match(pattern.as_bytes(), name))
@@ -1040,28 +1053,18 @@ fn sort_rank_bytes(name: &[u8], patterns: &[&str]) -> usize {
         .unwrap_or(0)
 }
 
-/// Orders two stored names the way `C4Group::Sort` orders a group carrying
-/// this sort list: rank by first matching pattern, then `stricmp`
-/// (`C4Group.cpp:2300-2336`). Names equal under `stricmp` compare equal, as
-/// the native bubble sort leaves such a pair in input order.
-pub(crate) fn standard_name_order(
-    left: &[u8],
-    right: &[u8],
+/// C4Group::Sort compares descending first-match rank, then `stricmp`
+/// (C4Group.cpp:2300-2336). Compute both components once per entry; stable
+/// sorting retains input order for names equal under `stricmp`, as the
+/// native bubble sort does.
+pub(crate) fn standard_name_sort_key(
+    name: &[u8],
     patterns: &[&str],
-) -> std::cmp::Ordering {
-    let left_rank = sort_rank_bytes(left, patterns);
-    let right_rank = sort_rank_bytes(right, patterns);
-    right_rank
-        .cmp(&left_rank)
-        .then_with(|| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()))
-}
-
-fn entry_sort_order(
-    left: &MutableGroupEntry,
-    right: &MutableGroupEntry,
-    patterns: &[&str],
-) -> std::cmp::Ordering {
-    standard_name_order(&left.name_bytes, &right.name_bytes, patterns)
+) -> (std::cmp::Reverse<usize>, Vec<u8>) {
+    (
+        std::cmp::Reverse(sort_rank_bytes(name, patterns)),
+        name.to_ascii_lowercase(),
+    )
 }
 
 /// The stock sort list native `C4Group::Sort` selects for a group of this
@@ -1266,6 +1269,109 @@ fn entry_time_or_now(time: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutable_group_sorts_compute_one_rank_per_entry() {
+        let mut group = MutableGroup::new("Material.c4g");
+        for index in (0..24).rev() {
+            group
+                .add_file(format!("Material{index:02}.c4m"), vec![1])
+                .unwrap();
+        }
+
+        take_sort_rank_evaluations();
+        assert_eq!(group.ordered_entries().len(), 24);
+        assert_eq!(take_sort_rank_evaluations(), 24);
+
+        assert!(group.sort(C4FLS_MATERIAL));
+        assert_eq!(take_sort_rank_evaluations(), 24);
+
+        group.resort_for_filename_bytes(b"Material.c4g".to_vec());
+        assert_eq!(take_sort_rank_evaluations(), 24);
+    }
+
+    #[test]
+    fn cached_sort_keys_preserve_stable_case_ties_and_packed_legacy_bytes() {
+        // C4Group::Sort keeps input order when ranks and stricmp compare
+        // equal (C4Group.cpp:2300-2336). Imported entry cores may carry such
+        // names even though AddEntry would replace a case-equal entry.
+        let names = [
+            b"z.raw".as_slice(),
+            b"b.png",
+            b"a.c4m",
+            b"tExMaP.txt",
+            b"a.png",
+            b"A.png",
+            b"\x80a.png",
+            b"\x80A.png",
+            b"c.raw",
+            b"\xe4.raw",
+            b"\xc4.raw",
+        ];
+        let mut group = MutableGroup::new("Material.c4g");
+        group.entries = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| MutableGroupEntry {
+                name: String::from_utf8_lossy(name).into_owned(),
+                name_bytes: name.to_vec(),
+                data: MutableGroupEntryData::File(vec![index as u8]),
+                time: 123,
+                executable: false,
+            })
+            .collect();
+        let expected_order = [3, 4, 5, 1, 6, 7, 2, 8, 0, 10, 9];
+        let expected_names = expected_order.map(|index| names[index]);
+        assert_eq!(
+            group
+                .ordered_entries()
+                .into_iter()
+                .map(|entry| entry.name_bytes.as_slice())
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+
+        let mut explicitly_sorted = group.clone();
+        assert!(explicitly_sorted.sort(C4FLS_MATERIAL));
+        assert_eq!(
+            explicitly_sorted
+                .entries
+                .iter()
+                .map(|entry| entry.name_bytes.as_slice())
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+
+        let mut retargeted = group.clone();
+        retargeted.filename = b"Unlisted.bin".to_vec();
+        assert!(retargeted.resort_for_filename_bytes(b"Material.c4g".to_vec()));
+        assert_eq!(
+            retargeted
+                .entries
+                .iter()
+                .map(|entry| entry.name_bytes.as_slice())
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+        assert!(!retargeted.resort_for_filename_bytes(b"Material.c4g".to_vec()));
+
+        let mut expected = MutableGroup::new("Unlisted.bin");
+        expected.entries = expected_order
+            .map(|index| group.entries[index].clone())
+            .to_vec();
+        let expected_image = expected.pack_raw().unwrap();
+        for packed in [
+            group.pack_raw().unwrap(),
+            explicitly_sorted.pack_raw().unwrap(),
+            retargeted.pack_raw().unwrap(),
+        ] {
+            assert_eq!(
+                &packed[GROUP_HEADER_SIZE..],
+                &expected_image[GROUP_HEADER_SIZE..],
+                "all entry cores, CRCs, offsets and payload bytes retain the golden order"
+            );
+        }
+    }
 
     #[test]
     fn accelerated_crc_preserves_cpp_chained_update_semantics() {

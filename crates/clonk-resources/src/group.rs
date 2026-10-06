@@ -1775,8 +1775,11 @@ fn directory_entries(
     }
     if matches!(order, DirectoryEntryOrder::Packed) {
         let patterns = folder_sort_patterns(root);
-        entries.sort_unstable_by(|left, right| {
-            folder_name_order(&patterns, &left.name_bytes, &right.name_bytes)
+        entries.sort_by_cached_key(|entry| {
+            (
+                crate::group_writer::standard_name_sort_key(&entry.name_bytes, &patterns),
+                entry.name_bytes.clone(),
+            )
         });
     }
     Ok(entries)
@@ -1801,10 +1804,6 @@ fn folder_sort_patterns(root: &Path) -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
-fn folder_name_order(patterns: &[&str], left: &[u8], right: &[u8]) -> std::cmp::Ordering {
-    crate::group_writer::standard_name_order(left, right, patterns).then_with(|| left.cmp(right))
-}
-
 /// The names a folder scan yields, in the order `directory_entries` would,
 /// without the per-entry `stat` that filling `GroupEntry` metadata costs.
 fn sorted_directory_names(root: &Path) -> Result<Vec<(Vec<u8>, PathBuf)>, GroupError> {
@@ -1818,7 +1817,12 @@ fn sorted_directory_names(root: &Path) -> Result<Vec<(Vec<u8>, PathBuf)>, GroupE
         names.push((name_bytes, entry.path().to_path_buf()));
     }
     let patterns = folder_sort_patterns(root);
-    names.sort_unstable_by(|(left, _), (right, _)| folder_name_order(&patterns, left, right));
+    names.sort_by_cached_key(|(name, _)| {
+        (
+            crate::group_writer::standard_name_sort_key(name, &patterns),
+            name.clone(),
+        )
+    });
     Ok(names)
 }
 
@@ -2398,6 +2402,25 @@ mod tests {
     }
 
     #[test]
+    fn directory_scans_compute_one_sort_rank_per_entry() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("Graphics.c4g");
+        fs::create_dir(&root).unwrap();
+        for index in (0..24).rev() {
+            fs::write(root.join(format!("Graphics{index:02}.png")), b"image").unwrap();
+        }
+
+        crate::group_writer::take_sort_rank_evaluations();
+        let entries = Group::open(&root).unwrap().entries().unwrap();
+        assert_eq!(entries.len(), 24);
+        assert_eq!(crate::group_writer::take_sort_rank_evaluations(), 24);
+
+        let names = sorted_directory_names(&root).unwrap();
+        assert_eq!(names.len(), 24);
+        assert_eq!(crate::group_writer::take_sort_rank_evaluations(), 24);
+    }
+
+    #[test]
     fn folder_group_entries_are_independent_of_host_readdir_order() {
         // A GRPF_Folder scan is unsorted readdir (C4Group.cpp:1177-1207;
         // StdFile.cpp:823-836), so two materialisations of the same names
@@ -2440,6 +2463,137 @@ mod tests {
             folder_entry_names("Unlisted.dir", &["Zulu.txt", "alpha.txt", "Mike.txt"]),
             ["alpha.txt", "Mike.txt", "Zulu.txt"]
         );
+    }
+
+    #[test]
+    fn directory_scan_keys_preserve_extension_case_and_directory_pattern_order() {
+        // C4Group::Sort uses the first matching C4FLS_* segment followed by
+        // stricmp (C4Group.cpp:2288-2336). Both fresh directory scans retain
+        // the same extension and ASCII-case ordering for files and children.
+        for (root_name, created, expected) in [
+            (
+                "Material.c4g",
+                "ore.c4m Oil.c4m z.png TexMap.txt ash.bmp",
+                "TexMap.txt ash.bmp z.png Oil.c4m ore.c4m",
+            ),
+            (
+                "Objects.c4d",
+                "ActMap.txt Portrait2.bmp Portrait1.png GraphicsZ.png Graphics.png Graphics.bmp DefCore.txt Script2.c Script.c Rank.png Sub.c4d zzz.raw",
+                "DefCore.txt Graphics.bmp Graphics.png GraphicsZ.png Portrait1.png Portrait2.bmp ActMap.txt Script.c Script2.c Rank.png Sub.c4d zzz.raw",
+            ),
+            (
+                "Missions.c4f",
+                "Misc.c4f ScenarioB.c4s Title.png Icon.bmp Folder.txt LoaderX.jpg FolderMap.png z.png",
+                "Folder.txt Title.png Icon.bmp ScenarioB.c4s Misc.c4f LoaderX.jpg FolderMap.png z.png",
+            ),
+            (
+                "Unlisted.dir",
+                "Zulu.txt alpha.txt Mike.txt",
+                "alpha.txt Mike.txt Zulu.txt",
+            ),
+        ] {
+            let parent = tempdir().unwrap();
+            let root = parent.path().join(root_name);
+            fs::create_dir(&root).unwrap();
+            for name in created.split_ascii_whitespace() {
+                if [".c4d", ".c4s", ".c4f"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+                {
+                    fs::create_dir(root.join(name)).unwrap();
+                } else {
+                    fs::write(root.join(name), b"entry").unwrap();
+                }
+            }
+            let names = Group::open(&root)
+                .unwrap()
+                .entries()
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name_bytes)
+                .collect::<Vec<_>>();
+            let expected = expected
+                .split_ascii_whitespace()
+                .map(|name| name.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            assert_eq!(names, expected, "metadata scan of {root_name}");
+            assert_eq!(
+                sorted_directory_names(&root)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+                expected,
+                "name scan of {root_name}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_scan_keys_preserve_raw_legacy_bytes_and_case_ties() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempdir().unwrap();
+        let created = [
+            b"alpha.txt".as_slice(),
+            b"Alpha.txt",
+            b"aLpha.txt",
+            b"\x80a.txt",
+            b"\x80A.txt",
+        ];
+        for name in created {
+            fs::write(
+                root.path().join(OsString::from_vec(name.to_vec())),
+                b"entry",
+            )
+            .unwrap();
+        }
+        let expected = [
+            b"Alpha.txt".as_slice(),
+            b"aLpha.txt",
+            b"alpha.txt",
+            b"\x80A.txt",
+            b"\x80a.txt",
+        ];
+        assert_eq!(
+            Group::open(root.path())
+                .unwrap()
+                .entries()
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name_bytes)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            sorted_directory_names(root.path())
+                .unwrap()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn live_directory_scan_keys_observe_renames_and_metadata_changes() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("Graphics.c4g");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Zulu.png"), b"old").unwrap();
+        let group = Group::open(&root).unwrap();
+        assert_eq!(group.entries().unwrap()[0].size, 3);
+
+        fs::rename(root.join("Zulu.png"), root.join("Alpha.png")).unwrap();
+        fs::write(root.join("Alpha.png"), b"fresh image").unwrap();
+        let entries = group.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name_bytes, b"Alpha.png");
+        assert_eq!(entries[0].size, 11);
+        assert!(!group.exists("Zulu.png"));
+        assert_eq!(group.read_file("alpha.png").unwrap(), b"fresh image");
     }
 
     #[test]
