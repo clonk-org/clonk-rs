@@ -859,6 +859,7 @@ class CiLatencyTests(unittest.TestCase):
         network = matrix_entry(workflow, "network tests")
         self.assertIn("cargo nextest run -p clonk-network --lib", network)
         self.assertIn("discovery_multicast_target_uses_cpp_default_interface", network)
+        self.assertIn("a_windows_port_unreachable_closes_only_the_refusing_peer", network)
         self.assertNotIn("cargo clippy", network)
         self.assertIn("nextest: true", network)
         self.assertIn("installer: false", network)
