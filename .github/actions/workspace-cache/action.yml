@@ -1,0 +1,255 @@
+name: Workspace compiled input cache
+description: Restore optional source-aware build inputs; ledger verification remains mandatory
+inputs:
+  operation:
+    description: Restore, save, or look up compiled inputs
+    required: true
+    default: restore
+  lane:
+    description: Owned landing-linux or coverage-linux cache lane
+    required: true
+  target:
+    description: Isolated Cargo target directory inside this checkout
+    required: true
+  ledger:
+    description: Isolated ledger file outside the target directory
+    required: true
+  recipe:
+    description: Exact build profile and feature recipe
+    required: true
+outputs:
+  key:
+    value: ${{ steps.identity.outputs.key }}
+  prefix:
+    value: ${{ steps.identity.outputs.prefix }}
+  cache-hit:
+    value: ${{ steps.cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve compiled input identity and publication authority
+      id: identity
+      shell: bash
+      env:
+        CACHE_OPERATION: ${{ inputs.operation }}
+        CACHE_LANE: ${{ inputs.lane }}
+        CACHE_TARGET: ${{ inputs.target }}
+        CACHE_LEDGER: ${{ inputs.ledger }}
+        CACHE_RECIPE: ${{ inputs.recipe }}
+      run: |
+        python3 - <<'PYKEY'
+        import hashlib
+        import json
+        import os
+        from pathlib import Path, PurePosixPath
+        import re
+        import subprocess
+        import tomllib
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+        operation = os.environ["CACHE_OPERATION"]
+        lane = os.environ["CACHE_LANE"]
+        target = os.environ["CACHE_TARGET"]
+        ledger = os.environ["CACHE_LEDGER"]
+        recipe = os.environ["CACHE_RECIPE"]
+        if operation not in ("restore", "save", "lookup"):
+            raise SystemExit("unsupported workspace cache operation")
+        if lane not in ("landing-linux", "coverage-linux"):
+            raise SystemExit("unsupported workspace cache lane")
+        if not recipe.strip() or "\n" in recipe or "\r" in recipe:
+            raise SystemExit("workspace cache requires a single-line build recipe")
+        if not root.is_absolute() or root.resolve() != root or not root.is_dir():
+            raise SystemExit("workspace cache requires a real checkout root")
+
+        def git(*arguments):
+            return subprocess.check_output(
+                ["git", "-C", str(root), *arguments], stderr=subprocess.PIPE, timeout=30,
+            ).decode().strip()
+
+        def digest(value):
+            return hashlib.sha256(value).hexdigest()
+
+        if Path(git("rev-parse", "--show-toplevel")) != root:
+            raise SystemExit("workspace cache root differs from the Git checkout")
+        object_id = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+        head = git("rev-parse", "HEAD")
+        tree = git("rev-parse", "HEAD^{tree}")
+        if not object_id.fullmatch(head) or head != os.environ.get("GITHUB_SHA"):
+            raise SystemExit("workspace cache source differs from the workflow source")
+        if not object_id.fullmatch(tree):
+            raise SystemExit("workspace cache tree identity is malformed")
+        content = git("ls-tree", "HEAD", "--", "content")
+        if not re.fullmatch(r"160000 commit (?:[0-9a-f]{40}|[0-9a-f]{64})\tcontent", content):
+            raise SystemExit("workspace cache requires the committed content gitlink")
+        tracked_roots = {
+            name.split("/", 1)[0].casefold() for name in git("ls-files", "-z").split("\0") if name
+        }
+
+        def isolated_path(value, role):
+            relative = PurePosixPath(value)
+            if (not re.fullmatch(r"[A-Za-z0-9_./-]+", value)
+                    or relative.is_absolute() or relative.as_posix() != value
+                    or not relative.parts or any(part in (".", "..") or part.endswith(".") for part in relative.parts)
+                    or relative.parts[0].casefold() in tracked_roots | {".git", "content"}
+                    or (role == "ledger" and len(relative.parts) < 2)):
+                raise SystemExit(f"workspace cache {role} is not isolated metadata")
+            path = root / relative
+            if path.resolve() != path or path.is_symlink():
+                raise SystemExit(f"workspace cache {role} path is symlinked")
+            if path.exists() and not (path.is_dir() if role == "target" else path.is_file()):
+                raise SystemExit(f"workspace cache {role} has the wrong file type")
+            return path
+
+        target_path = isolated_path(target, "target")
+        ledger_path = isolated_path(ledger, "ledger")
+        if ledger_path.is_relative_to(target_path) or target_path.is_relative_to(ledger_path):
+            raise SystemExit("workspace cache ledger must be outside the target directory")
+        trusted_save = False
+        if operation == "save":
+            try:
+                with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
+                    event = json.load(event_file)
+            except (OSError, ValueError, KeyError):
+                raise SystemExit("workspace cache publication requires a trusted event") from None
+            repository = event.get("repository") if isinstance(event, dict) else None
+            event_name = os.environ.get("GITHUB_EVENT_NAME")
+            if (os.environ.get("GITHUB_REF") != "refs/heads/main"
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", os.environ.get("GITHUB_REPOSITORY", ""))
+                    or event_name not in ("push", "workflow_dispatch", "schedule")
+                    or not isinstance(repository, dict)
+                    or repository.get("full_name") != os.environ.get("GITHUB_REPOSITORY")
+                    or repository.get("fork") is not False or "pull_request" in event):
+                raise SystemExit("workspace cache publication is restricted to trusted main events")
+            if event_name == "push" and (
+                    event.get("ref") != "refs/heads/main" or event.get("after") != head
+                    or event.get("deleted") is not False):
+                raise SystemExit("workspace cache publication requires the exact main push")
+            if event_name == "workflow_dispatch" and event.get("ref", "main") not in ("main", "refs/heads/main"):
+                raise SystemExit("workspace cache publication requires a main dispatch")
+            if not target_path.is_dir() or not ledger_path.is_file() or ledger_path.stat().st_size == 0:
+                raise SystemExit("workspace cache publication requires compiled inputs and a nonempty ledger")
+            if git("diff", "--name-only", "HEAD", "--", ".", ":(exclude)content"):
+                raise SystemExit("workspace cache publication requires committed build inputs")
+            trusted_save = True
+        compiler = digest(subprocess.check_output(
+            [os.environ.get("RUSTC", "rustc"), "-vV"], cwd=root,
+            stderr=subprocess.PIPE, timeout=30,
+        ))
+        prefixes = ("CARGO", "RUST", "CC", "CXX", "CFLAGS", "CPPFLAGS", "CMAKE", "SDK",
+                    "LLVM", "_CARGO_LLVM_COV", "__CARGO_LLVM_COV", "AR", "LD", "LDFLAGS", "PKG_CONFIG",
+                    "LIBCLANG", "MACOSX_DEPLOYMENT_TARGET")
+        credentials = re.compile(r"(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTH|API_KEY|ACCESS_KEY|PRIVATE_KEY)(?:_|$)")
+        environment = {
+            name: value for name, value in sorted(os.environ.items())
+            if name.startswith(prefixes) and not credentials.search(name.upper())
+        }
+        hosted_image = {
+            name: os.environ.get(name, "unknown") for name in ("ImageOS", "ImageVersion")
+        }
+        environment_hash = digest(json.dumps({
+            "build_environment": environment, "hosted_image": hosted_image,
+        }, sort_keys=True).encode())
+        def read_recipe(name):
+            path = root / name
+            if not path.is_file() or path.resolve() != path or path.is_symlink():
+                raise SystemExit("workspace cache requires real committed build recipe files")
+            contents = path.read_bytes()
+            try:
+                parsed = tomllib.loads(contents.decode("utf-8"))
+            except (UnicodeError, tomllib.TOMLDecodeError):
+                raise SystemExit("workspace cache build recipe has invalid TOML") from None
+            return contents, parsed
+
+        recipe_files = {}
+        parsed_files = {}
+        for name in ("Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml", "Cargo.toml"):
+            contents, parsed_files[name] = read_recipe(name)
+            recipe_files[name] = digest(contents)
+        lock = parsed_files["Cargo.lock"]
+        packages = lock.get("package")
+        if not isinstance(packages, list) or not all(isinstance(package, dict) for package in packages):
+            raise SystemExit("workspace cache dependency lock has no package graph")
+        external_packages = []
+        for package in packages:
+            source = package.get("source")
+            if source is None:
+                continue
+            if not isinstance(source, str) or not source.startswith(("registry+", "git+")):
+                raise SystemExit("workspace cache dependency lock has an unsupported source")
+            external_packages.append(package)
+        external_packages.sort(key=lambda package: json.dumps(package, sort_keys=True))
+        recipe_files["Cargo.lock"] = digest(json.dumps({
+            "version": lock.get("version"), "package": external_packages,
+            "metadata": lock.get("metadata", {}),
+        }, sort_keys=True).encode())
+        workspace = parsed_files["Cargo.toml"].get("workspace")
+        if not isinstance(workspace, dict):
+            raise SystemExit("workspace cache requires a declared workspace")
+
+        def member_paths(field):
+            patterns = workspace.get(field, [])
+            if not isinstance(patterns, list):
+                raise SystemExit("workspace cache members must be declared paths")
+            paths = set()
+            for pattern in patterns:
+                if (not isinstance(pattern, str) or not pattern
+                        or PurePosixPath(pattern).is_absolute() or ".." in PurePosixPath(pattern).parts
+                        or not re.fullmatch(r"[A-Za-z0-9_./*?\[\]-]+", pattern)):
+                    raise SystemExit("workspace cache member leaves the checkout")
+                matches = set(root.glob(pattern))
+                if field == "members" and not matches:
+                    raise SystemExit("workspace cache declared member is missing")
+                paths.update(matches)
+            return paths
+
+        manifests = {"Cargo.toml"} | {
+            (member / "Cargo.toml").relative_to(root).as_posix()
+            for member in member_paths("members") - member_paths("exclude")
+        }
+        for name in sorted(manifests):
+            _, document = read_recipe(name)
+            for package in (document.get("package", {}), document.get("workspace", {}).get("package", {})):
+                if not isinstance(package, dict):
+                    raise SystemExit("workspace cache package settings are malformed")
+                package.pop("version", None)
+            recipe_files[name] = digest(json.dumps(document, sort_keys=True).encode())
+        # Prefixes bind the external lock graph and declared manifests without
+        # own package versions. The full tree remains primary; callers must
+        # verify the raw-input ledger before Cargo reuses workspace units.
+        inputs = {
+            "files": recipe_files,
+            "content": content, "recipe": recipe,
+        }
+        input_hash = digest(json.dumps(inputs, sort_keys=True).encode())
+        prefix = f"clonk-ci-target-v1-{lane}-{compiler}-{environment_hash}-{input_hash}-"
+        outputs = {
+            "key": prefix + tree, "prefix": prefix, "target": target, "ledger": ledger,
+            "trusted-save": "true" if trusted_save else "false",
+        }
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            for name, value in outputs.items():
+                output.write(f"{name}={value}\n")
+        PYKEY
+
+    - name: Restore or look up optional compiled inputs
+      id: cache
+      if: inputs.operation == 'restore' || inputs.operation == 'lookup'
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.identity.outputs.target }}
+          ${{ steps.identity.outputs.ledger }}
+        key: ${{ steps.identity.outputs.key }}
+        restore-keys: ${{ steps.identity.outputs.prefix }}
+        lookup-only: ${{ inputs.operation == 'lookup' }}
+
+    - name: Publish optional compiled inputs from trusted main
+      if: inputs.operation == 'save' && steps.identity.outputs.trusted-save == 'true'
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.identity.outputs.target }}
+          ${{ steps.identity.outputs.ledger }}
+        key: ${{ steps.identity.outputs.key }}

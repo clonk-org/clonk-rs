@@ -28,6 +28,14 @@ def job_block(workflow: Path, name: str) -> str:
     return source[start:end]
 
 
+def step_block(job: str, name: str) -> str:
+    marker = f"      - name: {name}\n"
+    start = job.index(marker)
+    following = re.search(r"(?m)^      - (?:name:|uses:)", job[start + len(marker) :])
+    end = start + len(marker) + following.start() if following else len(job)
+    return job[start:end]
+
+
 class CiFailureDiagnosticsTests(unittest.TestCase):
     def test_shard_wrapper_preserves_failure_before_successful_nextest(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -263,15 +271,21 @@ printf "%s\\n" "$first" > "$STATUS_FILE"
         self.assertIn('std::env::var_os("LC_CARGO_WRAPPER")', source)
         self.assertIn("cargo_program(", source)
 
-    def test_default_nextest_profile_writes_failure_junit_output(self):
+    def test_local_and_ci_nextest_profiles_write_failure_junit_output(self):
         config = tomllib.loads(
             (REPOSITORY / ".config" / "nextest.toml").read_text(encoding="utf-8")
         )
-        junit = config["profile"]["default"]["junit"]
-        self.assertEqual(junit["path"], "junit.xml")
-        self.assertEqual(junit["report-name"], "nextest-run")
-        self.assertFalse(junit["store-success-output"])
-        self.assertTrue(junit["store-failure-output"])
+        for profile in ("default", "ci"):
+            with self.subTest(profile=profile):
+                junit = config["profile"][profile]["junit"]
+                self.assertEqual(junit["path"], "junit.xml")
+                self.assertEqual(junit["report-name"], "nextest-run")
+                self.assertFalse(junit["store-success-output"])
+                self.assertTrue(junit["store-failure-output"])
+        for workflow in (LANDING, QUALIFICATION):
+            with self.subTest(workflow=workflow.name):
+                source = workflow.read_text(encoding="utf-8")
+                self.assertIn("  NEXTEST_PROFILE: ci", source[:source.index("\njobs:\n")])
 
     def test_each_linux_shard_has_identity_and_always_upload(self):
         linux = job_block(LANDING, "linux")
@@ -279,11 +293,17 @@ printf "%s\\n" "$first" > "$STATUS_FILE"
         shard_ids = re.findall(r"(?m)^            artifact: ([a-z0-9-]+)$", matrix)
         self.assertEqual(len(shard_ids), 18)
         self.assertEqual(len(set(shard_ids)), len(shard_ids))
+        self.assertEqual(set(shard_ids), {
+            "presentation-captures", "app-1", "app-12", "app-3-10", "app-2-7", "app-4-9",
+            "app-5", "app-11", "app-6", "app-8", "engine-1", "engine-2", "engine-3",
+            "engine-and-frontend-units", "remaining-1", "remaining-2", "workspace-quality", "engine-contracts",
+        })
 
         self.assertIn("- name: Prepare shard diagnostics", linux)
         self.assertIn("shutil.rmtree(diagnostic_dir)", linux)
         self.assertIn("- name: Reset stale JUnit report", linux)
-        self.assertIn("JUNIT_SOURCE: target/nextest/default/junit.xml", linux)
+        self.assertIn("JUNIT_SOURCE: target/nextest/ci/junit.xml", linux)
+        self.assertIn('"nextest_profile": "ci"', linux)
         self.assertIn('Path(os.environ["JUNIT_SOURCE"]).unlink(missing_ok=True)', linux)
         self.assertIn('"run_id": int(os.environ["GITHUB_RUN_ID"])', linux)
         self.assertIn('"run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])', linux)
@@ -293,7 +313,7 @@ printf "%s\\n" "$first" > "$STATUS_FILE"
         self.assertIn('"source_sha": os.environ["SOURCE_SHA"]', linux)
         self.assertIn('"junit": os.environ["JUNIT_SOURCE"]', linux)
         self.assertIn('"retained_junit": "junit/*.xml"', linux)
-        upload = linux[linux.index("- name: Upload shard test diagnostics") :]
+        upload = step_block(linux, "Upload shard test diagnostics")
         self.assertIn("if: always()", upload)
         self.assertIn(
             "rust-test-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-"
@@ -303,6 +323,9 @@ printf "%s\\n" "$first" > "$STATUS_FILE"
         self.assertIn("${{ runner.temp }}/test-diagnostics", upload)
         self.assertIn("${{ env.JUNIT_SOURCE }}", upload)
         self.assertIn("if-no-files-found: warn", upload)
+        self.assertIn("retention-days: 14", upload)
+        self.assertLess(linux.index("- name: Prepare shard diagnostics"), linux.index("uses: ./.github/actions/verified-content"))
+        self.assertLess(linux.index("- name: Reset stale JUnit report"), linux.index("- name: Run ${{ matrix.name }}"))
         self.assertIn('export LC_NEXTEST_JUNIT_DIR="$DIAGNOSTIC_DIR/junit"', linux)
         self.assertIn("retain-nextest-cargo.sh", linux)
         self.assertIn('cargo_wrapper_dir="$RUNNER_TEMP/nextest-cargo-wrapper"', linux)
@@ -316,8 +339,9 @@ printf "%s\\n" "$first" > "$STATUS_FILE"
         collectors = job_block(QUALIFICATION, "coverage-fragments")
         self.assertIn("CARGO_TARGET_DIR: target/coverage-build", collectors)
         self.assertIn(
-            "JUNIT_SOURCE: target/coverage-build/nextest/default/junit.xml", collectors
+            "JUNIT_SOURCE: target/nextest/ci/junit.xml", collectors
         )
+        self.assertIn('"nextest_profile": "ci"', collectors)
         self.assertIn("- name: Prepare shard diagnostics", collectors)
         self.assertIn("shutil.rmtree(diagnostic_dir)", collectors)
         self.assertIn("- name: Reset stale JUnit report", collectors)
@@ -327,6 +351,10 @@ printf "%s\\n" "$first" > "$STATUS_FILE"
         )
         self.assertEqual(len(exact_artifacts), 12)
         self.assertEqual(len(set(exact_artifacts)), 12)
+        self.assertEqual(set(exact_artifacts), {
+            "app-1-10", "app-2-7", "app-3", "app-4-9", "app-5", "app-11-12", "app-6-8",
+            "engine-1", "engine-2-3", "engine-and-frontend-units", "remaining-1", "remaining-2",
+        })
         self.assertIn('"run_id": int(os.environ["GITHUB_RUN_ID"])', collectors)
         self.assertIn('"run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])', collectors)
         self.assertIn('"shard": os.environ["SHARD_ID"]', collectors)
@@ -340,7 +368,7 @@ printf "%s\\n" "$first" > "$STATUS_FILE"
             "LC_TEST_ARTIFACT_DIR: ${{ runner.temp }}/test-diagnostics/replays",
             collectors,
         )
-        upload = collectors[collectors.index("- name: Upload shard test diagnostics") :]
+        upload = step_block(collectors, "Upload shard test diagnostics")
         self.assertIn("if: always()", upload)
         self.assertIn(
             "rust-test-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-"
@@ -349,10 +377,14 @@ printf "%s\\n" "$first" > "$STATUS_FILE"
         )
         self.assertIn("${{ runner.temp }}/test-diagnostics", upload)
         self.assertIn("${{ env.JUNIT_SOURCE }}", upload)
+        self.assertIn("if-no-files-found: warn", upload)
+        self.assertIn("retention-days: 14", upload)
         self.assertLess(
-            upload.index("Upload shard test diagnostics"),
-            upload.index("Upload coverage fragment"),
+            collectors.index("Upload shard test diagnostics"),
+            collectors.index("Upload coverage fragment"),
         )
+        self.assertLess(collectors.index("- name: Prepare shard diagnostics"), collectors.index("uses: ./.github/actions/verified-content"))
+        self.assertLess(collectors.index("- name: Reset stale JUnit report"), collectors.index("- name: Collect instrumented coverage fragment"))
         self.assertIn('export LC_NEXTEST_JUNIT_DIR="$DIAGNOSTIC_DIR/junit"', collectors)
         self.assertIn("retain-nextest-cargo.sh", collectors)
         self.assertIn('cargo_wrapper_dir="$RUNNER_TEMP/nextest-cargo-wrapper"', collectors)

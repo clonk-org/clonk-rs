@@ -1,0 +1,46 @@
+name: Release platform pipeline
+
+on:
+  workflow_call:
+    inputs:
+      source-sha:
+        required: true
+        type: string
+      tree-sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      pr-number:
+        required: true
+        type: string
+      platform:
+        description: One independently scheduled desktop platform
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  prebuild:
+    name: Compile shipped inputs
+    uses: ./.github/workflows/release-prebuild.yml
+    with:
+      source-sha: ${{ inputs.source-sha }}
+      tree-sha: ${{ inputs.tree-sha }}
+      version: ${{ inputs.version }}
+      pr-number: ${{ inputs.pr-number }}
+      platform: ${{ inputs.platform }}
+
+  package:
+    name: Package and qualify
+    needs: prebuild
+    uses: ./.github/workflows/release-build.yml
+    with:
+      source-sha: ${{ inputs.source-sha }}
+      tree-sha: ${{ inputs.tree-sha }}
+      version: ${{ inputs.version }}
+      platform: ${{ inputs.platform }}

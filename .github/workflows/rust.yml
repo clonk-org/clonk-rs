@@ -36,6 +36,7 @@ permissions:
 env:
   CARGO_INCREMENTAL: '0'
   CARGO_TERM_COLOR: always
+  NEXTEST_PROFILE: ci
 
 jobs:
   device-loss:
@@ -78,12 +79,13 @@ jobs:
       - name: Look up the published Linux cache
         if: matrix.name == 'Linux'
         id: linux-cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: ./.github/actions/workspace-cache
         with:
-          workspaces: . -> target
-          shared-key: full-parity
-          lookup-only: true
-          save-if: false
+          operation: lookup
+          lane: landing-linux
+          target: target
+          ledger: .ci-cache-ledgers/landing.json
+          recipe: landing-v1
 
       - name: Look up the published Windows cache
         if: matrix.name == 'Windows'
@@ -125,52 +127,10 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Resolve pinned content revision
-        id: content
-        run: |
-          revision=$(git rev-parse HEAD:content)
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "invalid content gitlink: $revision" >&2
-            exit 1
-          fi
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-
-      - name: Find the pinned content checkout
-        id: content-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Publish verified pinned content
+        uses: ./.github/actions/verified-content
         with:
-          path: .git/modules/content
-          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
-          lookup-only: true
-
-      - name: Materialize pinned content checkout
-        if: steps.content-cache.outputs.cache-hit != 'true'
-        run: git submodule update --init --force --depth=1 --filter=blob:none content
-
-      - name: Verify pinned content checkout
-        if: steps.content-cache.outputs.cache-hit != 'true'
-        env:
-          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
-        run: |
-          actual=$(git -C content rev-parse HEAD)
-          [[ "$actual" == "$CONTENT_REVISION" ]]
-          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
-
-      - name: Publish pinned content checkout
-        if: steps.content-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .git/modules/content
-          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
-
-      # Fail this producer if the immutable object store was not actually
-      # published; the verifier polls so a propagating index does not.
-      - name: Verify pinned content checkout publication
-        if: steps.content-cache.outputs.cache-hit != 'true'
-        uses: ./.github/actions/verify-cache-handoff
-        with:
-          path: .git/modules/content
-          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
+          publish: 'true'
 
   linux-landing-cache:
     name: Warm the Linux landing cache
@@ -191,47 +151,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve pinned content revision
-        id: content
-        run: |
-          revision=$(git rev-parse HEAD:content)
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "invalid content gitlink: $revision" >&2
-            exit 1
-          fi
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-
-      - name: Restore pinned content checkout
-        id: content-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Prepare verified content, dependencies, and exact Rust
+        id: preinstalled-rust
+        uses: ./.github/actions/verified-content
         with:
-          path: .git/modules/content
-          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
-
-      - name: Materialize pinned content checkout
-        run: git submodule update --init --force --depth=1 --filter=blob:none content
-
-      - name: Verify pinned content checkout
-        env:
-          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
-        run: |
-          actual=$(git -C content rev-parse HEAD)
-          [[ "$actual" == "$CONTENT_REVISION" ]]
-          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
-
-      - name: Install native Rust dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libfreetype6-dev \
-            libvulkan1 \
-            libxmp4 \
-            libudev-dev \
-            mesa-vulkan-drivers \
-            pkg-config
+          apt-packages: libasound2-dev libfreetype6-dev libvulkan1 libxmp4 libudev-dev mesa-vulkan-drivers pkg-config
+          probe-rust: 'true'
 
       - name: Install Rust toolchain
+        if: steps.preinstalled-rust.outputs.exact != 'true'
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
       - name: Install cargo-nextest
@@ -241,14 +169,28 @@ jobs:
           fallback: none
 
       - name: Restore or publish the exhaustive Linux cache
-        id: linux-cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: . -> target
+          cache-targets: false
           shared-key: full-parity
 
+      - name: Restore verified workspace build inputs
+        uses: ./.github/actions/workspace-cache
+        with:
+          operation: restore
+          lane: landing-linux
+          target: target
+          ledger: .ci-cache-ledgers/landing.json
+          recipe: landing-v1
+
+      - name: Verify restored workspace artifacts
+        id: workspace-inputs
+        run: python3 scripts/ci-workspace-cache.py prepare --target target --recipe landing-v1 --ledger .ci-cache-ledgers/landing.json --github-output "$GITHUB_OUTPUT"
+
+      - name: 'CI cache receipt: ${{ steps.workspace-inputs.outputs.cache-state }}'
+        run: 'true'
+
       - name: Compile the complete landing dependency graph
-        if: steps.linux-cache.outputs.cache-hit != 'true'
         run: cargo nextest run --workspace --features xtask/engine-tools --no-run --locked
 
       # `presentation captures` restores this same cache and then builds the
@@ -262,7 +204,6 @@ jobs:
       # the compile moves off the critical path rather than being removed.
       # `test_acquire_presentation_oracle.py` pins this to the recipe.
       - name: Warm the release-profile presentation capture build
-        if: steps.linux-cache.outputs.cache-hit != 'true'
         env:
           CARGO_INCREMENTAL: '0'
           LANG: C
@@ -274,6 +215,28 @@ jobs:
   # it finishes during the small gap before the next candidate, check again
   # before admitting the expensive diagnostic fan-out. The shared concurrency
   # lane below closes the race between this read and the next Landing run.
+      - name: Record verified workspace build inputs
+        run: python3 scripts/ci-workspace-cache.py record --target target --recipe landing-v1 --ledger .ci-cache-ledgers/landing.json
+
+      - name: Publish verified workspace build inputs
+        id: workspace-cache
+        uses: ./.github/actions/workspace-cache
+        with:
+          operation: save
+          lane: landing-linux
+          target: target
+          ledger: .ci-cache-ledgers/landing.json
+          recipe: landing-v1
+
+      - name: Verify the exhaustive compiled input handoff
+        if: github.event_name == 'workflow_dispatch' && inputs.cache_only
+        uses: ./.github/actions/verify-cache-handoff
+        with:
+          path: |
+            target
+            .ci-cache-ledgers/landing.json
+          key: ${{ steps.workspace-cache.outputs.key }}
+
   diagnostic-admission:
     name: Admit post-merge diagnostics
     needs: linux-landing-cache
@@ -310,20 +273,65 @@ jobs:
           fi
           printf 'run_diagnostics=%s\n' "$run_diagnostics" >> "$GITHUB_OUTPUT"
 
+  qualification-reuse:
+    name: Resolve landed release qualification
+    if: >-
+      ${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore: release ') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run-id: ${{ steps.evidence.outputs.run-id }}
+      run-attempt: ${{ steps.evidence.outputs.run-attempt }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Materialize verified pinned content
+        uses: ./.github/actions/verified-content
+
+      - name: Resolve complete exact-SHA qualification receipt
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 scripts/release-qualification-evidence.py resolve \
+            --repository "$REPOSITORY" --source-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/qualification-reuse.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Retain reuse decision and fallback reason
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qualification-reuse-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification-reuse.json
+          if-no-files-found: error
+          retention-days: 14
+
   exact-sha-qualification:
     name: Exact-SHA qualification
-    needs: diagnostic-admission
+    needs: [diagnostic-admission, qualification-reuse]
     if: >-
-      ${{ (github.event_name != 'workflow_dispatch' || !inputs.cache_only)
+      ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.cache_only)
         && needs.diagnostic-admission.outputs.run_diagnostics == 'true' }}
     concurrency:
       group: landing-runner-priority
       cancel-in-progress: false
     permissions:
       contents: read
+      actions: read
     uses: ./.github/workflows/exact-sha-qualification.yml
     with:
       source-sha: ${{ github.sha }}
+      qualification-run-id: ${{ needs.qualification-reuse.outputs.run-id }}
       # Landing already qualified release commits at their exact SHA. All
       # post-merge diagnostics yield their runner slots to the next candidate.
       concurrency-suffix: rolling
@@ -371,10 +379,17 @@ jobs:
 
   windows-release-tools:
     name: Windows release tooling
-    needs: windows-landing-cache
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cache_only }}
+    needs: [windows-landing-cache, qualification-reuse]
+    if: >-
+      ${{ always() && !cancelled()
+        && needs.windows-landing-cache.result == 'success'
+        && (needs.qualification-reuse.result == 'success' || needs.qualification-reuse.result == 'skipped')
+        && (github.event_name != 'workflow_dispatch' || !inputs.cache_only) }}
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
     concurrency:
       # Smoke may also preempt this post-cache validation so the next queue
       # candidate never waits behind the longer shipped-runtime build.
@@ -390,11 +405,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
-      # Release invokes this binary on the Windows host. Build its real release
-      # graph here without serializing it ahead of the merge-critical runtime.
+      # The packaging tool is a host tool, not a shipped runtime. Match the
+      # non-LTO prebuild recipe while preserving its real packaging checks.
       - name: Build the Windows packaging tool
-        if: ${{ !inputs.software_presentation }}
-        run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
+        if: ${{ !inputs.software_presentation && needs.qualification-reuse.outputs.run-id == '' }}
+        run: cargo build --profile test --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
       - name: Configure the shipped MSVC runtime
         run: scripts/configure-msvc-runtime.sh
@@ -413,14 +428,19 @@ jobs:
       # cleans target in its post step, so nesting it with the landing-cache
       # producer would erase that producer's artifacts before publication.
       - name: Restore or publish the shipped MSVC dependency cache
+        id: shipped-cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: shipped-msvc-runtime-v1
 
-      # Build the exact shipped graph on trusted main after bounded queue smoke.
-      # This fail-closed validation also keeps release dependency and ThinLTO
-      # caches current without letting ephemeral queue refs publish caches.
+      # A verified release reuses its packaged runtime. Preserve dependency and
+      # ThinLTO warming when either cache is absent; install the independently
+      # verified binaries after warming so validation always checks that payload.
       - name: Refresh the shipped MSVC runtime cache
+        if: >-
+          needs.qualification-reuse.outputs.run-id == ''
+          || steps.thinlto-cache.outputs.cache-hit != 'true'
+          || steps.shipped-cache.outputs.cache-hit != 'true'
         run: |
           cargo fetch --locked
           zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
@@ -432,13 +452,50 @@ jobs:
           echo "CFLAGS_x86_64_pc_windows_msvc=$CFLAGS_x86_64_pc_windows_msvc" >> "$GITHUB_ENV"
           cargo build --release -p clonk-app -p clonk-game -p clonk-c4group --locked --timings
 
+      - name: Download the independently qualified Windows runtime
+        if: needs.qualification-reuse.outputs.run-id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-qualified-runtime-windows-${{ github.sha }}-${{ needs.qualification-reuse.outputs.run-id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.qualification-reuse.outputs.run-id }}
+          path: target/release-qualified/windows
+
+      - name: Verify and install the qualified Windows runtime
+        if: needs.qualification-reuse.outputs.run-id != ''
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ needs.qualification-reuse.outputs.run-id }}
+          BUILD_RUN_ATTEMPT: ${{ needs.qualification-reuse.outputs.run-attempt }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          tree_sha=$(git rev-parse HEAD^{tree})
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          qualified_root=target/release-qualified/windows
+          python3 scripts/release-prebuild-manifest.py verify \
+            --provenance-root "$GITHUB_WORKSPACE" \
+            --root "$qualified_root" --manifest "$qualified_root/manifest.json" \
+            --head-sha "$SOURCE_SHA" --tree-sha "$tree_sha" --version "$version" \
+            --build-run-id "$BUILD_RUN_ID" --build-run-attempt "$BUILD_RUN_ATTEMPT" \
+            --kind runtime --target x86_64-pc-windows-msvc \
+            --file payload/c4group.exe --file payload/clonk-app.exe --file payload/clonk-game.exe
+          runtime_root=target/x86_64-pc-windows-msvc/release
+          mkdir -p "$runtime_root"
+          for binary in c4group clonk-app clonk-game; do
+            cp "$qualified_root/payload/$binary.exe" "$runtime_root/$binary.exe"
+          done
+
       - name: Validate the shipped MSVC runtime
         run: scripts/validate-msvc-runtime.sh
+
+      - name: Materialize verified Windows presentation content
+        if: inputs.software_presentation
+        uses: ./.github/actions/verified-content
 
       - name: Prepare Windows software presentation qualification
         if: inputs.software_presentation
         run: |
-          git submodule update --init --recursive
           python -m pip install Pillow
 
       - name: Qualify forced Windows software presentation
@@ -472,3 +529,100 @@ jobs:
         with:
           path: ${{ runner.temp }}/clonk-msvc-thinlto
           key: ${{ steps.thinlto-cache.outputs.cache-primary-key }}
+
+  cache-retention:
+    name: Bound trusted workspace caches
+    needs: [linux-landing-cache, exact-sha-qualification]
+    if: >-
+      ${{ always() && !cancelled() && github.ref == 'refs/heads/main'
+        && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: write
+    concurrency:
+      group: main-workspace-cache-retention
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Bound trusted workspace build caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 scripts/ci-cache-retention.py --repository "$REPOSITORY" \
+            --prefix clonk-ci-target-v1- --keep-per-lane 2 --max-bytes 4294967296 --apply \
+            --output "$RUNNER_TEMP/ci-cache-retention.json"
+
+      - name: Retain the cache retention receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-cache-retention-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-cache-retention.json
+          if-no-files-found: error
+          retention-days: 14
+
+  latency-report:
+    name: CI latency report (postmerge)
+    needs:
+      - device-loss
+      - verify-landing-cache-bootstrap
+      - content-landing-cache
+      - linux-landing-cache
+      - diagnostic-admission
+      - qualification-reuse
+      - exact-sha-qualification
+      - windows-landing-cache
+      - windows-release-tools
+      - cache-retention
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Report completed post-merge work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          subject=$(git log -1 --format=%s)
+          if [[ "$subject" == 'chore: release '* ]]; then
+            release=true
+          else
+            release=false
+          fi
+          python3 scripts/ci-latency-report.py --repository "$REPOSITORY" \
+            --run-id "$RUN_ID" --phase postmerge --allow-running true --history-limit 20 \
+            --release "$release" --output "$RUNNER_TEMP/ci-latency-postmerge.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain the post-merge latency report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-latency-postmerge-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-latency-postmerge.json
+          if-no-files-found: error
+          retention-days: 14

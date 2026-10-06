@@ -22,8 +22,10 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -53,6 +55,11 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="build and run the release binary instead of the debug one",
     )
     parser.add_argument(
+        "--prebuilt-root",
+        type=Path,
+        help="verify and run a shipped runtime payload instead of building (requires --release)",
+    )
+    parser.add_argument(
         "--no-xvfb",
         action="store_true",
         help="never wrap the probe in xvfb-run, even without a display",
@@ -77,7 +84,70 @@ def refuse_to_run_as_root() -> None:
         )
 
 
-def build_binary(release: bool) -> Path:
+def verify_prebuilt_binary(root: Path, prebuilt_root: Path) -> Path:
+    """Accept only the current source's exact shipped native release payload."""
+    architecture = platform.machine().lower()
+    target = {
+        ("linux", "x86_64"): "x86_64-unknown-linux-gnu",
+        ("win32", "amd64"): "x86_64-pc-windows-msvc",
+        ("win32", "x86_64"): "x86_64-pc-windows-msvc",
+        ("darwin", "arm64"): "aarch64-apple-darwin",
+        ("darwin", "aarch64"): "aarch64-apple-darwin",
+        ("darwin", "x86_64"): "x86_64-apple-darwin",
+    }.get((sys.platform, architecture))
+    if target is None:
+        raise SystemExit(f"no shipped prebuilt runtime for {sys.platform}/{architecture}")
+
+    def git(*arguments):
+        return subprocess.check_output(["git", "-C", str(root), *arguments], text=True).strip()
+
+    inputs = (".", ":(exclude)content")
+    if (git("diff", "--name-only", "HEAD", "--", *inputs)
+            or git("ls-files", "--others", "--exclude-standard", "--", *inputs)):
+        raise SystemExit("prebuilt release qualification requires committed source inputs")
+
+    prebuilt_root = prebuilt_root.absolute()
+    manifest = prebuilt_root / "manifest.json"
+    try:
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest_target = document.get("target") if isinstance(document, dict) else None
+        version = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+        raise SystemExit(f"cannot read prebuilt runtime identity: {error}") from error
+    allowed_targets = {target}
+    if sys.platform == "darwin":
+        allowed_targets.add("universal-apple-darwin")
+    if not isinstance(manifest_target, str) or manifest_target not in allowed_targets:
+        raise SystemExit(f"prebuilt runtime target {manifest_target!r} cannot run on {target}")
+
+    suffix = ".exe" if sys.platform == "win32" else ""
+    filenames = [f"payload/{name}{suffix}" for name in ("c4group", "clonk-app", "clonk-game")]
+    command = [
+        sys.executable, str(root / "scripts/release-prebuild-manifest.py"), "verify",
+        "--root", str(prebuilt_root), "--manifest", str(manifest),
+        "--head-sha", git("rev-parse", "HEAD"),
+        "--tree-sha", git("rev-parse", "HEAD^{tree}"),
+        "--version", version, "--kind", "runtime", "--target", manifest_target,
+        "--provenance-root", str(root),
+    ]
+    for name in filenames:
+        command.extend(("--file", name))
+    try:
+        subprocess.run(command, cwd=root, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"prebuilt runtime verification failed: {error.stderr.strip()}") from error
+    if sys.platform != "win32":
+        for name in filenames:
+            binary = prebuilt_root / name
+            binary.chmod(binary.stat().st_mode | 0o111)
+    return prebuilt_root / f"payload/clonk-app{suffix}"
+
+
+def build_binary(root: Path, release: bool, prebuilt_root: Path | None = None) -> Path:
+    if prebuilt_root is not None:
+        if not release:
+            raise SystemExit("prebuilt runtime qualification requires --release")
+        return verify_prebuilt_binary(root, prebuilt_root)
     profile = ["--release"] if release else []
     # Preserve feature unification with the other shipped Windows executables.
     # The release job validates this same graph and its static-CRT imports.
@@ -88,11 +158,11 @@ def build_binary(release: bool) -> Path:
     )
     subprocess.run(
         ["cargo", "build", "--locked", *targets, *profile],
-        cwd=REPOSITORY,
+        cwd=root,
         check=True,
     )
     target = os.environ.get("CARGO_TARGET_DIR")
-    root = Path(target) if target else REPOSITORY / "target"
+    root = Path(target) if target else root / "target"
     if triple := os.environ.get("CARGO_BUILD_TARGET"):
         root /= triple
     executable = "clonk-app.exe" if sys.platform == "win32" else "clonk-app"
@@ -127,6 +197,58 @@ def launch_prefix(*, no_xvfb: bool) -> list[str]:
 def file_digest(path: Path) -> str:
     with path.open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def prebuilt_manifest_digest(prebuilt_root: Path | None) -> str | None:
+    if prebuilt_root is None:
+        return None
+    return hashlib.sha256(read_prebuilt_manifest(prebuilt_root)).hexdigest()
+
+
+def read_prebuilt_manifest(prebuilt_root: Path) -> bytes:
+    manifest = prebuilt_root / "manifest.json"
+    try:
+        if prebuilt_root.is_symlink() or manifest.is_symlink():
+            raise OSError("prebuilt manifest must be a regular file in a real payload directory")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(manifest, flags), "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise OSError("prebuilt manifest is not a regular file")
+            return source.read()
+    except OSError as error:
+        raise SystemExit(f"cannot read prebuilt runtime identity: {error}") from error
+
+
+def build_evidence(root: Path, release: bool, prebuilt_root: Path | None = None) -> dict:
+    """Record build inputs after ``build_binary`` verified the selected artifact."""
+    qualifier = {
+        "build_target": os.environ.get("CARGO_BUILD_TARGET"),
+        "rustflags": os.environ.get("RUSTFLAGS"),
+        "encoded_rustflags": os.environ.get("CARGO_ENCODED_RUSTFLAGS"),
+        "rustc": subprocess.check_output(["rustc", "-vV"], cwd=root, text=True),
+    }
+    evidence = {
+        "build_origin": "local", "build_profile": "release" if release else "debug", **qualifier,
+        "qualification_environment": qualifier, "prebuilt_manifest": None, "prebuilt_manifest_sha256": None,
+    }
+    if prebuilt_root is None:
+        return evidence
+    try:
+        encoded = read_prebuilt_manifest(prebuilt_root)
+        document = json.loads(encoded)
+        recipe = document["provenance"]["producer_recipe"]
+        compiled = recipe["operation"] == "build"
+        environment = recipe["environment"] if compiled else {}
+        evidence.update({
+            "build_origin": "prebuilt", "build_profile": recipe["profile"],
+            "build_target": recipe["target"] if compiled else None,
+            "rustflags": environment.get("RUSTFLAGS"),
+            "encoded_rustflags": environment.get("CARGO_ENCODED_RUSTFLAGS"), "rustc": recipe["rustc"],
+            "prebuilt_manifest": document, "prebuilt_manifest_sha256": hashlib.sha256(encoded).hexdigest(),
+        })
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise SystemExit(f"cannot read verified prebuilt build metadata: {error}") from error
+    return evidence
 
 
 def source_identity() -> dict:
@@ -265,7 +387,10 @@ def main(argv: list[str] | None = None) -> int:
     source_before = source_identity()
     if arguments.release and source_before.get("source_dirty"):
         raise SystemExit("release qualification requires committed source inputs")
-    binary = build_binary(arguments.release)
+    if arguments.prebuilt_root is not None and not arguments.release:
+        raise SystemExit("prebuilt runtime qualification requires --release")
+    manifest_sha256 = prebuilt_manifest_digest(arguments.prebuilt_root)
+    binary = build_binary(REPOSITORY, arguments.release, arguments.prebuilt_root)
     binary_sha256 = file_digest(binary)
     config = artifacts / "Clonk.ini"
     screenshots = artifacts / "screenshots"
@@ -329,6 +454,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("source changed during software presentation qualification")
     if file_digest(binary) != binary_sha256:
         raise SystemExit("the software presentation executable changed during the run")
+    build = build_evidence(REPOSITORY, arguments.release, arguments.prebuilt_root)
+    if build["prebuilt_manifest_sha256"] != manifest_sha256:
+        raise SystemExit("the prebuilt runtime manifest changed during qualification")
     evidence = {
         "schema_version": 1,
         "kind": "clonk_software_presentation_qualification",
@@ -337,11 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         "os": platform.platform(),
         "os_version": platform.version(),
         "architecture": platform.machine(),
-        "build_profile": "release" if arguments.release else "debug",
-        "build_target": os.environ.get("CARGO_BUILD_TARGET"),
-        "rustflags": os.environ.get("RUSTFLAGS"),
-        "encoded_rustflags": os.environ.get("CARGO_ENCODED_RUSTFLAGS"),
-        "rustc": subprocess.check_output(["rustc", "-vV"], cwd=REPOSITORY, text=True),
+        **build,
         "binary_sha256": binary_sha256,
         "window_backend": report["display_backend"],
         "automatic_fallback": arguments.automatic_fallback,

@@ -107,8 +107,12 @@ def main(argv=None) -> int:
     parser.add_argument("--backend", required=True, choices=("vulkan", "gl", "dx12", "metal"))
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--release", action="store_true")
+    parser.add_argument("--prebuilt-root", type=Path,
+                        help="verify and run a shipped runtime payload (requires --release)")
     parser.add_argument("--no-xvfb", action="store_true")
     arguments = parser.parse_args(argv)
+    if arguments.prebuilt_root is not None and not arguments.release:
+        raise SystemExit("prebuilt runtime qualification requires --release")
     presentation.refuse_to_run_as_root()
     artifacts = arguments.artifact_dir.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -118,7 +122,8 @@ def main(argv=None) -> int:
     identity = source_identity()
     if arguments.release and identity["source_dirty"]:
         raise SystemExit("release qualification requires committed source inputs")
-    binary = presentation.build_binary(arguments.release)
+    manifest_sha256 = presentation.prebuilt_manifest_digest(arguments.prebuilt_root)
+    binary = presentation.build_binary(REPOSITORY, arguments.release, arguments.prebuilt_root)
     binary_sha256 = presentation.file_digest(binary)
     config = prepare_fixture(artifacts)
     environment = {
@@ -152,17 +157,16 @@ def main(argv=None) -> int:
     report = check_report(report_path, arguments.backend)
     if identity != source_identity() or presentation.file_digest(binary) != binary_sha256:
         raise SystemExit("source or executable changed during qualification")
+    build = presentation.build_evidence(REPOSITORY, arguments.release, arguments.prebuilt_root)
+    if build["prebuilt_manifest_sha256"] != manifest_sha256:
+        raise SystemExit("the prebuilt runtime manifest changed during qualification")
     qualification = {
         "schema_version": 1, "kind": "clonk_device_loss_qualification",
         "recorded_at": datetime.datetime.now(datetime.UTC).isoformat(),
         **identity, "os": platform.platform(), "os_version": platform.version(),
         "architecture": platform.machine(), "backend": arguments.backend,
         "adapter": report["adapter"],
-        "build_profile": "release" if arguments.release else "debug",
-        "build_target": os.environ.get("CARGO_BUILD_TARGET"),
-        "rustflags": os.environ.get("RUSTFLAGS"),
-        "encoded_rustflags": os.environ.get("CARGO_ENCODED_RUSTFLAGS"),
-        "rustc": subprocess.check_output(["rustc", "-vV"], cwd=REPOSITORY, text=True),
+        **build,
         "binary_sha256": binary_sha256,
         "artifacts": {name: presentation.file_digest(artifacts / name) for name in (
             "report.json", "report.before.png", "report.after.png", "run.log", "players/Probe.c4p",
