@@ -301,6 +301,8 @@ fn flat_fog_weights(weights: [f32; 4]) -> [f32; 4] {
 }
 
 fn interpolate_packed_modulation(modulation: [u32; 4], weights: [f32; 4]) -> u32 {
+    #[cfg(test)]
+    PACKED_FOG_INTERPOLATION_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut result = 0u32;
     for channel in 0..4 {
         let shift = channel * 8;
@@ -311,6 +313,26 @@ fn interpolate_packed_modulation(modulation: [u32; 4], weights: [f32; 4]) -> u32
         value += ((modulation[3] >> shift) & 0xff) as f32 * weights[3];
         let value = u32::from(store_channel(value));
         result |= value << shift;
+    }
+    result
+}
+
+fn unpack_modulation(modulation: [u32; 4]) -> [[f32; 4]; 4] {
+    modulation
+        .map(|corner| std::array::from_fn(|channel| ((corner >> (channel * 8)) & 0xff) as f32))
+}
+
+fn interpolate_modulation(modulation: &[[f32; 4]; 4], weights: [f32; 4]) -> u32 {
+    #[cfg(test)]
+    FOG_INTERPOLATION_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let mut result = 0u32;
+    for (channel, first_corner) in modulation[0].iter().copied().enumerate() {
+        let mut value = 0.0f32;
+        value += first_corner * weights[0];
+        value += modulation[1][channel] * weights[1];
+        value += modulation[2][channel] * weights[2];
+        value += modulation[3][channel] * weights[3];
+        result |= u32::from(store_channel(value)) << (channel * 8);
     }
     result
 }
@@ -332,7 +354,7 @@ struct PreparedFogQuads {
 }
 
 struct PreparedFogQuad {
-    modulation: [[u32; 4]; 2],
+    modulation: [[[f32; 4]; 4]; 2],
     nonzero: [bool; 2],
 }
 
@@ -409,7 +431,7 @@ impl FogSpriteSampler {
                     PreparedFogQuad {
                         nonzero: modulation
                             .map(|corners| corners.iter().any(|corner| *corner != 0)),
-                        modulation,
+                        modulation: modulation.map(unpack_modulation),
                     }
                 })
                 .collect(),
@@ -762,9 +784,13 @@ impl FogSpriteSampler {
             FogModulationSample::Prepared {
                 modulation: quad.modulation,
                 fragments: [
-                    interpolate_packed_modulation(combined.modulation[0], weights),
-                    if prepared.owner {
-                        interpolate_packed_modulation(combined.modulation[1], weights)
+                    if combined.nonzero[0] {
+                        interpolate_modulation(&combined.modulation[0], weights)
+                    } else {
+                        0
+                    },
+                    if prepared.owner && combined.nonzero[1] {
+                        interpolate_modulation(&combined.modulation[1], weights)
                     } else {
                         0
                     },
@@ -1099,7 +1125,8 @@ pub(crate) fn draw_fogged_cursor_text_line(
                         (width as u32, height as u32),
                         false,
                         |x, y| (x, y),
-                    );
+                    )
+                    .map(|sampler| sampler.prepare_for_blit(base_blit, None));
                     for row in 0..height {
                         for column in 0..width {
                             let Some(&source_color) = cell
@@ -1192,7 +1219,8 @@ pub(crate) fn draw_fogged_cursor_text_line(
                 (width, height),
                 false,
                 |x, y| (x, y),
-            );
+            )
+            .map(|sampler| sampler.prepare_for_blit(base_blit, None));
             for row in 0..height {
                 for column in 0..width {
                     let Some(mut source_color) = source_surface.get_pixel(column, row) else {
@@ -1325,7 +1353,8 @@ pub(crate) fn draw_fogged_markup_text(
         (width, height),
         false,
         |x, y| (x, y),
-    );
+    )
+    .map(|sampler| sampler.prepare_for_blit(base_blit, None));
     for row in 0..height {
         for column in 0..width {
             let Some(mut source_color) = source_surface.get_pixel(column, row) else {
@@ -1591,6 +1620,8 @@ pub(crate) fn object_color_by_owner_tint(object: &ObjectSnapshot) -> u32 {
 #[cfg(test)]
 thread_local! {
     static COLOR_MODULATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PACKED_FOG_INTERPOLATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FOG_INTERPOLATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// CPU-side `ModulateClr` used to fold global ColorMod into ClrByOwnerClr
@@ -1889,6 +1920,186 @@ pub(crate) fn prepare_liquid_animation_fragment(
 #[cfg(test)]
 mod fog_chunk_capacity_tests {
     use super::*;
+
+    #[test]
+    fn black_fog_chunks_return_zero_without_fragment_interpolation() {
+        // StdGL.cpp:471-472 uses the complete combined quad's all-black state.
+        // Four zero vertices interpolate to packed zero, including the old
+        // saturating conversion's result for nonfinite weights.
+        let mut sampler = corner_sampler();
+        sampler.quads[0].modulation = [0; 4];
+        let sampler = sampler.prepare_for_blit(SpriteBlitState::normal(), Some(0x00ab_cdef));
+        FOG_INTERPOLATION_CALLS.with(|calls| calls.set(0));
+        for coordinate in [0.0, 0.25, 0.5, 0.75, 1.0, f32::NAN] {
+            let blit = sampler.blit_at(SpriteBlitState::normal(), coordinate, coordinate);
+            let fog = blit.fog_modulation.expect("prepared fog");
+            assert_eq!(fog.combine_with(0x00ff_ffff), 0);
+            assert_eq!(fog.combine_with_owner(0x00ab_cdef), 0);
+        }
+        assert_eq!(FOG_INTERPOLATION_CALLS.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn fogged_text_combines_vertices_once_per_text_blit() {
+        // StdGL.cpp:455-458 applies the same vertex modulation to glyph blits.
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 64,
+                resolution_y: 64,
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![0x00ff_ffff; 4],
+            }),
+            zoom: 1.0,
+        };
+        let font = clonk_graphics::BitmapFont::new();
+        let font = hud::HudFont::Fallback(&font);
+        for draw in [draw_fogged_cursor_text_line, draw_fogged_markup_text] {
+            let mut surface = Surface::new(32, 32, PixelFormat::Rgba8888);
+            COLOR_MODULATION_CALLS.with(|calls| calls.set(0));
+            draw(
+                &mut surface,
+                &font,
+                16,
+                0,
+                "A",
+                Color::opaque(17, 63, 191),
+                None,
+                AdvancedRendererConfig::default(),
+                &fog,
+            );
+            assert_eq!(COLOR_MODULATION_CALLS.with(std::cell::Cell::get), 4);
+        }
+    }
+
+    #[test]
+    fn fogged_graphical_pxs_combines_vertices_once_per_draw() {
+        // StdGL.cpp:455-458 combines fog at the quad vertices before shading.
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 64,
+                resolution_y: 64,
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![0x00ff_ffff; 4],
+            }),
+            zoom: 1.0,
+        };
+        let image = ImageData::new(4, 4, [17, 63, 191, 255].repeat(16));
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        COLOR_MODULATION_CALLS.with(|calls| calls.set(0));
+        draw_pxs_image_region(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 4.0, 4.0),
+            &image,
+            &SourceRect::new(0, 0, 4, 4),
+            0,
+            1.0,
+            AdvancedRendererConfig::default(),
+            None,
+            Some(&fog),
+        );
+        assert_eq!(COLOR_MODULATION_CALLS.with(std::cell::Cell::get), 4);
+    }
+
+    #[test]
+    fn fogged_ground_combines_vertices_once_for_the_complete_row_pass() {
+        // StdGL.cpp:710-763 draws the landscape as fog chunks; :455-458
+        // combines the active modulation once per vertex, before shading.
+        let mut graphics = GraphicsSystem::new(
+            4,
+            4,
+            4,
+            "fog vertex cache test",
+            Arc::new(clonk_graphics::BitmapFont::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(CursorAtlas::empty()),
+            Arc::new(HudGraphics::default()),
+        );
+        graphics.active_fog_map = Some(Arc::new(ClrModMap {
+            resolution_x: 64,
+            resolution_y: 64,
+            width: 2,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells: vec![0x00ff_ffff; 4],
+        }));
+        let mut grid = PixelGrid::new(4, 4, vec![0; 16], vec![0], vec![None], vec![None]);
+        for y in 0..4 {
+            for x in 0..4 {
+                assert!(grid.set_surface32_pixel(x, y, 0x0011_3fbf));
+            }
+        }
+        let mut landscape = Landscape::new(4, vec![0; 4]).expect("valid landscape");
+        landscape.set_pixel_grid(grid);
+        COLOR_MODULATION_CALLS.with(|calls| calls.set(0));
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(COLOR_MODULATION_CALLS.with(std::cell::Cell::get), 4);
+    }
+
+    #[test]
+    fn fogged_sky_tile_combines_vertices_before_drawing_rows() {
+        // StdGL.cpp:455-458 combines modulation once at each quad vertex.
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 64,
+                resolution_y: 64,
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![0x00ff_ffff; 4],
+            }),
+            zoom: 1.0,
+        };
+        let bounds = SkyTileBounds::visible(4, 4, 4, 4, 0, 0).expect("visible sky tile");
+        let mut region = SkyTileRegion::new(bounds, Some(&fog), 4, 4);
+        let blit = SpriteBlitState::normal();
+        COLOR_MODULATION_CALLS.with(|calls| calls.set(0));
+        region.prepare_for_blit(blit);
+        let regions = [region];
+        let texels = [Color::opaque(17, 63, 191); 16];
+        let rows = vec![vec![0]; 4];
+        let context = SkyTileRowRenderContext {
+            lit_texels: &texels,
+            image_width: 4,
+            surface_width: 4,
+            regions: &regions,
+            region_indices_by_row: &rows,
+            base_blit: blit,
+            uses_blit_modulation: true,
+            fog: Some(&fog),
+            gamma: None,
+            clip: None,
+        };
+        draw_sky_tile_rows(&context, &mut [0; 64], 4, false);
+        assert_eq!(COLOR_MODULATION_CALLS.with(std::cell::Cell::get), 4);
+    }
+
+    #[test]
+    fn prepared_fog_fragments_reuse_unpacked_vertex_channels() {
+        // StdGL.cpp:455-458 prepares the four vertex colours before shading.
+        // The fragment must interpolate those channels without unpacking them
+        // from packed C4 colours again for every pixel.
+        let sampler =
+            corner_sampler().prepare_for_blit(SpriteBlitState::normal(), Some(0x00ab_cdef));
+        PACKED_FOG_INTERPOLATION_CALLS.with(|calls| calls.set(0));
+        for y in 0..16 {
+            for x in 0..16 {
+                sampler.blit_at(SpriteBlitState::normal(), x as f32 / 16.0, y as f32 / 16.0);
+            }
+        }
+        assert_eq!(PACKED_FOG_INTERPOLATION_CALLS.with(std::cell::Cell::get), 0);
+    }
 
     #[test]
     fn fogged_sprite_without_owner_mask_combines_only_its_base_vertices() {

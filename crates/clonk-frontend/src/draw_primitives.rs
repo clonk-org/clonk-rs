@@ -1037,16 +1037,18 @@ pub(crate) fn draw_pxs_image_region(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            dest,
-            (source.x, source.y, source.width, source.height),
-            (image.width(), image.height()),
-            false,
-            |x, y| (x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                dest,
+                (source.x, source.y, source.width, source.height),
+                (image.width(), image.height()),
+                false,
+                |x, y| (x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, None));
     let bounds = surface.bounds();
     let first_x = ((dest.0 - 0.5).ceil() as i32).max(bounds.x);
     let first_y = ((dest.1 - 0.5).ceil() as i32).max(bounds.y);
