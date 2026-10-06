@@ -54,6 +54,7 @@ jobs:
 
       - name: Materialize verified pinned content
         uses: ./.github/actions/verified-content
+        timeout-minutes: 10
 
       - name: Validate the release source
         env:

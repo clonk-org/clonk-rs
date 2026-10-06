@@ -76,6 +76,24 @@ def step_script(workflow, name):
 
 
 class WorkflowRuntimeInventoryTests(unittest.TestCase):
+    def test_local_composites_use_supported_runner_step_fields(self):
+        # actions/runner src/Runner.Worker/action_yaml.json run-step and
+        # uses-step reject workflow-only fields such as timeout-minutes.
+        # https://github.com/actions/runner/blob/main/src/Runner.Worker/action_yaml.json
+        common = {"name", "id", "if", "env", "continue-on-error"}
+        for path in sorted((REPOSITORY / ".github/actions").glob("*/action.yml")):
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("using: composite", source, path.name)
+            for step in step_blocks(source, indentation=4):
+                fields = set(re.findall(r"(?m)^    - ([a-z-]+):|^      ([a-z-]+):", step))
+                fields = {field for pair in fields for field in pair if field}
+                with self.subTest(action=path.parent.name, step=step.splitlines()[0]):
+                    self.assertEqual(len(fields & {"run", "uses"}), 1)
+                    allowed = common | ({"run", "shell", "working-directory"} if "run" in fields else {"uses", "with"})
+                    self.assertEqual(fields - allowed, set())
+                    if "run" in fields:
+                        self.assertIn("shell", fields)
+
     def test_windows_installer_uses_fast_solid_compression(self):
         installer = WINDOWS_INSTALLER.read_text(encoding="utf-8")
 

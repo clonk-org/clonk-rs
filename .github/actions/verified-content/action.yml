@@ -44,7 +44,6 @@ runs:
         APT_PACKAGES: ${{ inputs.apt-packages }}
         PROBE_RUST: ${{ inputs.probe-rust }}
         RUSTUP_AUTO_INSTALL: '0'
-      timeout-minutes: 10
       run: |
         content_log="$RUNNER_TEMP/content-materialization.log"
         python3 scripts/ci-content.py --revision "$CONTENT_REVISION" \
@@ -56,7 +55,7 @@ runs:
         if [[ -n "$APT_PACKAGES" ]]; then
           (
             read -r -a packages <<< "$APT_PACKAGES"
-            scripts/install-apt-packages.sh "${packages[@]}"
+            timeout --kill-after=10s 600s scripts/install-apt-packages.sh "${packages[@]}"
           ) >"$apt_log" 2>&1 &
           apt_pid=$!
         fi

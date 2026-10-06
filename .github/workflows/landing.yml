@@ -94,6 +94,7 @@ jobs:
 
       - name: Materialize verified pinned content
         uses: ./.github/actions/verified-content
+        timeout-minutes: 10
 
       - name: Install native dependencies
         timeout-minutes: 10
@@ -468,6 +469,7 @@ jobs:
       - name: Prepare verified content, dependencies, and exact Rust
         id: preinstalled-rust
         uses: ./.github/actions/verified-content
+        timeout-minutes: 10
         with:
           apt-packages: ${{ matrix.apt }}
           probe-rust: 'true'
@@ -682,6 +684,7 @@ jobs:
 
       - name: Materialize verified pinned content
         uses: ./.github/actions/verified-content
+        timeout-minutes: 10
 
       - name: Verify all required jobs and immutable artifact digests
         env:

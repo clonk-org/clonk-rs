@@ -40,6 +40,7 @@ class VerifiedContentActionTests(unittest.TestCase):
                         self.assertTrue(verifiers, f"{name}:{role} has no pinned-content verifier")
                         for step in verifiers:
                             self.assertNotIn("continue-on-error: true", step)
+                            self.assertIn("timeout-minutes: 10", step)
                         if name == "rust.yml" and role == "windows-release-tools":
                             self.assertTrue(any("        if:" not in step
                                                 or "if: inputs.software_presentation" in step
@@ -76,7 +77,8 @@ class VerifiedContentActionTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci-content.py", action)
         self.assertIn('--revision "$CONTENT_REVISION"', action)
         self.assertIn('--cache-hit "$CACHE_HIT"', action)
-        self.assertIn("timeout-minutes: 10", action)
+        self.assertIn("timeout --kill-after=10s 600s scripts/install-apt-packages.sh", action)
+        self.assertNotIn("timeout-minutes:", action)
         self.assertIn("github.ref == 'refs/heads/main'", action)
         self.assertIn("inputs.publish == 'true'", action)
         self.assertIn("uses: ./.github/actions/verify-cache-handoff", action)

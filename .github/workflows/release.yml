@@ -316,6 +316,7 @@ jobs:
       - name: Materialize verified qualification inputs
         if: steps.resolve.outputs.release == 'true'
         uses: ./.github/actions/verified-content
+        timeout-minutes: 10
 
       - name: Verify exact-SHA qualification receipt
         if: steps.resolve.outputs.release == 'true'

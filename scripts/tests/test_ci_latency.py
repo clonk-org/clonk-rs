@@ -180,8 +180,13 @@ class CiLatencyTests(unittest.TestCase):
         self.assertEqual({role for role, step in installations}, NATIVE_DEPENDENCY_ROLES)
         for role, step in installations:
             minutes = re.search(r"timeout-minutes: (\d+)", step)
-            self.assertIsNotNone(minutes, f"{role} bounds no apt step")
-            steps.append(int(minutes.group(1)) * 60)
+            if minutes is not None:
+                steps.append(int(minutes.group(1)) * 60)
+            else:
+                self.assertEqual(role[1], "composite", f"{role} bounds no workflow apt step")
+                seconds = re.search(r"timeout --kill-after=10s (\d+)s scripts/install-apt-packages\.sh", step)
+                self.assertIsNotNone(seconds, f"{role} bounds no composite apt command")
+                steps.append(int(seconds.group(1)))
 
         self.assertEqual(len(steps), len(NATIVE_DEPENDENCY_ROLES))
         self.assertLess(budget, min(steps))
@@ -1234,7 +1239,9 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("probe-rust: 'true'", linux)
         self.assertIn('if [[ -n "$APT_PACKAGES" ]]', action)
         self.assertIn("scripts/install-apt-packages.sh", action)
-        self.assertIn("timeout-minutes: 10", action)
+        self.assertIn("timeout --kill-after=10s 600s scripts/install-apt-packages.sh", action)
+        content_step = next(step for step in STEP.findall(linux) if "uses: ./.github/actions/verified-content" in step)
+        self.assertIn("timeout-minutes: 10", content_step)
         self.assertIn("rustc 1.98.1", action)
         self.assertIn("id: preinstalled-rust", linux)
         self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", linux)

@@ -13,8 +13,7 @@ runs:
     - name: Install Linux window and graphics dependencies
       if: runner.os == 'Linux'
       shell: bash
-      timeout-minutes: 10
-      run: scripts/install-apt-packages.sh libasound2-dev libudev-dev mesa-vulkan-drivers libegl1-mesa-dev libgl1-mesa-dri libxkbcommon-x11-0 xvfb xauth
+      run: timeout --kill-after=10s 600s scripts/install-apt-packages.sh libasound2-dev libudev-dev mesa-vulkan-drivers libegl1-mesa-dev libgl1-mesa-dri libxkbcommon-x11-0 xvfb xauth
 
     - name: Qualify every desktop backend
       shell: bash
