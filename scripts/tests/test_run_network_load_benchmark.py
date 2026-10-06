@@ -187,18 +187,19 @@ def network_load_report(*, source_commit="abc", topology="udp"):
         for index in range(measured_ticks)
     ]
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "workload": (
             "same-process Tokio IPv4-loopback real-socket "
             "HarpoonRace-shaped control transport"
         ),
         "workload_scope": (
-            "HarpoonRace-shaped lobby/control parameters only; no "
-            "scenario/resource loading or game simulation"
+            "HarpoonRace-shaped lobby/control parameters only; "
+            "host-served placeholder scenario/dynamic downloads, no scenario "
+            "loading or game simulation"
         ),
         "sequence": (
             "synthetic max_players=24 JoinData -> 24 PlayerInfo joins -> "
-            "activate all -> GO"
+            "activate all -> host-served scenario/dynamic downloads -> GO"
         ),
         "round_trip_scope": (
             "native ping and loaded 24-client ReadyCheck fanout are "

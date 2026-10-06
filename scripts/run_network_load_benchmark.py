@@ -56,7 +56,7 @@ WARMUP_NOTE = (
     "The fresh isolated RTT warms 128 request/response exchanges before its "
     "256 measured exchanges."
 )
-SUPPORTED_REPORT_SCHEMA = 6
+SUPPORTED_REPORT_SCHEMA = 7
 RUNNER_SCHEMA = 5
 PROVENANCE_SCHEMA = 2
 BOOTSTRAP_RESAMPLES = 10_000
@@ -101,12 +101,13 @@ EXPECTED_REPORT_VALUES = {
         "HarpoonRace-shaped control transport"
     ),
     "workload_scope": (
-        "HarpoonRace-shaped lobby/control parameters only; no "
-        "scenario/resource loading or game simulation"
+        "HarpoonRace-shaped lobby/control parameters only; "
+        "host-served placeholder scenario/dynamic downloads, no scenario "
+        "loading or game simulation"
     ),
     "sequence": (
         "synthetic max_players=24 JoinData -> 24 PlayerInfo joins -> "
-        "activate all -> GO"
+        "activate all -> host-served scenario/dynamic downloads -> GO"
     ),
     "round_trip_scope": (
         "native ping and loaded 24-client ReadyCheck fanout are diagnostics; "
