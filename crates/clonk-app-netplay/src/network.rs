@@ -277,6 +277,24 @@ impl ClientSettings {
     }
 }
 
+/// Bounds the puncher lookup that precedes the host dial. An offline LAN whose
+/// router still answers as DNS server otherwise waits out every resolver retry.
+const CLIENT_NETPUNCHER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
+
+async fn bound_client_mesh_puncher_lookup(
+    lookup: impl std::future::Future<Output = Vec<ClientMeshPuncherConfig>>,
+) -> Vec<ClientMeshPuncherConfig> {
+    tokio::time::timeout(CLIENT_NETPUNCHER_LOOKUP_TIMEOUT, lookup)
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                timeout = ?CLIENT_NETPUNCHER_LOOKUP_TIMEOUT,
+                "netpuncher lookup timed out; joining without punchers"
+            );
+            Vec::new()
+        })
+}
+
 async fn resolve_client_mesh_punchers(
     address: Option<&str>,
     game_ids: NetpuncherGameIds,
@@ -8806,10 +8824,10 @@ async fn run_client_worker_with_voice_enabled(
                 let _ = local_id_tx.send(Err(NetworkStartError::Cancelled));
                 return Ok(());
             }
-            resolved = resolve_client_mesh_punchers(
+            resolved = bound_client_mesh_puncher_lookup(resolve_client_mesh_punchers(
                 settings.netpuncher_address.as_deref(),
                 settings.netpuncher_game_ids,
-            ) => resolved,
+            )) => resolved,
         }
     } else {
         Vec::new()
@@ -12034,6 +12052,19 @@ Message=Server says Andr\xe9\r\n\
                 game_id: 0x9abc,
             }]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unresolvable_client_puncher_lookup_releases_the_join_at_its_bound() {
+        // C++ resolves the puncher synchronously before the host dial
+        // (oracle-src-pinned src/C4Network2.cpp:372-373, :1084-1097). It only
+        // serves NAT traversal, so an offline resolver must not hold the join.
+        let started = tokio::time::Instant::now();
+
+        let resolved = bound_client_mesh_puncher_lookup(std::future::pending()).await;
+
+        assert!(resolved.is_empty());
+        assert_eq!(started.elapsed(), CLIENT_NETPUNCHER_LOOKUP_TIMEOUT);
     }
 
     #[test]
