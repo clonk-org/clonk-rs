@@ -126,7 +126,9 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn('python3 scripts/ci-content.py --revision "$CONTENT_REVISION"', action)
         self.assertIn('str(repository / "scripts" / "run_with_timeout.py")', helper)
         self.assertIn("wrapped = [sys.executable,", helper)
-        self.assertIn("ATTEMPT_BUDGETS = (300, 180)", helper)
+        self.assertIn("DOWNLOAD_BUDGET_SECONDS = 480", helper)
+        self.assertIn("DOWNLOAD_ATTEMPTS = 2", helper)
+        self.assertIn('"GIT_HTTP_LOW_SPEED_TIME": "60"', helper)
         self.assertIn('"submodule", "update"', helper)
         self.assertIn("status = run_bounded(", helper)
         self.assertNotIn('subprocess.run(["timeout"', helper)
@@ -349,7 +351,11 @@ class CiLatencyTests(unittest.TestCase):
         )
         self.assertIn("enableCrossOsArchive: true", restore)
         self.assertIn("continue-on-error: true", restore)
-        self.assertNotIn("restore-keys:", restore)
+        self.assertIn(
+            "restore-keys: clonk-content-git-v1-Linux-${{ hashFiles('.gitmodules') }}-"
+            "${{ steps.identity.outputs.revision }}",
+            restore,
+        )
         self.assertNotIn("fail-on-cache-miss", restore)
         self.assertNotIn("continue-on-error", materialize)
         self.assertNotIn("if:", materialize)
@@ -381,8 +387,9 @@ class CiLatencyTests(unittest.TestCase):
             r'"submodule",\s*"update",\s*"--init",\s*"--force",\s*"--checkout"',
         )
         self.assertRegex(
-            helper, r'"--depth=1",\s*"--filter=blob:none",\s*"--",\s*"content"'
+            helper, r'"fetch",\s*"--no-tags",\s*"--depth=1",\s*"origin",\s*revision'
         )
+        self.assertNotIn('"--filter=blob:none"', helper)
 
         self.assertIn("needs: content-landing-cache", linux_producer)
         self.assertNotIn("submodules: recursive", content_producer)

@@ -85,6 +85,18 @@ class VerifiedContentActionTests(unittest.TestCase):
         verification = action.split("name: Materialize and verify pinned content", 1)[1].split("    - name:", 1)[0]
         self.assertNotIn("if:", verification)
 
+    def test_existing_exact_linux_object_cache_remains_a_verified_restore_source(self):
+        action = (REPOSITORY / ".github/actions/verified-content/action.yml").read_text()
+        restore = action.split("name: Restore optional pinned content objects", 1)[1].split("    - name:", 1)[0]
+        expected = ("clonk-content-git-v1-Linux-${{ hashFiles('.gitmodules') }}-"
+                    "${{ steps.identity.outputs.revision }}")
+        self.assertIn("restore-keys:", restore)
+        self.assertIn(expected, restore)
+        self.assertNotIn("${{ runner.os }}", restore)
+        publication = action.split("name: Publish verified pinned content objects", 1)[1].split("    - name:", 1)[0]
+        self.assertIn("key: clonk-content-git-v2-", publication)
+        self.assertNotIn("clonk-content-git-v1-", publication)
+
 
 if __name__ == "__main__":
     unittest.main()

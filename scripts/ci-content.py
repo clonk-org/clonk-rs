@@ -17,7 +17,8 @@ import time
 
 
 CACHE_FORMAT = "v2"
-ATTEMPT_BUDGETS = (300, 180)
+DOWNLOAD_BUDGET_SECONDS = 480
+DOWNLOAD_ATTEMPTS = 2
 REPOSITORY = Path(__file__).resolve().parent.parent
 WINDOWS = os.name == "nt"
 
@@ -331,15 +332,46 @@ def hydrate_object_store(repository: Path, revision: str, report: dict) -> None:
     report.update(materialized=True, hydration_source="object_store", cache_store_verified=True)
 
 
-def materialize(repository: Path, revision: str, report: dict) -> None:
+def fetch_snapshot(repository: Path, revision: str) -> None:
+    """Fetch all pinned objects together, without a branch-tip clone or lazy blobs."""
+    verify_parent_gitlink(repository, revision)
+    modules = owned_modules_path(repository)
+    content = repository / "content"
     url = configured_url(repository)
-    for budget in ATTEMPT_BUDGETS:
+    modules.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "--quiet", f"--separate-git-dir={modules}", str(content)], check=True,
+    )
+    for arguments in (
+        ("config", "core.worktree", "../../../content"),
+        ("remote", "add", "origin", url),
+        ("fetch", "--no-tags", "--depth=1", "origin", revision),
+        ("checkout", "--quiet", "--detach", revision),
+    ):
+        if arguments[0] in ("fetch", "checkout"):
+            print(f"Content snapshot: {arguments[0]} {revision}", file=sys.stderr, flush=True)
+        environment = None
+        if arguments[0] == "fetch":
+            # A live large snapshot gets the remaining overall deadline. A
+            # stalled HTTP transfer still aborts early enough for a retry.
+            environment = {**os.environ, "GIT_HTTP_LOW_SPEED_LIMIT": "1024", "GIT_HTTP_LOW_SPEED_TIME": "60"}
+        subprocess.run(["git", "-C", str(content), *arguments], check=True, env=environment)
+
+
+def materialize(repository: Path, revision: str, report: dict) -> None:
+    deadline = time.monotonic() + DOWNLOAD_BUDGET_SECONDS
+    for _ in range(DOWNLOAD_ATTEMPTS):
+        if time.monotonic() >= deadline:
+            break
+        reset_owned_content(repository)
         started = time.monotonic()
+        budget = deadline - started
+        if budget <= 0:
+            break
         status = run_bounded(
             repository, budget,
-            ["git", "-C", str(repository), "-c", f"submodule.content.url={url}",
-             "submodule", "update",
-             "--init", "--force", "--checkout", "--depth=1", "--filter=blob:none", "--", "content"],
+            [sys.executable, str(repository / "scripts" / "ci-content.py"),
+             "--revision", revision, "--fetch-snapshot"],
         )
         report["attempts"].append({
             "budget_seconds": budget, "elapsed_seconds": time.monotonic() - started,
@@ -351,7 +383,7 @@ def materialize(repository: Path, revision: str, report: dict) -> None:
             report["materialized"] = True
             report["hydration_source"] = "origin"
             return
-    raise ContentError("content download failed in both bounded attempts")
+    raise ContentError("content download failed within its bounded retry deadline")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -359,8 +391,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--revision", required=True)
     parser.add_argument("--cache-hit", choices=("true", "false"), default="false")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--fetch-snapshot", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--report", type=Path)
     arguments = parser.parse_args(argv)
+    if arguments.fetch_snapshot:
+        try:
+            fetch_snapshot(REPOSITORY, arguments.revision)
+        except (ContentError, OSError, subprocess.CalledProcessError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return error.returncode if isinstance(error, subprocess.CalledProcessError) else 1
+        return 0
     started = time.monotonic()
     report = {
         "schema_version": 1, "cache_format": CACHE_FORMAT,
@@ -403,7 +443,6 @@ def main(argv: list[str] | None = None) -> int:
                 except ContentError as store_error:
                     report["cache_store_error"] = str(store_error)
                     report["repaired_cache"] = had_checkout or modules.exists() or is_link(modules)
-                    reset_owned_content(REPOSITORY)
                     materialize(REPOSITORY, arguments.revision, report)
             finally:
                 report["hydration_elapsed_seconds"] = time.monotonic() - hydration_started

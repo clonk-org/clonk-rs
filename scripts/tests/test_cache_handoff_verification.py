@@ -99,6 +99,7 @@ class CacheHandoffVerificationTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", materialize)
         self.assertNotIn("continue-on-error", verifier)
         for step in (save, verifier):
+            self.assertNotIn("restore-keys:", step)
             self.assertIn(
                 "if: inputs.publish == 'true' && github.ref == 'refs/heads/main' "
                 "&& steps.cache.outputs.cache-hit != 'true'",
@@ -110,7 +111,12 @@ class CacheHandoffVerificationTests(unittest.TestCase):
                 "${{ steps.identity.outputs.revision }}",
                 step,
             )
-        self.assertNotIn("restore-keys:", content)
+        restore = next(step for step in steps(content) if "actions/cache/restore@" in step)
+        self.assertIn(
+            "restore-keys: clonk-content-git-v1-Linux-${{ hashFiles('.gitmodules') }}-"
+            "${{ steps.identity.outputs.revision }}",
+            restore,
+        )
 
         main = (WORKFLOWS / "rust.yml").read_text(encoding="utf-8")
         producer = main[

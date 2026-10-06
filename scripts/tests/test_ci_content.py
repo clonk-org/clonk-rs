@@ -22,6 +22,50 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+class ColdFetchBudgetTests(unittest.TestCase):
+    def test_a_transient_fetch_error_leaves_the_remaining_download_budget_for_retry(self) -> None:
+        elapsed = 0.0
+        budgets = []
+
+        def download(repository, budget, command):
+            nonlocal elapsed
+            budgets.append(budget)
+            duration = 12 if len(budgets) == 1 else 310
+            elapsed += min(duration, budget)
+            return 128 if len(budgets) == 1 else (0 if duration <= budget else 124)
+
+        report = {"attempts": []}
+        with mock.patch.object(MODULE.time, "monotonic", side_effect=lambda: elapsed), \
+                mock.patch.object(MODULE, "reset_owned_content"), \
+                mock.patch.object(MODULE, "run_bounded", side_effect=download), \
+                mock.patch.object(MODULE, "verify_checkout"), \
+                mock.patch.object(MODULE, "verify_object_store"):
+            MODULE.materialize(REPOSITORY, "a" * 40, report)
+
+        self.assertEqual(budgets, [480, 468])
+        self.assertEqual(elapsed, 322)
+        self.assertTrue(report["materialized"])
+
+    def test_an_exhausted_download_deadline_does_not_start_or_reset_another_attempt(self) -> None:
+        elapsed = 0.0
+
+        def timeout(repository, budget, command):
+            nonlocal elapsed
+            elapsed += budget
+            return 124
+
+        report = {"attempts": []}
+        with mock.patch.object(MODULE.time, "monotonic", side_effect=lambda: elapsed), \
+                mock.patch.object(MODULE, "reset_owned_content") as reset, \
+                mock.patch.object(MODULE, "run_bounded", side_effect=timeout) as download:
+            with self.assertRaisesRegex(MODULE.ContentError, "deadline"):
+                MODULE.materialize(REPOSITORY, "a" * 40, report)
+
+        self.assertEqual(elapsed, 480)
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(reset.call_count, 1)
+
+
 class ContentCheckoutTests(unittest.TestCase):
     def setUp(self) -> None:
         self.sandbox = Path(tempfile.mkdtemp(prefix="clonk-ci-content-"))
@@ -101,6 +145,27 @@ class ContentCheckoutTests(unittest.TestCase):
         self.assertTrue(report["cache_verified"])
         self.assertFalse(report["materialized"])
         self.assertEqual(report["attempts"], [])
+
+    def test_a_cold_fetch_downloads_only_the_pinned_revision_not_the_remote_tip(self) -> None:
+        (self.source / "unrelated.c4s").write_text("new unpinned scenario\n", encoding="utf-8")
+        self.git(self.source, "add", "unrelated.c4s")
+        self.git(self.source, "commit", "--quiet", "-m", "test: advance the remote tip")
+        remote_tip = self.git(self.source, "rev-parse", "HEAD").stdout.strip()
+        self.git(self.parent, "config", "--file", ".gitmodules", "submodule.content.url", self.source.as_uri())
+        self.git(self.parent, "add", ".gitmodules")
+        self.git(self.parent, "commit", "--quiet", "-m", "test: use a transported content origin")
+        self.remove_checkout()
+
+        completed = self.run_content()
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual((self.parent / "content" / "scenario.c4s").read_text(), "pinned scenario\n")
+        self.assertFalse((self.parent / "content" / "unrelated.c4s").exists())
+        unpinned_commit = subprocess.run(
+            ["git", "-C", str(self.parent / "content"), "cat-file", "-e", remote_tip],
+            check=False, capture_output=True, env={**self.environment, "GIT_NO_LAZY_FETCH": "1"},
+        )
+        self.assertNotEqual(unpinned_commit.returncode, 0, "cold fetch downloaded the unpinned remote tip")
 
     def test_an_object_store_only_warm_cache_hydrates_without_fetching_or_replacing_the_store(self) -> None:
         modules = self.parent / ".git" / "modules" / "content"
@@ -292,7 +357,8 @@ class ContentCheckoutTests(unittest.TestCase):
         self.assertEqual(report["object_store_bytes_before"], 0)
         self.assertGreater(report["object_store_bytes_after"], 0)
         self.assertIsNone(report["network_bytes"])
-        self.assertEqual(report["attempts"][0]["budget_seconds"], 300)
+        self.assertGreater(report["attempts"][0]["budget_seconds"], 0)
+        self.assertLessEqual(report["attempts"][0]["budget_seconds"], 480)
         self.assertIn("Object-store bytes", (self.sandbox / "summary.md").read_text(encoding="utf-8"))
 
     def test_verify_only_cannot_fall_back_to_the_parent_repository_when_git_metadata_is_missing(self) -> None:
@@ -397,11 +463,13 @@ class ContentCheckoutTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 1, completed.stdout)
         report = json.loads(self.report.read_text(encoding="utf-8"))
-        self.assertEqual([entry["budget_seconds"] for entry in report["attempts"]], [300, 180])
+        self.assertEqual(len(report["attempts"]), 2)
+        self.assertTrue(all(0 < entry["budget_seconds"] <= 480 for entry in report["attempts"]))
+        self.assertLess(report["attempts"][1]["budget_seconds"], report["attempts"][0]["budget_seconds"])
         self.assertTrue(all(entry["returncode"] != 0 for entry in report["attempts"]))
         self.assertFalse(report["checkout_clean"])
         self.assertFalse(report["materialized"])
-        self.assertIn("does not exist", completed.stderr)
+        self.assertIn("Could not read from remote repository", completed.stderr)
 
     def test_cached_index_flags_cannot_hide_modified_parity_bytes(self) -> None:
         content = self.parent / "content"

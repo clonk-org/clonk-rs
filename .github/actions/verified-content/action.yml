@@ -33,6 +33,7 @@ runs:
       with:
         path: .git/modules/content
         key: clonk-content-git-v2-${{ hashFiles('.gitmodules') }}-${{ steps.identity.outputs.revision }}
+        restore-keys: clonk-content-git-v1-Linux-${{ hashFiles('.gitmodules') }}-${{ steps.identity.outputs.revision }}
         enableCrossOsArchive: true
 
     - name: Materialize and verify pinned content
