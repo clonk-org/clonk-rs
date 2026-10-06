@@ -2438,6 +2438,61 @@ Title=Recovered game\n"
     }
 
     #[test]
+    fn join_capabilities_read_global_ipv6_and_link_local_scopes_from_interfaces() {
+        // ContainsGlobalIpv6 counts any IPv6 address that is neither local nor
+        // private, and AddLocalAddrs records every scoped address's interface
+        // once (pinned oracle src/C4NetIO.cpp:233-241;
+        // src/C4Network2Client.cpp:312-315).
+        let interfaces = [
+            "192.168.1.2:0".parse().unwrap(),
+            ipv6_address("fe80::1", 0, 0, 7),
+            ipv6_address("fe80::2", 0, 0, 3),
+            ipv6_address("fe80::3", 0, 0, 7),
+            ipv6_address("fe80::4", 0, 0, 0),
+            ipv6_address("fd00::1", 0, 0, 0),
+        ];
+        assert_eq!(join_capabilities(&interfaces), (false, vec![3, 7]));
+
+        let with_global = [
+            interfaces.as_slice(),
+            &[ipv6_address("2001:db8::1", 0, 0, 0)],
+        ]
+        .concat();
+        assert_eq!(join_capabilities(&with_global), (true, vec![3, 7]));
+    }
+
+    #[test]
+    fn the_local_host_dials_a_link_local_reference_route() {
+        // An offline LAN reference is all link-local: discovery answers from
+        // fe80::, so the source fills the wildcard routes with it. InitClient
+        // dials such a route once per local interface ID (pinned oracle
+        // src/C4Network2.cpp:382-387), and C++ enumerates those IDs on every
+        // platform, Windows included (src/C4NetIO.cpp:278-305).
+        let interfaces = crate::client_mesh::client_mesh_os_interface_endpoints();
+        let interface_ids = crate::client_mesh::client_mesh_interface_ids(&interfaces);
+        assert!(
+            !interface_ids.is_empty(),
+            "no link-local interface among {interfaces:?}"
+        );
+        let reference = NetworkGameReference {
+            addresses: vec![network_address(NetworkProtocol::Tcp, "[fe80::1]:11112")],
+            source_address: ipv6_address("fe80::1", 11_111, 0, interface_ids[0]),
+            ..NetworkGameReference::default()
+        };
+
+        assert_eq!(
+            reference.join_route_plan_for_local_host().dial_attempts,
+            interface_ids
+                .iter()
+                .map(|&scope_id| NetworkAddress::new(
+                    NetworkProtocol::Tcp,
+                    ipv6_address("fe80::1", 11_112, 0, scope_id),
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn reference_source_fills_only_null_hosts_and_retains_the_complete_endpoint() {
         // SetSourceAddress retains the response endpoint and copies its host,
         // flowinfo, and scope into only advertised null hosts while preserving

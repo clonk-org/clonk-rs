@@ -638,7 +638,7 @@ jobs:
           - name: network tests
             nextest: true
             installer: false
-            command: cargo nextest run -p clonk-network --lib --locked -E 'test(/^(search::tests::(discovery_multicast_target_uses_cpp_default_interface|an_accepted_default_multicast_join_enumerates_no_interfaces|a_refused_default_multicast_join_keeps_every_joinable_interface|a_scoped_join_set_sends_one_probe_per_joined_interface|an_unjoinable_host_still_probes_the_cpp_default_interface|the_cpp_default_interface_never_sets_ipv6_multicast_if|enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order)|udp_runtime::tests::a_windows_port_unreachable_closes_only_the_refusing_peer)$/)'
+            command: cargo nextest run -p clonk-network --lib --locked -E 'test(/^(search::tests::(discovery_multicast_target_uses_cpp_default_interface|an_accepted_default_multicast_join_enumerates_no_interfaces|a_refused_default_multicast_join_keeps_every_joinable_interface|a_scoped_join_set_sends_one_probe_per_joined_interface|an_unjoinable_host_still_probes_the_cpp_default_interface|the_cpp_default_interface_never_sets_ipv6_multicast_if|enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order|the_local_host_dials_a_link_local_reference_route)|udp_runtime::tests::a_windows_port_unreachable_closes_only_the_refusing_peer)$/)'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

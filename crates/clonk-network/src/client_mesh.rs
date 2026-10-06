@@ -1,4 +1,4 @@
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::net::Ipv6Addr;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::Duration;
@@ -626,7 +626,63 @@ pub(crate) fn client_mesh_os_interface_endpoints() -> Vec<SocketAddr> {
     sorted_client_mesh_interface_endpoints(endpoints)
 }
 
-#[cfg(not(unix))]
+/// The Windows enumeration C++ uses: every unicast address of every adapter,
+/// minus loopback (pinned oracle `src/C4NetIO.cpp:278-305`). A link-local
+/// address Windows reports without a scope falls back to its adapter's IPv6
+/// interface index, as the unix arm falls back to `if_nametoindex`.
+///
+/// C++ never breaks out of its retry loop after a successful read, so it
+/// appends the whole table once per remaining attempt. That only repeats dial
+/// attempts, and the deduplication below would discard the copies anyway.
+#[cfg(windows)]
+pub(crate) fn client_mesh_os_interface_endpoints() -> Vec<SocketAddr> {
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6,
+    };
+
+    let mut endpoints = Vec::new();
+    crate::windows_adapters::for_each_adapter(AF_UNSPEC, |adapter| {
+        let mut unicast = adapter.FirstUnicastAddress;
+        // SAFETY: the unicast chain lives in the adapter table that
+        // `for_each_adapter` keeps alive for this call, and ends at null.
+        while let Some(entry) = unsafe { unicast.as_ref() } {
+            unicast = entry.Next;
+            let raw = entry.Address.lpSockaddr;
+            if raw.is_null() {
+                continue;
+            }
+            // SAFETY: every sockaddr variant starts with its family field.
+            match unsafe { (*raw).sa_family } {
+                AF_INET => {
+                    // SAFETY: the family check establishes `SOCKADDR_IN`, and
+                    // every view of its address union is the same four bytes.
+                    let address = unsafe { &*raw.cast::<SOCKADDR_IN>() };
+                    let ip = Ipv4Addr::from(unsafe { address.sin_addr.S_un.S_addr }.to_ne_bytes());
+                    if !ip.is_loopback() && !ip.is_unspecified() {
+                        endpoints.push(SocketAddr::V4(SocketAddrV4::new(ip, 0)));
+                    }
+                }
+                AF_INET6 => {
+                    // SAFETY: the family check establishes `SOCKADDR_IN6`, and
+                    // every view of its address and scope unions is plain data.
+                    let address = unsafe { &*raw.cast::<SOCKADDR_IN6>() };
+                    let ip = Ipv6Addr::from(unsafe { address.sin6_addr.u.Byte });
+                    if !ip.is_loopback() && !ip.is_unspecified() {
+                        let scope_id = match unsafe { address.Anonymous.sin6_scope_id } {
+                            0 if ip.is_unicast_link_local() => adapter.Ipv6IfIndex,
+                            scope_id => scope_id,
+                        };
+                        endpoints.push(SocketAddr::V6(SocketAddrV6::new(ip, 0, 0, scope_id)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    sorted_client_mesh_interface_endpoints(endpoints)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn client_mesh_os_interface_endpoints() -> Vec<SocketAddr> {
     Vec::new()
 }

@@ -45,7 +45,9 @@ tokio = { version = "1", features = ["test-util"] }
 tracing-core = "0.1"
 
 # `GetAdaptersAddresses` backs the IPv6 multicast fallback's interface
-# enumeration on Windows; the unix arm uses `if_nameindex` from libc.
+# enumeration and the local interface addresses that link-local join and mesh
+# routes expand over on Windows; the unix arms use `if_nameindex` and
+# `getifaddrs` from libc.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
