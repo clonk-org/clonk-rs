@@ -288,63 +288,25 @@ impl NetworkGameReference {
     }
 }
 
-#[cfg(unix)]
 fn local_join_capabilities() -> (bool, Vec<u32>) {
-    let mut addresses = std::ptr::null_mut();
-    // SAFETY: `getifaddrs` initializes a linked list owned by the caller on
-    // success. Every pointer is checked before access and the list is released
-    // exactly once with `freeifaddrs` below.
-    if unsafe { libc::getifaddrs(&mut addresses) } != 0 {
-        return (false, Vec::new());
-    }
-    let mut have_global_ipv6 = false;
-    let mut interface_ids = BTreeSet::new();
-    let mut current = addresses;
-    while !current.is_null() {
-        // SAFETY: `current` belongs to the live list returned above.
-        let interface = unsafe { &*current };
-        let address = interface.ifa_addr;
-        if !address.is_null()
-            // SAFETY: all sockaddr variants begin with `sa_family`.
-            && unsafe { (*address).sa_family as i32 } == libc::AF_INET6
-            && interface.ifa_flags & (libc::IFF_LOOPBACK as u32) == 0
-        {
-            // SAFETY: the family check establishes an IPv6 sockaddr.
-            let address = unsafe { &*(address.cast::<libc::sockaddr_in6>()) };
-            let ip = Ipv6Addr::from(address.sin6_addr.s6_addr);
-            have_global_ipv6 |= cpp_is_global_ipv6(ip);
-            if ip.is_unicast_link_local() && !interface.ifa_name.is_null() {
-                // SAFETY: `ifa_name` is a NUL-terminated interface name for
-                // the lifetime of the enclosing `ifaddrs` node.
-                let index = if address.sin6_scope_id != 0 {
-                    address.sin6_scope_id
-                } else {
-                    unsafe { libc::if_nametoindex(interface.ifa_name) }
-                };
-                if index != 0 {
-                    interface_ids.insert(index);
-                }
-            }
-        }
-        current = interface.ifa_next;
-    }
-    // SAFETY: this is the successful allocation returned by `getifaddrs`.
-    unsafe { libc::freeifaddrs(addresses) };
-    (have_global_ipv6, interface_ids.into_iter().collect())
+    join_capabilities(&crate::client_mesh::client_mesh_os_interface_endpoints())
 }
 
-#[cfg(not(unix))]
-fn local_join_capabilities() -> (bool, Vec<u32>) {
-    // Conservative fallback: IPv4/global routes remain usable and global IPv6
-    // is ranked after them. Link-local expansion requires platform interface
-    // enumeration and is therefore omitted rather than guessing a scope.
-    (false, Vec::new())
+/// Derives the two inputs C++ joins with from this machine's interface
+/// addresses: whether any is global IPv6 (`ContainsGlobalIpv6`, pinned oracle
+/// `src/C4NetIO.cpp:233-241`) and the scope IDs `AddLocalAddrs` records as
+/// `InterfaceIDs` (`src/C4Network2Client.cpp:312-315`).
+fn join_capabilities(interface_endpoints: &[SocketAddr]) -> (bool, Vec<u32>) {
+    let have_global_ipv6 = interface_endpoints.iter().any(|endpoint| match endpoint {
+        SocketAddr::V6(endpoint) => cpp_is_global_ipv6(*endpoint.ip()),
+        SocketAddr::V4(_) => false,
+    });
+    (
+        have_global_ipv6,
+        crate::client_mesh::client_mesh_interface_ids(interface_endpoints),
+    )
 }
 
-// Only the unix `local_join_capabilities` above classifies addresses; the
-// `not(unix)` arm reports no global IPv6 because it enumerates nothing, so this
-// is gated with its caller rather than left dead on those platforms.
-#[cfg(unix)]
 fn cpp_is_global_ipv6(ip: Ipv6Addr) -> bool {
     let first = ip.octets()[0];
     !ip.is_unspecified()

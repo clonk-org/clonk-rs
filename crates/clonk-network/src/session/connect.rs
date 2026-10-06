@@ -1421,19 +1421,8 @@ where
         );
     }
     let mesh_interface_endpoints = crate::client_mesh::client_mesh_os_interface_endpoints();
-    let mesh_interface_ids = mesh_interface_endpoints
-        .iter()
-        .filter_map(|endpoint| match endpoint {
-            SocketAddr::V6(endpoint)
-                if endpoint.ip().is_unicast_link_local() && endpoint.scope_id() != 0 =>
-            {
-                Some(endpoint.scope_id())
-            }
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mesh_interface_ids =
+        crate::client_mesh::client_mesh_interface_ids(&mesh_interface_endpoints);
     for address in crate::client_mesh::client_mesh_local_addresses(
         mesh_tcp_local_addr,
         mesh_udp_local_addr,

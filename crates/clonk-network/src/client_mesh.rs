@@ -539,6 +539,26 @@ fn cpp_is_private(endpoint: SocketAddr) -> bool {
     }
 }
 
+/// The distinct nonzero link-local scope IDs among `interface_endpoints`,
+/// ascending: the interface list C++ expands every link-local route over
+/// (`C4Network2Client::InterfaceIDs`, pinned oracle
+/// `src/C4Network2Client.cpp:312-315`).
+pub(crate) fn client_mesh_interface_ids(interface_endpoints: &[SocketAddr]) -> Vec<u32> {
+    interface_endpoints
+        .iter()
+        .filter_map(|endpoint| match endpoint {
+            SocketAddr::V6(endpoint)
+                if endpoint.ip().is_unicast_link_local() && endpoint.scope_id() != 0 =>
+            {
+                Some(endpoint.scope_id())
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Enumerates the non-loopback IPv4/IPv6 interface endpoints used by
 /// [`client_mesh_local_addresses`]. The returned port is always zero; IPv6
 /// link-local scope IDs are retained or recovered from the interface name.
