@@ -22,6 +22,63 @@ enum NativeSaveOutcome {
 }
 
 impl GameApp {
+    fn show_save_notification(&mut self, mut text: String) {
+        Markup::strip_markup(&mut text);
+        self.saves.notification = Some(RuntimeFlashMessage {
+            text,
+            remaining_draws: 180,
+            y: self.runtime_flash_y(),
+        });
+    }
+
+    pub(crate) fn visible_save_notification(&self) -> Option<RuntimeFlashMessage> {
+        let mut notice = self.saves.notification.clone();
+        if self.saves.pending_native_slots != 0 {
+            let saving = self.runtime_resource_text("IDS_HOLD_SAVINGGAME", "Saving game...");
+            let text = notice
+                .map(|notice| format!("{saving}|{}", notice.text))
+                .unwrap_or(saving);
+            notice = Some(RuntimeFlashMessage {
+                text,
+                remaining_draws: 180,
+                y: self.runtime_flash_y(),
+            });
+        }
+        notice.map(|mut notice| {
+            notice.y = self.runtime_flash_y();
+            if let Some(fonts) = self.assets.clonk_fonts.as_ref() {
+                let width = self.rendering.graphics.surface().width().saturating_sub(20);
+                notice.text = notice
+                    .text
+                    .split('|')
+                    .map(|line| {
+                        clonk_frontend::message_dialog::break_message(
+                            &fonts.text,
+                            line,
+                            i32::try_from(width).unwrap_or(i32::MAX),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|");
+            }
+            notice
+        })
+    }
+
+    fn fail_abandoned_native_slot_saves(&mut self) {
+        if std::mem::take(&mut self.saves.pending_native_slots) == 0 {
+            return;
+        }
+        let detail = "background save worker stopped before saving finished";
+        self.status_text = format!("Save failed: {detail}");
+        let message =
+            self.runtime_resource_text("IDS_GAME_FAILSAVEGAME", "Error while saving the game.");
+        self.show_save_notification(format!("{message}|{detail}"));
+        tracing::error!("{detail}");
+        let line = self.timestamp_log_line(message);
+        self.enqueue_control_message_board_line(line);
+    }
+
     pub(crate) fn developer_console_player_save_options(&self) -> (bool, bool, String) {
         let graphics = load_options_graphics_state(self.app_paths.as_ref());
         let rank_name = self
@@ -1228,6 +1285,7 @@ impl GameApp {
             self.status_text = format!("Save failed: {err:#}");
             let message =
                 self.runtime_resource_text("IDS_GAME_FAILSAVEGAME", "Error while saving the game.");
+            self.show_save_notification(format!("{message}|{err:#}"));
             tracing::info!(slot, "{message}");
             let line = self.timestamp_log_line(message);
             self.enqueue_control_message_board_line(line);
@@ -1240,7 +1298,12 @@ impl GameApp {
         request: save_worker::NativeSlotSaveRequest,
     ) -> Result<()> {
         self.saves
-            .submit_background_job(save_worker::native_slot_save_job(request))
+            .submit_background_job(save_worker::native_slot_save_job(request))?;
+        if self.saves.pending_native_slots == 0 {
+            self.saves.notification = None;
+        }
+        self.saves.pending_native_slots += 1;
+        Ok(())
     }
 
     pub(crate) fn poll_background_save_jobs(&mut self) {
@@ -1269,6 +1332,9 @@ impl GameApp {
                 "background save worker stopped before the runtime dynamic was encoded".to_string(),
             );
         }
+        if worker_stopped {
+            self.fail_abandoned_native_slot_saves();
+        }
     }
 
     pub(crate) fn finish_background_save_jobs(&mut self) {
@@ -1281,6 +1347,7 @@ impl GameApp {
         for completion in completions {
             self.apply_background_save_completion(completion);
         }
+        self.fail_abandoned_native_slot_saves();
     }
 
     fn apply_background_save_completion(
@@ -1289,6 +1356,7 @@ impl GameApp {
     ) {
         match completion {
             save_worker::BackgroundSaveCompletion::NativeSlot(completion) => {
+                self.saves.pending_native_slots = self.saves.pending_native_slots.saturating_sub(1);
                 match completion.result {
                     Ok(persisted) => {
                         tracing::info!(
@@ -1323,9 +1391,17 @@ impl GameApp {
                             );
                         }
                         self.scensel.reload_on_next_show = true;
+                        let slots = self.savegame_slots();
+                        for menu in self.ingame_menus.players.values_mut() {
+                            menu.refresh_savegame_slots(&slots);
+                        }
                         self.status_text = format!("Saved {}", completion.status_label);
                         let message =
                             self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.");
+                        self.show_save_notification(format!(
+                            "{message}|{} [{}]",
+                            completion.status_label, completion.slot
+                        ));
                         tracing::info!(slot = completion.slot, "{message}");
                         let line = self.timestamp_log_line(message);
                         self.enqueue_control_message_board_line(line);
@@ -1342,6 +1418,7 @@ impl GameApp {
                             "IDS_GAME_FAILSAVEGAME",
                             "Error while saving the game.",
                         );
+                        self.show_save_notification(format!("{message}|{error:#}"));
                         tracing::info!(slot = completion.slot, "{message}");
                         let line = self.timestamp_log_line(message);
                         self.enqueue_control_message_board_line(line);

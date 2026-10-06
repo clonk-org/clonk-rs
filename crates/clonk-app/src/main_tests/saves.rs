@@ -4705,6 +4705,137 @@ fn quick_save_folder_error_is_visible_in_game() {
         latest_message_board_logical_entry(&app).as_deref() =>
         Some("Localized save failure.")
     );
+    let notice = app
+        .preflight_visible_runtime_flash()
+        .test_value()
+        .test_value();
+    main_assert!(notice.text.starts_with("Localized save failure.|"));
+    main_assert!(notice
+        .text
+        .replace('\n', "")
+        .contains("blocked-save-folder"));
+    main_assert!(app.dialogs.messages.is_empty());
+}
+
+#[test]
+fn completed_slot_save_shows_non_modal_notice_without_debug_hud() {
+    let mut app = new_state_only_lightweight_running_sandbox_app();
+    app.debug_hud = false;
+    app.startup_tooltip_resources
+        .insert("IDS_CNS_GAMESAVED".to_string(), "Game saved.".to_string());
+    let before = app.engine.snapshot();
+
+    app.saves
+        .submit_background_job(Box::new(|| {
+            save_worker::BackgroundSaveCompletion::NativeSlot(
+                save_worker::NativeSlotSaveCompletion {
+                    slot: 3,
+                    status_label: "Cave".to_string(),
+                    path: PathBuf::from("Cave3.c4s"),
+                    result: Ok(save_worker::PersistedNativeSave {
+                        timings: save_worker::NativeSaveTimings::default(),
+                        packed_group: None,
+                        thumbnail_retention_error: None,
+                    }),
+                },
+            )
+        }))
+        .test_value();
+    app.finish_background_save_jobs();
+
+    let notice = app
+        .preflight_visible_runtime_flash()
+        .test_value()
+        .test_value();
+    main_assert_eq!(notice.text => "Game saved.|Cave [3]");
+    main_assert!(notice.remaining_draws > 0);
+    main_assert!(app.dialogs.messages.is_empty());
+    main_assert_eq!(app.engine.snapshot() => before);
+}
+
+#[test]
+fn save_notice_renders_expires_and_clears_between_rounds() {
+    let mut app = new_classic_running_sandbox_app();
+    app.debug_hud = false;
+    app.saves
+        .submit_background_job(Box::new(|| {
+            save_worker::BackgroundSaveCompletion::NativeSlot(
+                save_worker::NativeSlotSaveCompletion {
+                    slot: 3,
+                    status_label: "Cave".to_string(),
+                    path: PathBuf::from("Cave3.c4s"),
+                    result: Ok(save_worker::PersistedNativeSave {
+                        timings: save_worker::NativeSaveTimings::default(),
+                        packed_group: None,
+                        thumbnail_retention_error: None,
+                    }),
+                },
+            )
+        }))
+        .test_value();
+    app.finish_background_save_jobs();
+    app.set_runtime_flash_message("Music", RuntimeHelpCharset::Utf8)
+        .test_value();
+    let other_notice = app.runtime_flash_message.clone();
+    let lifetime = app
+        .preflight_visible_runtime_flash()
+        .test_value()
+        .test_value()
+        .remaining_draws;
+    let mut visible = vec![0; 320 * 200 * 4];
+    app.test_render(&mut visible);
+    let mut expired = vec![0; visible.len()];
+    for _ in 1..lifetime {
+        app.test_render(&mut expired);
+    }
+    main_assert_eq!(app.preflight_visible_runtime_flash().test_value() => other_notice);
+    main_assert_eq!(app.runtime_flash_message => other_notice, "save notices do not consume other flashes");
+    app.runtime_flash_message = None;
+    app.test_render(&mut expired);
+    main_assert_ne!(visible => expired, "the normal renderer draws the save notice");
+
+    app.saves.notification = other_notice.clone();
+    app.configure_running_state("Next round".to_string(), DEFAULT_GROUND_HEIGHT);
+    main_assert!(app.preflight_visible_runtime_flash().test_value().is_none());
+    app.saves.notification = other_notice;
+    app.return_to_menu();
+    main_assert!(app.saves.notification.is_none());
+}
+
+#[test]
+fn failed_background_slot_save_shows_wrapped_error_details() {
+    let mut app = new_classic_running_sandbox_app();
+    app.startup_tooltip_resources.insert(
+        "IDS_GAME_FAILSAVEGAME".to_string(),
+        "Localized save failure.".to_string(),
+    );
+    let detail = "Disk is full while publishing the saved game to its configured destination";
+    app.saves
+        .submit_background_job(Box::new(move || {
+            save_worker::BackgroundSaveCompletion::NativeSlot(
+                save_worker::NativeSlotSaveCompletion {
+                    slot: 3,
+                    status_label: "Cave".to_string(),
+                    path: PathBuf::from("Cave3.c4s"),
+                    result: Err(anyhow!(detail)),
+                },
+            )
+        }))
+        .test_value();
+    app.finish_background_save_jobs();
+    let notice = app
+        .preflight_visible_runtime_flash()
+        .test_value()
+        .test_value();
+    main_assert!(notice.text.starts_with("Localized save failure.|"));
+    main_assert!(notice.text.replace('\n', " ").contains("Disk is full"));
+    let font = &app.assets.clonk_fonts.test_ref().text;
+    main_assert!(notice
+        .text
+        .split(['|', '\n'])
+        .all(|line| font.measure(line, true).0 <= 300));
+    main_assert!(app.dialogs.messages.is_empty());
+    main_assert!(app.status_text.contains(detail));
 }
 
 #[test]

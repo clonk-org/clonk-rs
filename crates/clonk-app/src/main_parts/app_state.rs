@@ -108,6 +108,9 @@ pub(crate) struct SaveState {
     pub(crate) background_worker:
         Option<save_worker::BackgroundSaveWorker<save_worker::BackgroundSaveCompletion>>,
     pub(crate) last_native_timings: Option<save_worker::NativeSaveTimings>,
+    pub(crate) notification: Option<RuntimeFlashMessage>,
+    /// Accepted menu-slot saves, excluding player files and network dynamics.
+    pub(crate) pending_native_slots: usize,
     pub(crate) last_path: Option<PathBuf>,
     /// Joined infos selected by RestoreSavegameInfos for the distinct
     /// RecreatePlayers phase. They must never fall back into normal network

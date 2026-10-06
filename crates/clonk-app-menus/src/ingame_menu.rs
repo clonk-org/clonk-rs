@@ -1370,6 +1370,19 @@ impl IngameMenuState {
         )
     }
 
+    /// Reflect asynchronous slot publication without changing selection,
+    /// scroll or the dragged position of an already open savegame menu.
+    pub fn refresh_savegame_slots(&mut self, slots: &[SaveSlotState; 10]) {
+        if self.page != MenuPage::Savegame {
+            return;
+        }
+        for (item, state) in self.items.iter_mut().zip(slots) {
+            if let MenuSymbol::SaveSlot { free, .. } = &mut item.symbol {
+                *free = state.free;
+            }
+        }
+    }
+
     /// `C4MainMenu::ActivateSurrender` (C4MainMenu.cpp:538-551).
     pub fn surrender_menu(labels: &IngameMenuLabels) -> Self {
         Self::new(

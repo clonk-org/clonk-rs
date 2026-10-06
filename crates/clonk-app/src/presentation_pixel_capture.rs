@@ -3124,6 +3124,126 @@ mod tests {
         Ok((environment, user_data, app))
     }
 
+    #[test]
+    fn background_slot_save_notifies_without_interrupting_gameplay() -> Result<()> {
+        let (_environment, user_data, mut app) = real_capture_app()?;
+        crate::persist_config_value(
+            app.app_paths.as_ref().expect("capture paths"),
+            "General",
+            "SaveGameFolder",
+            user_data.path().join("Savegames.c4f").to_string_lossy(),
+        )?;
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Gameplay.scenario())
+            .expect("tracked tutorial");
+        stage_tutorial_checkpoint(&mut app, scenario, PixelCaptureCase::Gameplay)?;
+        app.debug_hud = false;
+        app.apply_ingame_menu_action(crate::MenuAction::ActivateSavegame)?;
+        let before = render_checkpoint_png(&mut app, 1)?;
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        app.saves.submit_background_job(Box::new(move || {
+            started_tx.send(()).expect("observe held worker");
+            let _ = release_rx.recv();
+            crate::save_worker::BackgroundSaveCompletion::PlayerFile(
+                crate::save_worker::PlayerFileSaveCompletion {
+                    player_number: -1,
+                    info_id: -1,
+                    path: PathBuf::new(),
+                    official_derivation: false,
+                    derivation: None,
+                    result: Ok(()),
+                    persistence: std::time::Duration::ZERO,
+                },
+            )
+        }))?;
+        started_rx.recv_timeout(std::time::Duration::from_secs(10))?;
+        app.apply_ingame_menu_action(crate::MenuAction::SaveSlot(3))?;
+        let progress = app
+            .preflight_visible_runtime_flash()?
+            .expect("save progress");
+        assert_eq!(progress.text, "Saving game...");
+        let owner = app.players.local_owner;
+        app.ingame_menus
+            .players
+            .get_mut(owner)
+            .expect("save menu")
+            .set_selection(2);
+        let saving = render_checkpoint_png(&mut app, 1)?;
+        assert_ne!(before, saving);
+        assert!(!app.savegame_slot_path(3).exists());
+        assert!(matches!(
+            app.ingame_menus
+                .players
+                .get(owner)
+                .expect("save menu")
+                .items()[2]
+                .symbol,
+            crate::ingame_menu::MenuSymbol::SaveSlot { free: true, .. }
+        ));
+
+        let frame = app.engine.frame();
+        app.update()?;
+        assert_eq!(
+            app.engine.frame(),
+            frame + 1,
+            "saving does not halt gameplay"
+        );
+        let mut pixels = vec![0; app.rendering.graphics.surface().pixels().len()];
+        for _ in 0..181 {
+            app.render(&mut pixels)?;
+        }
+        assert_eq!(
+            app.preflight_visible_runtime_flash()?
+                .expect("persistent progress")
+                .text,
+            "Saving game..."
+        );
+
+        release_tx.send(())?;
+        app.finish_background_save_jobs();
+        assert!(app.savegame_slot_path(3).is_file());
+        let menu = app.ingame_menus.players.get(owner).expect("open save menu");
+        assert_eq!(menu.selection(), 2);
+        assert!(matches!(
+            menu.items()[2].symbol,
+            crate::ingame_menu::MenuSymbol::SaveSlot { free: false, .. }
+        ));
+        assert!(app
+            .preflight_visible_runtime_flash()?
+            .expect("save completion")
+            .text
+            .starts_with("Game saved."));
+        assert!(app.dialogs.messages.is_empty());
+        let saved = render_checkpoint_png(&mut app, 1)?;
+        assert_ne!(saved, saving);
+
+        // A stopped worker must not leave an accepted slot save displaying
+        // progress forever. Stop it ahead of the real queued slot request.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        app.saves.submit_background_job(Box::new(move || {
+            started_tx.send(()).expect("observe interrupted worker");
+            let _ = release_rx.recv();
+            panic!("test interrupts the save worker");
+        }))?;
+        started_rx.recv_timeout(std::time::Duration::from_secs(10))?;
+        app.save_to_slot(4);
+        assert_eq!(app.saves.pending_native_slots, 1);
+        release_tx.send(())?;
+        app.finish_background_save_jobs();
+        assert!(!app.savegame_slot_path(4).exists());
+        assert_eq!(app.saves.pending_native_slots, 0);
+        assert!(app
+            .preflight_visible_runtime_flash()?
+            .expect("interrupted save failure")
+            .text
+            .replace('\n', " ")
+            .contains("background save worker stopped"));
+        Ok(())
+    }
+
     /// The capture tests all exercise the same startup installation. Keep one
     /// booted application alive while the live cases run as a batch: nextest
     /// isolates individual tests in separate processes, so a process-local

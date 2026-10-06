@@ -4979,6 +4979,7 @@ impl GameApp {
         self.ingame_mouse.help_caption = None;
         self.runtime_flash_message = None;
         self.film_view_player = None;
+        self.saves.notification = None;
         self.clear_physical_viewport_states();
         self.viewports.physical_viewports_authoritative = false;
         self.dialogs.client_list = None;
