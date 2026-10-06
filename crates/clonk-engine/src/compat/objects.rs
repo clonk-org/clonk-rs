@@ -7088,25 +7088,39 @@ pub(crate) fn contents(args: &[Value]) -> Result<Value, RuntimeError> {
         // FnContents then advances that raw index only while the selected
         // entry uses DFA_ATTACH. Filtering attached entries up front would
         // shift every later index and lose C++'s duplicate-return quirk.
-        let mut entries = Vec::new();
+        let mut remaining = index;
         for child_id in container.contents() {
-            if let Some(child) = context.get_world_object(*child_id) {
-                if !child.is_present() {
-                    continue;
-                }
-                entries.push(child);
+            let Some((present, attached)) = context.read_object_field(
+                *child_id,
+                |child| {
+                    (
+                        child.is_present(),
+                        child
+                            .procedure_name()
+                            .is_some_and(|procedure| procedure.eq_ignore_ascii_case("attach")),
+                    )
+                },
+                |scope| {
+                    (
+                        !scope.destroy && scope.status != ObjectStatus::Deleted,
+                        scope
+                            .effective_procedure_name()
+                            .is_some_and(|procedure| procedure.eq_ignore_ascii_case("attach")),
+                    )
+                },
+            ) else {
+                continue;
+            };
+            if !present {
+                continue;
             }
-        }
-
-        let mut raw_index = index as usize;
-        while let Some(selected) = entries.get(raw_index) {
-            let attached = selected
-                .procedure_name()
-                .is_some_and(|procedure| procedure.eq_ignore_ascii_case("attach"));
+            if remaining > 0 {
+                remaining -= 1;
+                continue;
+            }
             if include_attached || !attached {
-                return Ok(object_reference_value(selected.id));
+                return Ok(object_reference_value(*child_id));
             }
-            raw_index += 1;
         }
         Ok(Value::Nil)
     })
@@ -7143,10 +7157,12 @@ pub(crate) fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let mut count = 0;
         for child_id in container.contents() {
-            if let Some(child) = context.get_world_object(*child_id) {
-                if !child.is_present() {
-                    continue;
-                }
+            if context
+                .read_object_field(*child_id, HostWorldObject::is_present, |scope| {
+                    !scope.destroy && scope.status != ObjectStatus::Deleted
+                })
+                .unwrap_or(false)
+            {
                 if let Some(definition_id) = definition.as_ref() {
                     if context
                         .object_effective_definition_id(*child_id)
@@ -7192,16 +7208,16 @@ pub(crate) fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         for child_id in container.contents() {
-            if let Some(child) = context.get_world_object(*child_id) {
-                if !child.is_present() {
-                    continue;
-                }
-                if context
+            if context
+                .read_object_field(*child_id, HostWorldObject::is_present, |scope| {
+                    !scope.destroy && scope.status != ObjectStatus::Deleted
+                })
+                .unwrap_or(false)
+                && context
                     .object_effective_definition_id(*child_id)
                     .is_some_and(|id| id.as_str() == definition)
-                {
-                    return Ok(object_reference_value(child.id));
-                }
+            {
+                return Ok(object_reference_value(*child_id));
             }
         }
 
@@ -7236,10 +7252,12 @@ pub(crate) fn find_other_contents(args: &[Value]) -> Result<Value, RuntimeError>
         };
 
         for child_id in container.contents() {
-            if let Some(child) = context.get_world_object(*child_id) {
-                if !child.is_present() {
-                    continue;
-                }
+            if context
+                .read_object_field(*child_id, HostWorldObject::is_present, |scope| {
+                    !scope.destroy && scope.status != ObjectStatus::Deleted
+                })
+                .unwrap_or(false)
+            {
                 let matches = match definition.as_ref() {
                     Some(definition_id) => context
                         .object_effective_definition_id(*child_id)
@@ -7247,7 +7265,7 @@ pub(crate) fn find_other_contents(args: &[Value]) -> Result<Value, RuntimeError>
                     None => true,
                 };
                 if matches {
-                    return Ok(object_reference_value(child.id));
+                    return Ok(object_reference_value(*child_id));
                 }
             }
         }

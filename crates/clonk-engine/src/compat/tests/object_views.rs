@@ -1,4 +1,109 @@
 #[test]
+fn indexed_contents_walk_does_not_clone_stored_objects() {
+    // FnContents returns a pointer after GetObject's Status-filtered walk
+    // (C4Script.cpp:1764-1776; C4ObjectList.cpp:296-308), including the
+    // terminating lookup used by Workshop::FindIncompleteContents.
+    const ITEM_COUNT: usize = 300;
+    let container_id = ObjectId::new(1);
+    let children: Vec<_> = (2..ITEM_COUNT as u64 + 2).map(ObjectId::new).collect();
+    let mut objects =
+        vec![fixture_world_object(container_id, "CHST").with_contents(children.clone())];
+    objects.extend(
+        children
+            .iter()
+            .map(|id| fixture_world_object(*id, "COAL").with_container(Some(container_id))),
+    );
+    let world = HostWorldContext::from_objects(objects);
+    let caller = HostObjectContext {
+        id: container_id,
+        ..idle_object_context()
+    };
+    let (result, _) = with_compat_context!(Some(caller), world, 400, || {
+        crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(|count| count.set(0));
+        for (index, child) in children.iter().enumerate() {
+            assert_eq!(contents(&[v_int(index as i32)])?, v_object(*child));
+        }
+        assert_eq!(contents(&[v_int(ITEM_COUNT as i32)])?, NIL);
+        let clones = crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(Cell::get);
+        assert!(
+            clones <= ITEM_COUNT + 1,
+            "indexed contents walk cloned {clones} objects; only the live container overlay may be copied per lookup"
+        );
+        Ok::<_, RuntimeError>(())
+    });
+    result.test_value();
+}
+
+#[test]
+fn contents_count_and_searches_do_not_clone_stored_objects() {
+    // C4ObjectList::ObjectCount/Find/FindOther inspect Status and Def->id
+    // without copying objects (C4ObjectList.cpp:271-294,322-334;
+    // C4Script.cpp:1808-1824).
+    const ITEM_COUNT: usize = 300;
+    let container_id = ObjectId::new(1);
+    let children: Vec<_> = (2..ITEM_COUNT as u64 + 2).map(ObjectId::new).collect();
+    let last = *children.last().test_value();
+    let mut objects =
+        vec![fixture_world_object(container_id, "CHST").with_contents(children.clone())];
+    objects.extend(children.iter().map(|id| {
+        fixture_world_object(*id, if *id == last { "WOOD" } else { "COAL" })
+            .with_container(Some(container_id))
+    }));
+    let world = HostWorldContext::from_objects(objects);
+    let caller = HostObjectContext {
+        id: container_id,
+        ..idle_object_context()
+    };
+    let (result, _) = with_compat_context!(Some(caller), world, 400, || {
+        type Query = fn(&[Value]) -> Result<Value, RuntimeError>;
+        let queries = [
+            ("count all", contents_count as Query, vec![], v_int(300)),
+            (
+                "count coal",
+                contents_count as Query,
+                vec![v_id("COAL".into())],
+                v_int(299),
+            ),
+            (
+                "find wood",
+                find_contents as Query,
+                vec![v_id("WOOD".into())],
+                v_object(last),
+            ),
+            (
+                "find missing",
+                find_contents as Query,
+                vec![v_id("ROCK".into())],
+                NIL,
+            ),
+            (
+                "find other than coal",
+                find_other_contents as Query,
+                vec![v_id("COAL".into())],
+                v_object(last),
+            ),
+            (
+                "find any",
+                find_other_contents as Query,
+                vec![],
+                v_object(children[0]),
+            ),
+        ];
+        for (name, query, args, expected) in queries {
+            crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(|count| count.set(0));
+            assert_eq!(query(&args)?, expected, "{name}");
+            let clones = crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(Cell::get);
+            assert!(
+                clones <= 1,
+                "{name} cloned {clones} objects; only the live container overlay may be copied"
+            );
+        }
+        Ok::<_, RuntimeError>(())
+    });
+    result.test_value();
+}
+
+#[test]
 fn unchanged_scope_overlay_keeps_shared_object_state() {
     let mut engine = crate::Engine::new();
     engine.register_test_definition(test_definition(

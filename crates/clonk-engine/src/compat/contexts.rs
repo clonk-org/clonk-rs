@@ -7492,7 +7492,13 @@ impl EffectHostContext {
                     .or_else(|| scope.definition_id.clone())
             })
             .or_else(|| {
-                self.get_world_object(target)
+                self.pending_objects
+                    .get(&target)
+                    .map(|object| object.definition_id().to_string())
+            })
+            .or_else(|| {
+                self.world
+                    .get_shared(target)
                     .map(|object| object.definition_id().to_string())
             })
     }
