@@ -1,4 +1,4 @@
-"""Static and executable guards for the five-minute landing pipeline."""
+"""Static and executable guards for fail-closed landing and qualification."""
 
 import json
 import os
@@ -65,15 +65,15 @@ class MergeQueueGateTests(unittest.TestCase):
         self.assertIn(
             "name: Recording-host material-order oracles (macOS)", reusable
         )
-        self.assertEqual(
-            reusable.count("if: ${{ always() && inputs.upload-diagnostics }}"),
-            1,
-        )
+        html = job_block(EXACT_SHA_QUALIFICATION, "coverage-html")
+        self.assertIn("always() && inputs.upload-diagnostics", html)
+        self.assertIn("needs: [coverage-fragments, qualification-context]", html)
         self.assertIn("if: inputs.upload-diagnostics", reusable)
         self.assertIn("name: Rust coverage HTML report", reusable)
         self.assertIn(
-            "needs: [release-context, linux, windows-smoke]", qualification
+            "needs: release-context", qualification
         )
+        self.assertNotIn("linux, windows-smoke", qualification)
         self.assertIn(
             "needs.release-context.outputs.release == 'true'", qualification
         )
@@ -95,7 +95,9 @@ class MergeQueueGateTests(unittest.TestCase):
     def test_release_merge_group_builds_exact_sha_artifacts_before_landing(self):
         workflow = LANDING.read_text(encoding="utf-8")
         context = job_block(LANDING, "release-context")
-        prebuild = job_block(LANDING, "release-prebuild")
+        platform = WORKFLOWS / "release-platform.yml"
+        prebuild = job_block(platform, "prebuild")
+        package = job_block(platform, "package")
         build = job_block(LANDING, "release-build")
         gate = job_block(LANDING, "landing-gate")
 
@@ -104,12 +106,13 @@ class MergeQueueGateTests(unittest.TestCase):
         self.assertIn("tree-sha: ${{ steps.release.outputs.tree-sha }}", context)
         self.assertIn("pr-number: ${{ steps.release.outputs.pr-number }}", context)
         self.assertIn("version: ${{ steps.release.outputs.version }}", context)
-        self.assertIn("needs: release-context", prebuild)
         self.assertIn("uses: ./.github/workflows/release-prebuild.yml", prebuild)
-        self.assertIn("source-sha: ${{ github.sha }}", prebuild)
-        self.assertIn("needs: [release-context, release-prebuild]", build)
+        self.assertIn("source-sha: ${{ inputs.source-sha }}", prebuild)
+        self.assertIn("needs: prebuild", package)
+        self.assertIn("uses: ./.github/workflows/release-build.yml", package)
+        self.assertIn("needs: release-context", build)
         self.assertIn("needs.release-context.outputs.release == 'true'", build)
-        self.assertIn("uses: ./.github/workflows/release-build.yml", build)
+        self.assertIn("uses: ./.github/workflows/release-platform.yml", build)
         self.assertIn("source-sha: ${{ github.sha }}", build)
         self.assertIn(
             "tree-sha: ${{ needs.release-context.outputs.tree-sha }}", build
@@ -118,10 +121,10 @@ class MergeQueueGateTests(unittest.TestCase):
             "version: ${{ needs.release-context.outputs.version }}",
             build,
         )
-        for job in ("release-context", "release-prebuild", "release-build"):
+        for job in ("release-context", "release-evidence", "release-build"):
             self.assertRegex(gate, rf"(?m)^      - {job}$")
         self.assertIn("RELEASE_CONTEXT_RESULT", gate)
-        self.assertIn("RELEASE_PREBUILD_RESULT", gate)
+        self.assertIn("RELEASE_EVIDENCE_RESULT", gate)
         self.assertIn("RELEASE_BUILD_RESULT", gate)
         self.assertIn("IS_RELEASE", gate)
 
@@ -155,13 +158,10 @@ class MergeQueueGateTests(unittest.TestCase):
         self.assertIn("fetch-depth: 1", quality)
         self.assertIn("persist-credentials: false", quality)
         self.assertNotIn("submodules: recursive", quality)
-        self.assertIn("actions/cache/restore@", quality)
-        self.assertIn("path: .git/modules/content", quality)
-        self.assertIn(
-            "run: git submodule update --init --force --depth=1 "
-            "--filter=blob:none content",
-            quality,
-        )
+        self.assertIn("uses: ./.github/actions/verified-content", quality)
+        content_action = (REPOSITORY / ".github/actions/verified-content/action.yml").read_text()
+        self.assertIn("path: .git/modules/content", content_action)
+        self.assertIn("python3 scripts/ci-content.py", content_action)
         self.assertIn("libasound2-dev libudev-dev", quality)
         self.assertIn(
             "uses: dtolnay/rust-toolchain@"
@@ -186,6 +186,39 @@ class MergeQueueGateTests(unittest.TestCase):
                 self.assertRegex(quality, rf"(?m)^        run: {re.escape(command)}$")
         self.assertNotIn("cargo nextest", quality)
         self.assertNotIn("python3 -m unittest", quality)
+        self.assertNotIn("continue-on-error:", quality)
+        self.assertNotRegex(quality, r"(?m)^        if:")
+
+    def test_pull_request_quality_restores_trusted_inputs_and_verifies_source_before_cargo(self):
+        quality = job_block(LANDING, "pull-request-quality")
+        producer = job_block(MAIN_VALIDATION, "linux-landing-cache")
+        prepare = (
+            "python3 scripts/ci-workspace-cache.py prepare --target target "
+            "--recipe landing-v1 --ledger .ci-cache-ledgers/landing.json"
+        )
+
+        self.assertIn("cache-targets: false", quality)
+        self.assertNotIn("workspaces: . -> target", quality)
+        self.assertEqual(quality.count("uses: ./.github/actions/workspace-cache"), 1)
+        self.assertIn("operation: restore", quality)
+        for setting in (
+            "lane: landing-linux", "target: target", "ledger: .ci-cache-ledgers/landing.json", "recipe: landing-v1",
+        ):
+            with self.subTest(setting=setting):
+                self.assertIn(setting, quality)
+                self.assertIn(setting, producer)
+        self.assertEqual(quality.count(prepare), 1)
+        self.assertIn(prepare, producer)
+        self.assertLess(quality.index("uses: Swatinem/rust-cache@"), quality.index("uses: ./.github/actions/workspace-cache"))
+        self.assertLess(quality.index("uses: ./.github/actions/workspace-cache"), quality.index(prepare))
+        self.assertLess(quality.index(prepare), quality.index("cargo fmt --all -- --check"))
+        self.assertLess(quality.index(prepare), quality.index("cargo clippy --profile test --workspace"))
+        self.assertRegex(quality, rf'(?m)^        run: {re.escape(prepare)} --github-output "\$GITHUB_OUTPUT"$')
+        self.assertEqual(quality.count("save-if: false"), 1)
+        self.assertNotIn("operation: save", quality)
+        self.assertNotIn("ci-workspace-cache.py record", quality)
+        self.assertNotIn("actions/cache/save@", quality)
+        self.assertNotIn("cache-hit", quality)
         self.assertNotIn("continue-on-error:", quality)
         self.assertNotRegex(quality, r"(?m)^        if:")
 
@@ -260,7 +293,7 @@ class MergeQueueGateTests(unittest.TestCase):
         for job in QUEUE_JOBS:
             with self.subTest(job=job):
                 self.assertIn(
-                    "if: github.event_name != 'pull_request'",
+                    "github.event_name != 'pull_request'",
                     job_block(LANDING, job),
                 )
         self.assertRegex(
@@ -277,7 +310,7 @@ class MergeQueueGateTests(unittest.TestCase):
             "QUALITY_RESULT": "skipped",
             "LICENSE_CORPUS_RESULT": "skipped",
             "RELEASE_CONTEXT_RESULT": "success",
-            "RELEASE_PREBUILD_RESULT": "skipped",
+            "RELEASE_EVIDENCE_RESULT": "skipped",
             "RELEASE_BUILD_RESULT": "skipped",
             "RELEASE_QUALIFICATION_RESULT": "skipped",
             "IS_RELEASE": "false",
@@ -294,7 +327,7 @@ class MergeQueueGateTests(unittest.TestCase):
                     "QUALITY_RESULT": "success",
                     "LICENSE_CORPUS_RESULT": "success",
                     "RELEASE_CONTEXT_RESULT": "skipped",
-                    "RELEASE_PREBUILD_RESULT": "skipped",
+                    "RELEASE_EVIDENCE_RESULT": "skipped",
                     "IS_RELEASE": "",
                     "LINUX_RESULT": "skipped",
                     "WINDOWS_SMOKE_RESULT": "skipped",
@@ -309,7 +342,7 @@ class MergeQueueGateTests(unittest.TestCase):
                     "QUALITY_RESULT": "failure",
                     "LICENSE_CORPUS_RESULT": "success",
                     "RELEASE_CONTEXT_RESULT": "skipped",
-                    "RELEASE_PREBUILD_RESULT": "skipped",
+                    "RELEASE_EVIDENCE_RESULT": "skipped",
                     "IS_RELEASE": "",
                     "LINUX_RESULT": "skipped",
                     "WINDOWS_SMOKE_RESULT": "skipped",
@@ -352,7 +385,7 @@ class MergeQueueGateTests(unittest.TestCase):
                 "release merge group",
                 {
                     "RELEASE_BUILD_RESULT": "success",
-                    "RELEASE_PREBUILD_RESULT": "success",
+                    "RELEASE_EVIDENCE_RESULT": "success",
                     "RELEASE_QUALIFICATION_RESULT": "success",
                     "IS_RELEASE": "true",
                 },
@@ -362,17 +395,17 @@ class MergeQueueGateTests(unittest.TestCase):
                 "release qualification failed",
                 {
                     "RELEASE_BUILD_RESULT": "success",
-                    "RELEASE_PREBUILD_RESULT": "success",
+                    "RELEASE_EVIDENCE_RESULT": "success",
                     "RELEASE_QUALIFICATION_RESULT": "failure",
                     "IS_RELEASE": "true",
                 },
                 1,
             ),
             (
-                "release prebuild failed",
+                "release receipt failed",
                 {
                     "RELEASE_BUILD_RESULT": "skipped",
-                    "RELEASE_PREBUILD_RESULT": "failure",
+                    "RELEASE_EVIDENCE_RESULT": "failure",
                     "RELEASE_QUALIFICATION_RESULT": "success",
                     "IS_RELEASE": "true",
                 },
@@ -421,18 +454,34 @@ class MergeQueueGateTests(unittest.TestCase):
                 actual = output.read_text(encoding="utf-8") if output.exists() else ""
                 self.assertEqual(actual, expected_output)
 
-    def test_release_context_resolves_the_exact_merge_group_tree(self):
+    def run_release_context(self, *, prepared_parent=None, author="clonk-rs-release[bot]", paths=None):
         script = step_script(LANDING, "Resolve the merge-group release")
         merge = "a" * 40
         tree = "b" * 40
+        base = "c" * 40
+        head = "d" * 40
         pr = {
             "title": "chore: release 0.9.4",
             "state": "open",
+            "commits": 1,
+            "user": {"login": "clonk-rs-release[bot]", "type": "Bot"},
+            "body": "Prepared by workflow run https://github.com/clonk-org/clonk-rs/actions/runs/1001.",
             "head": {
                 "ref": "release/next",
+                "sha": head,
                 "repo": {"full_name": "clonk-org/clonk-rs"},
             },
-            "base": {"ref": "main"},
+            "base": {"ref": "main", "repo": {"full_name": "clonk-org/clonk-rs"}},
+        }
+        commit = {
+            "parents": [{"sha": prepared_parent or base}],
+            "commit": {
+                "message": "chore: release 0.9.4",
+                "author": {"name": author, "email": "311066358+clonk-rs-release[bot]@users.noreply.github.com"},
+                "committer": {"name": author, "email": "311066358+clonk-rs-release[bot]@users.noreply.github.com"},
+            },
+            "author": {"login": author, "type": "Bot"},
+            "committer": {"login": author, "type": "Bot"},
         }
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
@@ -441,7 +490,9 @@ class MergeQueueGateTests(unittest.TestCase):
             stub.write_text(
                 "#!/usr/bin/env bash\n"
                 "case \"$*\" in\n"
+                '  *"pulls/231/files"*) printf "%s\\n" "$FILES_JSON" ;;\n'
                 '  *"pulls/231"*) printf "%s\\n" "$PR_JSON" ;;\n'
+                '  *"commits/$PREPARED_SHA"*) printf "%s\\n" "$COMMIT_JSON" ;;\n'
                 '  *"git/commits/$MERGE_SHA"*) printf "%s\\n" "$TREE_SHA" ;;\n'
                 "  *) exit 1 ;;\n"
                 "esac\n",
@@ -455,23 +506,42 @@ class MergeQueueGateTests(unittest.TestCase):
                     "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
                     "GH_TOKEN": "stub",
                     "MERGE_SHA": merge,
+                    "MERGE_BASE": base,
+                    "PREPARED_SHA": head,
                     "MERGE_SUBJECT": (
                         "chore: release 0.9.4 (#231)\n\nSquashed commits follow."
                     ),
                     "REPOSITORY": "clonk-org/clonk-rs",
                     "GITHUB_OUTPUT": str(output),
                     "PR_JSON": json.dumps(pr),
+                    "COMMIT_JSON": json.dumps(commit),
+                    "FILES_JSON": json.dumps([[{"filename": path} for path in (paths or ["Cargo.toml", "Cargo.lock", "CHANGELOG.md"])]]),
                     "TREE_SHA": tree,
                 },
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(
-                output.read_text(encoding="utf-8"),
-                "release=true\npr-number=231\n"
-                f"tree-sha={tree}\nversion=0.9.4\n",
-            )
+            return completed, output.read_text(encoding="utf-8") if output.exists() else ""
+
+    def test_release_context_resolves_the_exact_merge_group_tree(self):
+        completed, output = self.run_release_context()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(output, "release=true\npr-number=231\n" f"tree-sha={'b' * 40}\nversion=0.9.4\n")
+
+    def test_release_context_rejects_metadata_prepared_before_the_queue_base(self):
+        completed, output = self.run_release_context(prepared_parent="e" * 40)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("release=true", output)
+
+    def test_release_context_rejects_a_manual_commit_on_the_automation_branch(self):
+        completed, output = self.run_release_context(author="human-maintainer")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("release=true", output)
+
+    def test_release_context_rejects_source_edits_hidden_in_the_release_commit(self):
+        completed, output = self.run_release_context(paths=["Cargo.toml", "crates/clonk-app/src/main.rs"])
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("release=true", output)
 
     def test_pull_request_title_is_an_unscoped_subject_only(self):
         script = step_script(LANDING, "Check the title is a Conventional Commit subject")

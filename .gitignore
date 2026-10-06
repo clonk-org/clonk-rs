@@ -1,4 +1,5 @@
 # Build directories
+.ci-cache-ledgers/
 build/
 bin/
 out/

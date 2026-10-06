@@ -50,9 +50,12 @@ class RustToolchainPinTests(unittest.TestCase):
         )
 
     def test_preinstalled_rust_probe_requires_the_checked_in_channel(self):
-        self.assertIn(
-            f"required='rustc {self.channel} '", self.workflows["landing.yml"]
-        )
+        action = (REPOSITORY / ".github/actions/verified-content/action.yml").read_text()
+        self.assertIn(f"[[ \"$version\" == 'rustc {self.channel} '* ]]", action)
+        for workflow in ("landing.yml", "rust.yml"):
+            with self.subTest(workflow=workflow):
+                self.assertIn("probe-rust: 'true'", self.workflows[workflow])
+                self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", self.workflows[workflow])
 
     def test_thinlto_cache_keys_name_the_checked_in_channel(self):
         for name in ("rust.yml", "release-prebuild.yml"):

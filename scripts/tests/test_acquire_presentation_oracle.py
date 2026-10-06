@@ -3955,15 +3955,63 @@ class LandingCacheWarmTests(unittest.TestCase):
         main = self.MAIN_WORKFLOW.read_text(encoding="utf-8")
 
         # The warm is worthless if the row that needs it reads another scope.
-        self.assertIn("shared-key: full-parity", landing)
-        self.assertIn("shared-key: full-parity", main)
+        linux = re.search(
+            r"(?ms)^  linux:\n.*?(?=^  [a-z][a-z0-9_-]*:\n|\Z)", landing,
+        ).group(0)
+        producer = re.search(
+            r"(?ms)^  linux-landing-cache:\n.*?(?=^  [a-z][a-z0-9_-]*:\n|\Z)", main,
+        ).group(0)
+        step_pattern = re.compile(
+            r"(?ms)^      - (?:name|uses|id):.*?(?=^      - (?:name|uses|id):|\Z)"
+        )
+        for job in (linux, producer):
+            steps = step_pattern.findall(job)
+            registry = next(step for step in steps if "Swatinem/rust-cache@" in step)
+            self.assertIn("shared-key: full-parity", registry)
+            self.assertIn("cache-targets: false", registry)
+            restore = next(
+                step for step in steps
+                if "uses: ./.github/actions/workspace-cache" in step
+                and "operation: restore" in step
+            )
+            for identity in (
+                "lane: landing-linux", "target: target",
+                "ledger: .ci-cache-ledgers/landing.json", "recipe: landing-v1",
+            ):
+                self.assertIn(identity, restore)
+            prepare = next(
+                step for step in steps if "scripts/ci-workspace-cache.py prepare " in step
+            )
+            for argument in (
+                "--target target", "--recipe landing-v1", "--ledger .ci-cache-ledgers/landing.json",
+            ):
+                self.assertIn(argument, prepare)
+            for step in (restore, prepare):
+                self.assertNotIn("        if:", step)
+                self.assertNotIn("continue-on-error", step)
+            self.assertLess(job.index(restore), job.index(prepare))
+            if job == linux:
+                self.assertIn("save-if: false", registry)
+                invocation = next(step for step in steps if 'bash -euo pipefail -c "$SHARD_COMMAND"' in step)
+                self.assertNotIn("        if:", invocation)
+                self.assertNotIn("cache-hit", invocation)
+                self.assertLess(job.index(prepare), job.index(invocation))
+            else:
+                # An archive hit may have stale own units. Always ask Cargo to
+                # build the exact capture recipe after validation; its normal
+                # freshness checks decide which compiled units can be reused.
+                warm = self.warm_step()
+                self.assertNotIn("        if:", warm)
+                self.assertNotIn("cache-hit", warm)
+                self.assertNotIn("continue-on-error", warm)
+                record = next(
+                    step for step in steps if "scripts/ci-workspace-cache.py record " in step
+                )
+                self.assertLess(job.index(prepare), job.index(warm))
+                self.assertLess(job.index(warm), job.index(record))
         self.assertIn(
             "cargo xtask presentation verify-current --profile release",
-            landing,
-        )
-        self.assertIn(
-            "if: steps.linux-cache.outputs.cache-hit != 'true'",
-            self.warm_step(),
+            linux,
         )
 
 

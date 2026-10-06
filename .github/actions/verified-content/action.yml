@@ -1,0 +1,99 @@
+name: Verified pinned content
+description: Restore optional portable Git objects, then verify and materialize the exact content gitlink
+inputs:
+  publish:
+    description: Publish verified inputs from trusted main
+    default: 'false'
+  apt-packages:
+    description: Independent Linux dependencies to install during content hydration
+    default: ''
+  probe-rust:
+    description: Locate the exact preinstalled Rust toolchain during content hydration
+    default: 'false'
+outputs:
+  revision:
+    value: ${{ steps.identity.outputs.revision }}
+  exact:
+    value: ${{ steps.materialize.outputs.exact }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve pinned content revision
+      id: identity
+      shell: bash
+      run: |
+        revision=$(git rev-parse HEAD:content)
+        [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+        echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+    - name: Restore optional pinned content objects
+      id: cache
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .git/modules/content
+        key: clonk-content-git-v2-${{ hashFiles('.gitmodules') }}-${{ steps.identity.outputs.revision }}
+        restore-keys: clonk-content-git-v1-Linux-${{ hashFiles('.gitmodules') }}-${{ steps.identity.outputs.revision }}
+        enableCrossOsArchive: true
+
+    - name: Materialize and verify pinned content
+      id: materialize
+      shell: bash
+      env:
+        CONTENT_REVISION: ${{ steps.identity.outputs.revision }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
+        APT_PACKAGES: ${{ inputs.apt-packages }}
+        PROBE_RUST: ${{ inputs.probe-rust }}
+        RUSTUP_AUTO_INSTALL: '0'
+      run: |
+        content_log="$RUNNER_TEMP/content-materialization.log"
+        python3 scripts/ci-content.py --revision "$CONTENT_REVISION" \
+          --cache-hit "$CACHE_HIT" --report "$RUNNER_TEMP/content-input.json" \
+          >"$content_log" 2>&1 &
+        content_pid=$!
+        apt_pid=
+        apt_log="$RUNNER_TEMP/native-dependencies.log"
+        if [[ -n "$APT_PACKAGES" ]]; then
+          (
+            read -r -a packages <<< "$APT_PACKAGES"
+            timeout --kill-after=10s 600s scripts/install-apt-packages.sh "${packages[@]}"
+          ) >"$apt_log" 2>&1 &
+          apt_pid=$!
+        fi
+        exact=false
+        if [[ "$PROBE_RUST" == 'true' ]] && command -v rustup >/dev/null; then
+          while read -r toolchain _; do
+            if version=$(rustup run "$toolchain" rustc --version 2>/dev/null) &&
+              [[ "$version" == 'rustc 1.98.1 '* ]]; then
+              sysroot=$(rustup run "$toolchain" rustc --print sysroot)
+              echo "$sysroot/bin" >> "$GITHUB_PATH"
+              echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+              exact=true
+              break
+            fi
+          done < <(rustup toolchain list)
+        fi
+        echo "exact=$exact" >> "$GITHUB_OUTPUT"
+        failed=0
+        wait "$content_pid" || failed=1
+        cat "$content_log"
+        if [[ -n "$apt_pid" ]]; then
+          wait "$apt_pid" || failed=1
+          cat "$apt_log"
+        fi
+        exit "$failed"
+
+    - name: Publish verified pinned content objects
+      if: inputs.publish == 'true' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .git/modules/content
+        key: clonk-content-git-v2-${{ hashFiles('.gitmodules') }}-${{ steps.identity.outputs.revision }}
+        enableCrossOsArchive: true
+
+    - name: Verify pinned content publication
+      if: inputs.publish == 'true' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+      uses: ./.github/actions/verify-cache-handoff
+      with:
+        path: .git/modules/content
+        key: clonk-content-git-v2-${{ hashFiles('.gitmodules') }}-${{ steps.identity.outputs.revision }}

@@ -1,0 +1,52 @@
+name: Live GPU recovery
+description: Qualify desktop recovery with pixel and resource evidence
+inputs:
+  source-sha:
+    required: true
+    description: Exact checked-out source revision
+  prebuilt-root:
+    default: ''
+    description: Verified shipped payload to execute without another build
+runs:
+  using: composite
+  steps:
+    - name: Install Linux window and graphics dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: timeout --kill-after=10s 600s scripts/install-apt-packages.sh libasound2-dev libudev-dev mesa-vulkan-drivers libegl1-mesa-dev libgl1-mesa-dri libxkbcommon-x11-0 xvfb xauth
+
+    - name: Qualify every desktop backend
+      shell: bash
+      env:
+        PREBUILT_ROOT: ${{ inputs.prebuilt-root }}
+        PROBE_BACKENDS: ${{ runner.os == 'Linux' && 'vulkan gl' || runner.os == 'Windows' && 'dx12' || 'metal' }}
+        SOURCE_SHA: ${{ inputs.source-sha }}
+      run: |
+        [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+        python -m venv "$RUNNER_TEMP/device-loss-venv"
+        if [[ "$RUNNER_OS" == Windows ]]; then
+          probe_python="$RUNNER_TEMP/device-loss-venv/Scripts/python.exe"
+        else
+          probe_python="$RUNNER_TEMP/device-loss-venv/bin/python"
+        fi
+        "$probe_python" -m pip install Pillow
+        arguments=()
+        if [[ -n "$PREBUILT_ROOT" ]]; then
+          arguments+=(--prebuilt-root "$PREBUILT_ROOT")
+        fi
+        status=0
+        for backend in $PROBE_BACKENDS; do
+          "$probe_python" scripts/run_device_loss_probe.py --release "${arguments[@]}" \
+            --backend "$backend" --artifact-dir "target/device-loss/$backend" || status=1
+        done
+        exit "$status"
+
+    - name: Retain reports, images, and failure diagnostics
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: device-loss-${{ runner.os }}-${{ inputs.source-sha }}
+        path: target/device-loss
+        if-no-files-found: error
+        overwrite: true
+        retention-days: 30

@@ -1,5 +1,6 @@
 """Static guards keeping CI and release checks aligned with shipped binaries."""
 
+import re
 import unittest
 
 from _repo import REPOSITORY
@@ -17,6 +18,12 @@ RELEASE_BUILD_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release-build.y
 RELEASE_PREBUILD_WORKFLOW = (
     REPOSITORY / ".github" / "workflows" / "release-prebuild.yml"
 )
+RELEASE_PLATFORM_WORKFLOW = (
+    REPOSITORY / ".github" / "workflows" / "release-platform.yml"
+)
+DEVICE_LOSS_WORKFLOW = (
+    REPOSITORY / ".github" / "workflows" / "device-loss-qualification.yml"
+)
 DEPENDENCY_LICENSES_WORKFLOW = (
     REPOSITORY / ".github" / "workflows" / "dependency-licenses.yml"
 )
@@ -24,6 +31,24 @@ MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
 MSVC_RUNTIME_VALIDATION = REPOSITORY / "scripts" / "validate-msvc-runtime.sh"
 WINDOWS_INSTALLER = REPOSITORY / "scripts" / "windows-installer.nsi"
 NSIS_INSTALLER = REPOSITORY / "scripts" / "install-nsis.sh"
+WORKSPACE_CACHE_ACTION = REPOSITORY / ".github/actions/workspace-cache/action.yml"
+
+
+def workflow_jobs(workflow):
+    source = workflow.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+    matches = list(re.finditer(r"(?m)^  ([a-zA-Z0-9_-]+):$", source))
+    return {
+        match[1]: source[match.start():matches[index + 1].start() if index + 1 < len(matches) else len(source)]
+        for index, match in enumerate(matches)
+    }
+
+
+def step_blocks(source, indentation=6):
+    matches = list(re.finditer(rf"(?m)^{' ' * indentation}- ", source))
+    return [
+        source[match.start():matches[index + 1].start() if index + 1 < len(matches) else len(source)]
+        for index, match in enumerate(matches)
+    ]
 
 
 def step_script(workflow, name):
@@ -51,14 +76,33 @@ def step_script(workflow, name):
 
 
 class WorkflowRuntimeInventoryTests(unittest.TestCase):
+    def test_local_composites_use_supported_runner_step_fields(self):
+        # actions/runner src/Runner.Worker/action_yaml.json run-step and
+        # uses-step reject workflow-only fields such as timeout-minutes.
+        # https://github.com/actions/runner/blob/main/src/Runner.Worker/action_yaml.json
+        common = {"name", "id", "if", "env", "continue-on-error"}
+        for path in sorted((REPOSITORY / ".github/actions").glob("*/action.yml")):
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("using: composite", source, path.name)
+            for step in step_blocks(source, indentation=4):
+                fields = set(re.findall(r"(?m)^    - ([a-z-]+):|^      ([a-z-]+):", step))
+                fields = {field for pair in fields for field in pair if field}
+                with self.subTest(action=path.parent.name, step=step.splitlines()[0]):
+                    self.assertEqual(len(fields & {"run", "uses"}), 1)
+                    allowed = common | ({"run", "shell", "working-directory"} if "run" in fields else {"uses", "with"})
+                    self.assertEqual(fields - allowed, set())
+                    if "run" in fields:
+                        self.assertIn("shell", fields)
+
     def test_windows_installer_uses_fast_solid_compression(self):
         installer = WINDOWS_INSTALLER.read_text(encoding="utf-8")
 
         self.assertIn("SetCompressor /SOLID zlib", installer)
         self.assertNotIn("SetCompressor /SOLID lzma", installer)
 
-    def test_checkouts_do_not_persist_credentials(self):
+    def test_checkouts_are_pinned_and_read_only_jobs_do_not_persist_credentials(self):
         marker = "uses: actions/checkout@"
+        pin = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 
         for workflow in (
             LANDING_WORKFLOW,
@@ -67,20 +111,27 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             RELEASE_WORKFLOW,
             RELEASE_BUILD_WORKFLOW,
             RELEASE_PREBUILD_WORKFLOW,
+            RELEASE_PREPARE_WORKFLOW,
+            DEVICE_LOSS_WORKFLOW,
             # This one pushes, and still checks out without credentials: it
             # runs the branch's own generator, so the token reaches the working
             # tree only in the step that publishes the result.
             DEPENDENCY_LICENSES_WORKFLOW,
         ):
             source = workflow.read_text(encoding="utf-8")
-            blocks = [
-                block.split("\n      - ", 1)[0]
-                for block in source.split(marker)[1:]
-            ]
+            blocks = [(name, step) for name, job in workflow_jobs(workflow).items()
+                      for step in step_blocks(job) if marker in step]
             self.assertTrue(blocks, workflow.name)
-            for index, block in enumerate(blocks, start=1):
+            for index, (name, block) in enumerate(blocks, start=1):
                 with self.subTest(workflow=workflow.name, checkout=index):
-                    self.assertIn("persist-credentials: false", block)
+                    self.assertIn(pin, block)
+                    if workflow == RELEASE_PREPARE_WORKFLOW and name == "prepare":
+                        # The automation-owned preparation writer uses its
+                        # restricted App token to push only release/next.
+                        self.assertIn("token: ${{ steps.release-app.outputs.token }}", block)
+                        self.assertIn("ref: ${{ github.sha }}", block)
+                    else:
+                        self.assertIn("persist-credentials: false", block)
 
     def test_landing_workflow_uses_current_pinned_actions_and_nextest(self):
         workflow = LANDING_WORKFLOW.read_text(encoding="utf-8")
@@ -89,7 +140,12 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             " # v7.0.1"
         )
 
-        self.assertEqual(workflow.count(checkout), 4)
+        checkouts = [step for job in workflow_jobs(LANDING_WORKFLOW).values()
+                     for step in step_blocks(job) if "uses: actions/checkout@" in step]
+        self.assertTrue(checkouts)
+        for block in checkouts:
+            self.assertIn(checkout, block)
+            self.assertIn("persist-credentials: false", block)
         self.assertNotIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow)
         self.assertIn("tool: cargo-nextest@0.9.91", workflow)
 
@@ -216,14 +272,51 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             " # v6.1.0"
         )
 
-        # The Linux matrix rows moved to the key-deriving restore; what
-        # is left here must still never save from a merge-queue ref.
-        self.assertEqual(landing.count(restore), 2)
+        # Every queue cache is restore-only, whether the implementation is a
+        # registry action or the source-aware compiled-input composite.
         self.assertNotIn(save, landing)
-        self.assertEqual(main.count(restore), 3)
-        self.assertEqual(main.count(save), 2)
-        # The fourth restore moved into the retrying handoff verifier.
-        self.assertEqual(main.count("uses: ./.github/actions/verify-cache-handoff"), 1)
+        queue_caches = [step for job in workflow_jobs(LANDING_WORKFLOW).values()
+                        for step in step_blocks(job)
+                        if "uses: Swatinem/rust-cache@" in step
+                        or "uses: ./.github/actions/workspace-cache" in step]
+        self.assertTrue(queue_caches)
+        for cache in queue_caches:
+            if "uses: Swatinem/rust-cache@" in cache:
+                self.assertIn("save-if: false", cache)
+            else:
+                self.assertIn("operation: restore", cache)
+                self.assertNotIn("operation: save", cache)
+        for job in workflow_jobs(RELEASE_PREBUILD_WORKFLOW).values():
+            for cache in step_blocks(job):
+                if "uses: Swatinem/rust-cache@" in cache:
+                    self.assertIn("save-if: false", cache)
+        self.assertNotIn(save, release_prebuild)
+
+        producer = workflow_jobs(MAIN_WORKFLOW)["linux-landing-cache"]
+        composed_saves = [step for job in workflow_jobs(MAIN_WORKFLOW).values()
+                          for step in step_blocks(job)
+                          if "uses: ./.github/actions/workspace-cache" in step
+                          and "operation: save" in step]
+        self.assertEqual(len(composed_saves), 1)
+        self.assertIn(composed_saves[0], producer)
+        self.assertIn("lane: landing-linux", composed_saves[0])
+        self.assertIn("ledger: .ci-cache-ledgers/landing.json", composed_saves[0])
+        self.assertLess(producer.index("scripts/ci-workspace-cache.py record"),
+                        producer.index(composed_saves[0]))
+        cache_action = WORKSPACE_CACHE_ACTION.read_text(encoding="utf-8")
+        for guard in (
+            'os.environ.get("GITHUB_REF") != "refs/heads/main"',
+            'event_name not in ("push", "workflow_dispatch", "schedule")',
+            'repository.get("fork") is not False',
+            'event.get("after") != head',
+            "inputs.operation == 'save' && steps.identity.outputs.trusted-save == 'true'",
+        ):
+            self.assertIn(guard, cache_action)
+        self.assertIn(save, cache_action)
+        self.assertIn(restore, cache_action)
+        bootstrap = workflow_jobs(MAIN_WORKFLOW)["verify-landing-cache-bootstrap"]
+        self.assertIn("operation: lookup", bootstrap)
+        self.assertIn('[[ "$CACHE_HIT" == "true" ]]', bootstrap)
         thinlto_start = release_prebuild.index("Restore trusted-main ThinLTO cache")
         thinlto_end = release_prebuild.index("\n      - name:", thinlto_start)
         thinlto_step = release_prebuild[thinlto_start:thinlto_end]
@@ -234,7 +327,9 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             release_prebuild,
         )
 
-        trusted_save = main[main.index("Publish trusted ThinLTO cache") :]
+        trusted_save = next(step for step in step_blocks(
+            workflow_jobs(MAIN_WORKFLOW)["windows-release-tools"]
+        ) if "name: Publish trusted ThinLTO cache" in step)
         for guard in (
             "github.event_name == 'push'",
             "github.event_name == 'workflow_dispatch'",
@@ -276,7 +371,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn("cargo build --release", release_build)
         self.assertIn("scripts/release-prebuild-manifest.py verify", release_build)
         self.assertIn(
-            "cargo build --release --locked -p xtask --features engine-tools "
+            "cargo build --profile test --locked -p xtask --features engine-tools "
             "--bin xtask-engine-tools",
             step_script(MAIN_WORKFLOW, "Build the Windows packaging tool"),
         )
@@ -287,11 +382,18 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         )
         for fragment in (
             "if: needs.release-context.outputs.release == 'true'",
-            "uses: ./.github/workflows/release-build.yml",
+            "uses: ./.github/workflows/release-platform.yml",
             "source-sha: ${{ github.sha }}",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, landing)
+        platform = workflow_jobs(RELEASE_PLATFORM_WORKFLOW)
+        self.assertIn("uses: ./.github/workflows/release-prebuild.yml", platform["prebuild"])
+        self.assertIn("needs: prebuild", platform["package"])
+        self.assertIn("uses: ./.github/workflows/release-build.yml", platform["package"])
+        for role in ("prebuild", "package"):
+            self.assertIn("source-sha: ${{ inputs.source-sha }}", platform[role])
+            self.assertIn("platform: ${{ inputs.platform }}", platform[role])
 
         artifact_resolver = step_script(
             RELEASE_WORKFLOW, "Resolve exact-SHA release artifacts"
@@ -398,8 +500,12 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         ):
             with self.subTest(workflow=workflow.name):
                 source = workflow.read_text(encoding="utf-8")
-                self.assertEqual(source.count(version_read), 1)
+                self.assertIn(version_read, source)
                 self.assertNotIn(r"^\[workspace\.package\]$", source)
+        preparation = step_script(RELEASE_PREPARE_WORKFLOW, "Prepare the release")
+        self.assertIn(f"current = {version_read}", preparation)
+        self.assertIn(f"print({version_read})", preparation)
+        self.assertIn("existing release version {original} is no longer newer than main {current}", preparation)
 
     def test_universal_release_verifies_every_shipped_binary(self):
         script = step_script(

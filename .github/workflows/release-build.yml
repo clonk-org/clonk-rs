@@ -15,6 +15,10 @@ on:
         description: The release version used in platform artifact names
         required: true
         type: string
+      platform:
+        description: Independent desktop platform (linux, windows, or macos)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -38,46 +42,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux
-            runner: ubuntu-latest
-            artifact: desktop-linux
-            runtime_artifact: release-prebuild-runtime-linux
-            runtime_target: x86_64-unknown-linux-gnu
-            runtime_suffix: ''
-            tool_artifact: release-prebuild-tool-linux
-            tool_filename: xtask-engine-tools
-            tool_path: target/debug/xtask-engine-tools
-          - name: windows
-            runner: windows-latest
-            artifact: desktop-windows
-            runtime_artifact: release-prebuild-runtime-windows
-            runtime_target: x86_64-pc-windows-msvc
-            runtime_suffix: .exe
-            tool_artifact: release-prebuild-tool-windows
-            tool_filename: xtask-engine-tools.exe
-            tool_path: target/debug/xtask-engine-tools.exe
-          - name: macos
-            runner: macos-latest
-            artifact: desktop-macos
-            runtime_artifact: release-prebuild-runtime-macos-arm64
-            runtime_target: aarch64-apple-darwin
-            runtime_suffix: ''
-            runtime_artifact_2: release-prebuild-runtime-macos-x86_64
-            runtime_target_2: x86_64-apple-darwin
-            tool_artifact: release-prebuild-tool-macos
-            tool_filename: xtask-engine-tools
-            tool_path: target/debug/xtask-engine-tools
+        include: >-
+          ${{ fromJSON(inputs.platform == 'macos' && '[{"name":"macos","runner":"macos-latest","artifact":"desktop-macos","runtime_artifact":"release-prebuild-runtime-macos-arm64","runtime_target":"aarch64-apple-darwin","runtime_suffix":"","runtime_artifact_2":"release-prebuild-runtime-macos-x86_64","runtime_target_2":"x86_64-apple-darwin","tool_artifact":"release-prebuild-tool-macos","tool_filename":"xtask-engine-tools","tool_path":"target/debug/xtask-engine-tools"}]' || inputs.platform == 'windows' && '[{"name":"windows","runner":"windows-latest","artifact":"desktop-windows","runtime_artifact":"release-prebuild-runtime-windows","runtime_target":"x86_64-pc-windows-msvc","runtime_suffix":".exe","tool_artifact":"release-prebuild-tool-windows","tool_filename":"xtask-engine-tools.exe","tool_path":"target/debug/xtask-engine-tools.exe"}]' || '[{"name":"linux","runner":"ubuntu-latest","artifact":"desktop-linux","runtime_artifact":"release-prebuild-runtime-linux","runtime_target":"x86_64-unknown-linux-gnu","runtime_suffix":"","tool_artifact":"release-prebuild-tool-linux","tool_filename":"xtask-engine-tools","tool_path":"target/debug/xtask-engine-tools"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The resolved commit, not a tag: no tag exists until these exact
           # builds have produced and qualified real artifacts.
           ref: ${{ inputs.source-sha }}
-          # Packaging copies the tracked game data. This works only while the
-          # clonk-rs-content submodule remains public.
-          submodules: recursive
           persist-credentials: false
+
+      - name: Materialize verified pinned content
+        uses: ./.github/actions/verified-content
+        timeout-minutes: 10
 
       - name: Validate the release source
         env:
@@ -85,7 +62,12 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.version }}
           SOURCE_SHA: ${{ inputs.source-sha }}
           TREE_SHA: ${{ inputs.tree-sha }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
         run: |
+          case "$REQUESTED_PLATFORM" in
+            linux|windows|macos) ;;
+            *) echo "unsupported release platform: $REQUESTED_PLATFORM" >&2; exit 1 ;;
+          esac
           if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ || ! "$TREE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "release source identity is malformed" >&2
             exit 1
@@ -124,26 +106,23 @@ jobs:
         run: scripts/install-nsis.sh
 
       - name: Restore the packaging tool
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          name: ${{ matrix.tool_artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
           path: target/release-prebuild/${{ matrix.tool_artifact }}
-          key: release-prebuild-${{ matrix.tool_artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
-          fail-on-cache-miss: true
 
       - name: Restore the runtime
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          name: ${{ matrix.runtime_artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
           path: target/release-prebuild/${{ matrix.runtime_artifact }}
-          key: release-prebuild-${{ matrix.runtime_artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
-          fail-on-cache-miss: true
 
       - name: Restore the macOS x86_64 runtime
         if: matrix.name == 'macos'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          name: ${{ matrix.runtime_artifact_2 }}-${{ inputs.source-sha }}-${{ github.run_id }}
           path: target/release-prebuild/${{ matrix.runtime_artifact_2 }}
-          key: release-prebuild-${{ matrix.runtime_artifact_2 }}-${{ inputs.source-sha }}-${{ github.run_id }}
-          fail-on-cache-miss: true
 
       - name: Verify and install the prebuilt inputs
         env:
@@ -154,6 +133,7 @@ jobs:
           tool_root="target/release-prebuild/${{ matrix.tool_artifact }}"
           runtime_root="target/release-prebuild/${{ matrix.runtime_artifact }}"
           python3 scripts/release-prebuild-manifest.py verify \
+            --provenance-root "$GITHUB_WORKSPACE" \
             --root "$tool_root" \
             --manifest "$tool_root/manifest.json" \
             --head-sha "$SOURCE_SHA" \
@@ -163,6 +143,7 @@ jobs:
             --target host \
             --file "payload/${{ matrix.tool_filename }}"
           python3 scripts/release-prebuild-manifest.py verify \
+            --provenance-root "$GITHUB_WORKSPACE" \
             --root "$runtime_root" \
             --manifest "$runtime_root/manifest.json" \
             --head-sha "$SOURCE_SHA" \
@@ -190,6 +171,7 @@ jobs:
             macos)
               runtime_root_2="target/release-prebuild/${{ matrix.runtime_artifact_2 }}"
               python3 scripts/release-prebuild-manifest.py verify \
+                --provenance-root "$GITHUB_WORKSPACE" \
                 --root "$runtime_root_2" \
                 --manifest "$runtime_root_2/manifest.json" \
                 --head-sha "$SOURCE_SHA" \
@@ -266,6 +248,7 @@ jobs:
             exit 1
           fi
           rm -rf target/dist/universal-check
+
           unzip -q "${engines[0]}" -d target/dist/universal-check
           for binary in clonk-app clonk-game c4group; do
             path="target/dist/universal-check/Contents/MacOS/$binary"
@@ -280,6 +263,60 @@ jobs:
           done
           rm -rf target/dist/universal-check
 
+      # macOS packaging fuses and signs the slices. Qualify that final payload;
+      # Linux and Windows qualify the unchanged binaries copied into their packages.
+      - name: Stage the packaged runtime for qualification
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          TREE_SHA: ${{ inputs.tree-sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          qualified_root="target/release-qualified/${{ matrix.name }}"
+          mkdir -p "$qualified_root/payload"
+          if [[ '${{ matrix.name }}' == 'macos' ]]; then
+            source_root='target/dist/clonk-rust/Clonk Rust.app/Contents/MacOS'
+            target_arguments=(--target universal-apple-darwin)
+            parent_arguments=(
+              --parent-manifest "target/release-prebuild/${{ matrix.runtime_artifact }}/manifest.json"
+              --parent-manifest "target/release-prebuild/${{ matrix.runtime_artifact_2 }}/manifest.json"
+            )
+          else
+            source_root=target/dist/clonk-rust/bin
+            target_arguments=(--target '${{ matrix.runtime_target }}')
+            parent_arguments=(--parent-manifest "target/release-prebuild/${{ matrix.runtime_artifact }}/manifest.json")
+          fi
+          for binary in c4group clonk-app clonk-game; do
+            filename="$binary${{ matrix.runtime_suffix }}"
+            cp "$source_root/$filename" "$qualified_root/payload/$filename"
+            if [[ '${{ matrix.name }}' != 'macos' ]]; then
+              cmp "target/release-prebuild/${{ matrix.runtime_artifact }}/payload/$filename" \
+                "$qualified_root/payload/$filename"
+            fi
+          done
+          python3 scripts/release-prebuild-manifest.py write \
+            --provenance-root "$GITHUB_WORKSPACE" \
+            --root "$qualified_root" --manifest "$qualified_root/manifest.json" \
+            --head-sha "$SOURCE_SHA" --tree-sha "$TREE_SHA" --version "$VERSION" \
+            --kind runtime "${target_arguments[@]}" "${parent_arguments[@]}" \
+            --file 'payload/c4group${{ matrix.runtime_suffix }}' \
+            --file 'payload/clonk-app${{ matrix.runtime_suffix }}' \
+            --file 'payload/clonk-game${{ matrix.runtime_suffix }}'
+
+      - name: Qualify the packaged runtime
+        uses: ./.github/actions/device-loss
+        with:
+          source-sha: ${{ inputs.source-sha }}
+          prebuilt-root: target/release-qualified/${{ matrix.name }}
+
+      - name: Retain the qualified runtime and manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-qualified-runtime-${{ matrix.name }}-${{ inputs.source-sha }}-${{ github.run_id }}
+          path: target/release-qualified/${{ matrix.name }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 30
       - name: Check the artifacts look real
         run: |
           shopt -s nullglob

@@ -115,3 +115,39 @@ priority = 60
 [[profile.default.overrides]]
 filter = '(package(clonk-app-netplay) and test(/^initial_network_dynamic::/)) or (package(xtask) and test(/^dev_check::tests::(base_collection_includes_committed_and_worktree_changes|git_collection_unions_staged_unstaged_untracked_and_rename_ends)$/))'
 priority = 20
+
+# CI runners have four test threads. Inherit the local retries, timeouts and
+# product-contract isolation while keeping CI scheduling adjustments explicit.
+[profile.ci]
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "nextest-run"
+store-success-output = false
+store-failure-output = true
+
+# Run the isolated timing contracts before the pool fills with scenario work,
+# so they do not wait for it to drain. Their thread weights and output remain
+# inherited from default, as do every test's retries and timeouts.
+[[profile.ci.overrides]]
+filter = 'package(clonk-app) and test(initial_network_game_join_fully_loads_the_client_lobby_within_500ms)'
+priority = 100
+
+[[profile.ci.overrides]]
+filter = 'package(clonk-app) and test(selected_clonkmars_host_reference_is_queryable_within_one_second)'
+priority = 100
+
+# Preserve the longest-scenario filter and its lead over ordinary work, while
+# letting the two isolated contracts finish before these cases start.
+[[profile.ci.overrides]]
+filter = '(package(clonk-app) and test(/app_virtual_keyboard_(completes_real_tutorial(0[1-3]|05)_route|delivers_tutorial08_surface_wipfs_to_hut)/)) or (package(clonk-engine-integration-tests) and test(/(dragon_rock_princess_scream_is_|queron_assassin_death_relaunches_a_visible_paladin|shipped_scenarios_do_not_animate_the_sky_lighting_factor|tutorial(0[1-9]|10)_virtual_player_completes_)/))'
+priority = 90
+
+# Two allocation-heavy tests can share the four-thread CI pool. The same
+# focused set took 25.27s alone and 13.10s paired on four physical cores;
+# peak aggregate RSS was 1.38 GiB, with at most 4.6% per-test slowdown.
+# Keep the many-core local reservation and both product-contract weights.
+[[profile.ci.overrides]]
+filter = '(package(clonk-app) and test(/(app_virtual_keyboard_(completes_real_tutorial(0[13])_route|delivers_tutorial08_surface_wipfs_to_hut)|harpoonrace_invalid_live_seed_is_ended_before_the_host_can_launch)$/)) or (package(clonk-app-netplay) and test(/(regicide_assigns_the_initial_host_player_before_publishing_join_data|tutorial01_builds_the_exact_supported_initial_host_bootstrap)$/)) or (package(clonk-engine-integration-tests) and test(/(tutorial0(4|6|7|9)_virtual_player_completes|tutorial10_virtual_player_completes_)/))'
+threads-required = 2

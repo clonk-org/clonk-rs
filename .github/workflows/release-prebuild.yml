@@ -19,6 +19,10 @@ on:
         description: Open release pull request number
         required: true
         type: string
+      platform:
+        description: Independent desktop platform (linux, windows, or macos)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -53,7 +57,12 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.version }}
           TREE_SHA: ${{ inputs.tree-sha }}
           TRUSTED_MERGE_GROUP: ${{ github.event_name == 'merge_group' }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
         run: |
+          case "$REQUESTED_PLATFORM" in
+            linux|windows|macos) ;;
+            *) echo "unsupported release platform: $REQUESTED_PLATFORM" >&2; exit 1 ;;
+          esac
           if [[ "$TRUSTED_MERGE_GROUP" != 'true' ]]; then
             echo "release prebuild must be called from a merge group" >&2
             exit 1
@@ -127,11 +136,12 @@ jobs:
             exit 1
           fi
 
-  # Host tools are not shipped code, so use the existing non-LTO test profile.
-  # They build beside all four native runtimes instead of extending packaging.
+  # Host tools use the existing non-LTO test profile. Native runtimes start
+  # first; each platform's tool then reuses its runtime slots. The platform
+  # selector keeps this capacity dependency local to its own native builds.
   tool:
     name: Prebuild packaging tool / ${{ matrix.name }}
-    needs: validate
+    needs: [validate, runtime]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -142,25 +152,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux
-            runner: ubuntu-latest
-            artifact: release-prebuild-tool-linux
-            tool_path: target/debug/xtask-engine-tools
-            filename: xtask-engine-tools
-            target: host
-          - name: windows
-            runner: windows-latest
-            artifact: release-prebuild-tool-windows
-            tool_path: target/debug/xtask-engine-tools.exe
-            filename: xtask-engine-tools.exe
-            target: host
-          - name: macos
-            runner: macos-latest
-            artifact: release-prebuild-tool-macos
-            tool_path: target/debug/xtask-engine-tools
-            filename: xtask-engine-tools
-            target: host
+        include: >-
+          ${{ fromJSON(inputs.platform == 'macos' && '[{"name":"macos","runner":"macos-latest","artifact":"release-prebuild-tool-macos","tool_path":"target/debug/xtask-engine-tools","filename":"xtask-engine-tools","target":"host"}]' || inputs.platform == 'windows' && '[{"name":"windows","runner":"windows-latest","artifact":"release-prebuild-tool-windows","tool_path":"target/debug/xtask-engine-tools.exe","filename":"xtask-engine-tools.exe","target":"host"}]' || '[{"name":"linux","runner":"ubuntu-latest","artifact":"release-prebuild-tool-linux","tool_path":"target/debug/xtask-engine-tools","filename":"xtask-engine-tools","target":"host"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -181,8 +174,28 @@ jobs:
         if: matrix.name == 'linux'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          cache-targets: false
           shared-key: full-parity
           save-if: false
+
+      - name: Restore verified Linux compiled inputs
+        if: matrix.name == 'linux'
+        uses: ./.github/actions/workspace-cache
+        with:
+          operation: restore
+          lane: landing-linux
+          target: target
+          ledger: .ci-cache-ledgers/landing.json
+          recipe: landing-v1
+
+      - name: Verify restored Linux workspace artifacts
+        id: workspace-inputs
+        if: matrix.name == 'linux'
+        run: python3 scripts/ci-workspace-cache.py prepare --target target --recipe landing-v1 --ledger .ci-cache-ledgers/landing.json --github-output "$GITHUB_OUTPUT"
+
+      - name: 'CI cache receipt: ${{ steps.workspace-inputs.outputs.cache-state }}'
+        if: matrix.name == 'linux'
+        run: 'true'
 
       - name: Restore trusted-main Windows build cache
         if: matrix.name == 'windows'
@@ -221,28 +234,28 @@ jobs:
           fi
           cp "${{ matrix.tool_path }}" "$artifact_dir/payload/${{ matrix.filename }}"
           python3 scripts/release-prebuild-manifest.py write \
+            --provenance-root "$GITHUB_WORKSPACE" \
             --root "$artifact_dir" \
             --manifest "$artifact_dir/manifest.json" \
             --head-sha "$SOURCE_SHA" \
             --tree-sha "$TREE_SHA" \
             --version "$VERSION" \
             --kind tool \
+            --build-profile test \
+            --build-target "$(rustc -vV | sed -n 's/^host: //p')" \
+            --build-feature engine-tools \
             --target "${{ matrix.target }}" \
             --file "payload/${{ matrix.filename }}"
 
       - name: Hand off the packaging tool
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: ${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
           path: target/release-prebuild/${{ matrix.artifact }}
-          key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
-
-      # A dropped save fails this producer row, so "re-run failed jobs"
-      # recreates it; the verifier polls so a propagating index does not.
-      - name: Verify the packaging tool handoff
-        uses: ./.github/actions/verify-cache-handoff
-        with:
-          path: target/release-prebuild/${{ matrix.artifact }}
-          key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 30
 
   # Native runtime rows preserve the release profile, targets, dependency
   # caches and Windows ThinLTO/runtime validation used by release-build.yml.
@@ -259,31 +272,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux
-            runner: ubuntu-latest
-            artifact: release-prebuild-runtime-linux
-            source_dir: target/release
-            suffix: ''
-            target: x86_64-unknown-linux-gnu
-          - name: windows
-            runner: windows-latest
-            artifact: release-prebuild-runtime-windows
-            source_dir: target/x86_64-pc-windows-msvc/release
-            suffix: .exe
-            target: x86_64-pc-windows-msvc
-          - name: macos-arm64
-            runner: macos-latest
-            artifact: release-prebuild-runtime-macos-arm64
-            source_dir: target/aarch64-apple-darwin/release
-            suffix: ''
-            target: aarch64-apple-darwin
-          - name: macos-x86_64
-            runner: macos-latest
-            artifact: release-prebuild-runtime-macos-x86_64
-            source_dir: target/x86_64-apple-darwin/release
-            suffix: ''
-            target: x86_64-apple-darwin
+        include: >-
+          ${{ fromJSON(inputs.platform == 'macos' && '[{"name":"macos-arm64","runner":"macos-latest","artifact":"release-prebuild-runtime-macos-arm64","source_dir":"target/aarch64-apple-darwin/release","suffix":"","target":"aarch64-apple-darwin"},{"name":"macos-x86_64","runner":"macos-latest","artifact":"release-prebuild-runtime-macos-x86_64","source_dir":"target/x86_64-apple-darwin/release","suffix":"","target":"x86_64-apple-darwin"}]' || inputs.platform == 'windows' && '[{"name":"windows","runner":"windows-latest","artifact":"release-prebuild-runtime-windows","source_dir":"target/x86_64-pc-windows-msvc/release","suffix":".exe","target":"x86_64-pc-windows-msvc"}]' || '[{"name":"linux","runner":"ubuntu-latest","artifact":"release-prebuild-runtime-linux","source_dir":"target/release","suffix":"","target":"x86_64-unknown-linux-gnu"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -304,8 +294,28 @@ jobs:
         if: matrix.name == 'linux'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          cache-targets: false
           shared-key: full-parity
           save-if: false
+
+      - name: Restore verified Linux compiled inputs
+        if: matrix.name == 'linux'
+        uses: ./.github/actions/workspace-cache
+        with:
+          operation: restore
+          lane: landing-linux
+          target: target
+          ledger: .ci-cache-ledgers/landing.json
+          recipe: landing-v1
+
+      - name: Verify restored Linux workspace artifacts
+        id: workspace-inputs
+        if: matrix.name == 'linux'
+        run: python3 scripts/ci-workspace-cache.py prepare --target target --recipe landing-v1 --ledger .ci-cache-ledgers/landing.json --github-output "$GITHUB_OUTPUT"
+
+      - name: 'CI cache receipt: ${{ steps.workspace-inputs.outputs.cache-state }}'
+        if: matrix.name == 'linux'
+        run: 'true'
 
       - name: Restore trusted-main Windows runtime cache
         if: matrix.name == 'windows'
@@ -362,6 +372,7 @@ jobs:
             exit 1
           fi
           export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
+          echo "CFLAGS_x86_64_pc_windows_msvc=$CFLAGS_x86_64_pc_windows_msvc" >> "$GITHUB_ENV"
           cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group
 
       - name: Build the macOS arm64 runtime
@@ -394,25 +405,26 @@ jobs:
             cp "$source_path" "$artifact_dir/payload/${binary}${{ matrix.suffix }}"
           done
           python3 scripts/release-prebuild-manifest.py write \
+            --provenance-root "$GITHUB_WORKSPACE" \
             --root "$artifact_dir" \
             --manifest "$artifact_dir/manifest.json" \
             --head-sha "$SOURCE_SHA" \
             --tree-sha "$TREE_SHA" \
             --version "$VERSION" \
             --kind runtime \
+            --build-profile release \
+            --build-target "${{ matrix.target }}" \
             --target "${{ matrix.target }}" \
             --file "payload/c4group${{ matrix.suffix }}" \
             --file "payload/clonk-app${{ matrix.suffix }}" \
             --file "payload/clonk-game${{ matrix.suffix }}"
 
       - name: Hand off the runtime
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: ${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
           path: target/release-prebuild/${{ matrix.artifact }}
-          key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
-
-      - name: Verify the runtime handoff
-        uses: ./.github/actions/verify-cache-handoff
-        with:
-          path: target/release-prebuild/${{ matrix.artifact }}
-          key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 30

@@ -1,0 +1,781 @@
+{
+  "schema": 1,
+  "audit_date": "2026-10-06",
+  "repository": "clonk-org/clonk-rs",
+  "tracker_url": "https://github.com/clonk-org/clonk-rs/issues/1886",
+  "status": "Implementation/evidence ledger; revised live CI and final gate revision remain to be recorded on issues/PR",
+  "issue_scope": [
+    {
+      "issue": "clonk-org/clonk-rs#1887",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1887",
+      "work": "Verified pinned content reuse",
+      "implementation_paths": [
+        ".github/actions/verified-content/action.yml",
+        "scripts/ci-content.py"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1888",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1888",
+      "work": "Same-candidate platform build-once",
+      "implementation_paths": [
+        ".github/workflows/release-platform.yml",
+        "scripts/release-prebuild-manifest.py",
+        "scripts/run_device_loss_probe.py",
+        "scripts/run_software_presentation_smoke.py"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1889",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1889",
+      "work": "Bounded qualification scheduling",
+      "implementation_paths": [
+        ".github/workflows/landing.yml",
+        ".github/workflows/exact-sha-qualification.yml",
+        ".github/workflows/release-prebuild.yml"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1890",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1890",
+      "work": "Verified coverage/workspace input reuse",
+      "implementation_paths": [
+        ".github/actions/workspace-cache/action.yml",
+        "scripts/ci-workspace-cache.py",
+        "scripts/ci-cache-retention.py"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1891",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1891",
+      "work": "Presentation-capture compile reuse",
+      "implementation_paths": [
+        ".github/workflows/landing.yml",
+        ".github/actions/workspace-cache/action.yml"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1892",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1892",
+      "work": "Native Windows compilation and linking",
+      "implementation_paths": [
+        "scripts/configure-msvc-runtime.sh",
+        ".github/workflows/rust.yml"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1893",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1893",
+      "work": "Exact-SHA post-landing qualification reuse",
+      "implementation_paths": [
+        "scripts/release-qualification-evidence.py",
+        ".github/workflows/rust.yml"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1894",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1894",
+      "work": "Honest advisory operation/workflow clocks",
+      "implementation_paths": [
+        "scripts/ci-latency-report.py",
+        ".github/workflows/release-prepare.yml",
+        ".github/workflows/release.yml"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1895",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1895",
+      "work": "Reject cross-commit speculative promotion; refresh stale generated PRs",
+      "implementation_paths": [
+        ".github/workflows/release-prepare.yml",
+        ".github/workflows/landing.yml",
+        "crates/clonk-core/src/version.rs"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1807",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1807",
+      "work": "Instrumented capture execution investigation",
+      "implementation_paths": [
+        "crates/clonk-resources/src/group.rs",
+        "crates/clonk-resources/src/group_writer.rs"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1722",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1722",
+      "work": "CI allocation-heavy test scheduling",
+      "implementation_paths": [
+        ".config/nextest.toml"
+      ]
+    },
+    {
+      "issue": "clonk-org/clonk-rs#1885",
+      "url": "https://github.com/clonk-org/clonk-rs/issues/1885",
+      "work": "Strict ClonkMars host-reference latency",
+      "implementation_paths": [
+        "crates/clonk-resources/src/group.rs",
+        "crates/clonk-resources/src/group_writer.rs",
+        ".config/nextest.toml"
+      ]
+    }
+  ],
+  "retained_contracts": {
+    "exhaustive_linux_rows": 18,
+    "windows_smoke_rows": 2,
+    "coverage_fragments": 12,
+    "minimum_lcov_line_percent": 79.45,
+    "public_artifact_names": [
+      "desktop-linux",
+      "desktop-windows",
+      "desktop-macos",
+      "components-desktop-linux",
+      "components-desktop-windows",
+      "components-desktop-macos",
+      "release-tool"
+    ],
+    "qualification": [
+      "parity",
+      "engine snapshots",
+      "compatibility",
+      "recording",
+      "native material-order oracles",
+      "packaging",
+      "MSVC static CRT/import validation",
+      "Vulkan/GL/DX12/Metal recovery"
+    ],
+    "ordinary_host_reference_budget_seconds": 1,
+    "ordinary_client_lobby_budget_seconds": 0.5,
+    "release_profile_static_crt_and_unwind_changed": false,
+    "cross_commit_speculative_promotion": false,
+    "same_candidate_build_once": true,
+    "prebuild_provenance_schema": 3,
+    "unknown_equivalence": "normal compilation and qualification",
+    "equivalence_inputs": [
+      "source SHA/tree",
+      "content gitlink",
+      "dependency graph",
+      "generators",
+      "golden/reference data",
+      "workflow/build recipes",
+      "Rust/LLVM",
+      "target/profile/features/flags",
+      "environment",
+      "native tools/SDKs"
+    ],
+    "version_is_real_input": "crates/clonk-core/src/version.rs uses CARGO_PKG_VERSION; raw manifest/source bytes invalidate changed units",
+    "unproven_application_commit_embedding_claim_used": false,
+    "stale_release_refresh": "automation-owned single generated commit; selected-main ancestry/sole-parent guard; unique main-seeded scratch ref and generated-only fast-forward transport; atomic GraphQL updateRefs candidate replacement and scratch deletion by beforeOid comparison; original PR/version/clock retained",
+    "cache_contract": {
+      "optional_restore_and_save": true,
+      "source_byte_ledger_required": true,
+      "workspace_package_versions_only_normalized_in_restore_prefix": true,
+      "raw_measurement_outputs_cleared": true,
+      "publication": "trusted main",
+      "retention_total_bytes": 4294967296,
+      "maximum_entries_per_owned_lane": 2,
+      "pre_deployment_repository_inventory": {
+        "cache_count": 54,
+        "compressed_bytes": 10180739840,
+        "legacy_linux_full_parity_entries": 2,
+        "legacy_linux_full_parity_bytes": 3339796564,
+        "new_owned_lane_cap_is_repository_cap": false,
+        "revised_sizes_restore_costs_and_cross_lane_eviction": "pending hosted measurement"
+      },
+      "owned_lanes": [
+        "landing-linux",
+        "coverage-linux"
+      ],
+      "external_or_unknown_inputs": "invalidate workspace units; normal rebuild",
+      "workspace_input_temperature": {
+        "evidence": "successful prepare --github-output and workflow receipt step",
+        "outputs": [
+          "cache-state",
+          "reused-units",
+          "invalidated-units"
+        ],
+        "job_role_count": 8,
+        "job_roles": [
+          {
+            "workflow": ".github/workflows/exact-sha-qualification.yml",
+            "job": "coverage-fragments"
+          },
+          {
+            "workflow": ".github/workflows/exact-sha-qualification.yml",
+            "job": "coverage-cache-warm"
+          },
+          {
+            "workflow": ".github/workflows/exact-sha-qualification.yml",
+            "job": "developer-feedback"
+          },
+          {
+            "workflow": ".github/workflows/landing.yml",
+            "job": "pull-request-quality"
+          },
+          {
+            "workflow": ".github/workflows/landing.yml",
+            "job": "linux"
+          },
+          {
+            "workflow": ".github/workflows/release-prebuild.yml",
+            "job": "tool"
+          },
+          {
+            "workflow": ".github/workflows/release-prebuild.yml",
+            "job": "runtime"
+          },
+          {
+            "workflow": ".github/workflows/rust.yml",
+            "job": "linux-landing-cache"
+          }
+        ],
+        "warm": "one or more verified workspace units reused, none invalidated",
+        "cold": "no verified workspace units reused",
+        "unknown": "mixed reused/invalidated workspace units",
+        "scope": "this checkout compiled workspace inputs; not dependency-cache hits or whole-candidate temperature",
+        "whole_candidate_temperature": "UNKNOWN without complete consistent successful job receipts"
+      },
+      "coverage_execution": {
+        "cargo_llvm_cov": "0.8.7",
+        "cargo_nextest": "0.9.91",
+        "instrumentation": "pinned show-env exported compiler wrapper and context",
+        "collector": "direct cargo nextest run",
+        "warmer": "direct cargo nextest run --no-run",
+        "nested_llvm_cov_nextest_after_show_env": false,
+        "raw_profiles": "fresh per collector"
+      }
+    },
+    "stale_release_refresh_authorization": {
+      "workflows_permission_granted": false,
+      "existing_release_app_token_api_authorization": "live validation pending",
+      "unresolved_scratch_cleanup": "bounded cleanup and retained cleanup receipt"
+    }
+  },
+  "observed_ci": {
+    "clock": "original workflow creation to final qualification completion; execution starts at first qualification job; reporter jobs excluded",
+    "representative_ordinary": {
+      "run_id": 37499319669,
+      "source_sha": "115134eb1ce3fc385e5a24d2d1cbabbba7741261",
+      "url": "https://github.com/clonk-org/clonk-rs/actions/runs/37499319669",
+      "conclusion": "success",
+      "workflow_created_at": "2026-10-06T16:54:02Z",
+      "elapsed_seconds": 659,
+      "execution_seconds": 656,
+      "cache_state": "UNKNOWN",
+      "peak_concurrency": 19,
+      "created_to_start_sum_seconds": 252,
+      "created_to_start_median_seconds": 2,
+      "created_to_start_max_seconds": 105
+    },
+    "representative_release": {
+      "run_id": 37379197541,
+      "source_sha": "7065436d267e7a16d45c4f985e36c5269e9b0d2c",
+      "url": "https://github.com/clonk-org/clonk-rs/actions/runs/37379197541",
+      "conclusion": "success",
+      "workflow_created_at": "2026-10-05T21:56:26Z",
+      "elapsed_seconds": 1931,
+      "execution_seconds": 1929,
+      "initial_queue_seconds": 2,
+      "cache_state": "UNKNOWN",
+      "peak_concurrency": 20,
+      "seconds_at_peak": 446,
+      "runner_active_seconds": 24021,
+      "created_to_start_sum_seconds": 1820,
+      "created_to_start_median_seconds": 2,
+      "created_to_start_max_seconds": 316,
+      "windows_runtime_created_to_start_seconds": 305,
+      "broad_linux_qualification_barrier_seconds": 746,
+      "linux_package_ready_before_barrier_seconds": 707,
+      "macos_package_ready_before_barrier_seconds": 268
+    },
+    "queue_cause_limit": "Created-to-start includes provisioning/scheduling; runner-pool/dependency partition is unmeasured",
+    "historical_report_window": {
+      "available_runs": 2500,
+      "inspected_runs": 20,
+      "limit": 20,
+      "truncated": true,
+      "percentile_method": "nearest_rank",
+      "percentile_population": "successful completed runs; elapsed clock retains original creation across reruns",
+      "recipes": "mixed historical, not revised recipe",
+      "representative_release_is_not_in_release_history_population": true,
+      "ordinary": {
+        "cache_states": {
+          "UNKNOWN": 7,
+          "cold": 0,
+          "warm": 0
+        },
+        "completed_runs": 7,
+        "conclusions": {
+          "cancelled": 0,
+          "error": 0,
+          "failure": 1,
+          "success": 6,
+          "unknown": 0
+        },
+        "excluded_reasons": {
+          "functional_failure": 1
+        },
+        "excluded_sample_count": 1,
+        "execution_p50_seconds": 734.0,
+        "execution_p95_seconds": 908.0,
+        "p50_seconds": 737.0,
+        "p95_seconds": 910.0,
+        "sample_count": 6,
+        "sample_measurement": "elapsed_seconds",
+        "workflow_elapsed_p50_seconds": 737.0,
+        "workflow_elapsed_p95_seconds": 910.0,
+        "sample_run_ids": [
+          37506934194,
+          37505112402,
+          37502368894,
+          37500827442,
+          37499319669,
+          37394282397,
+          37357997724
+        ]
+      },
+      "release": {
+        "cache_states": {
+          "UNKNOWN": 4,
+          "cold": 0,
+          "warm": 0
+        },
+        "completed_runs": 4,
+        "conclusions": {
+          "cancelled": 0,
+          "error": 0,
+          "failure": 4,
+          "success": 0,
+          "unknown": 0
+        },
+        "excluded_reasons": {
+          "functional_failure": 4
+        },
+        "excluded_sample_count": 4,
+        "execution_p50_seconds": null,
+        "execution_p95_seconds": null,
+        "p50_seconds": null,
+        "p95_seconds": null,
+        "sample_count": 0,
+        "sample_measurement": "elapsed_seconds",
+        "workflow_elapsed_p50_seconds": null,
+        "workflow_elapsed_p95_seconds": null,
+        "sample_run_ids": [
+          37495457163,
+          37366268965,
+          37359971971,
+          37350296496
+        ]
+      }
+    },
+    "operation_clock_policy": {
+      "preparation": "workflow/dispatch creation to newly opened PR API creation",
+      "publication": "qualified release PR merge to release publication",
+      "target_seconds": 120,
+      "separate_workflow_clock": true,
+      "exclude": [
+        "PR created by another run",
+        "already-published/reused release",
+        "missing operation anchor"
+      ],
+      "reruns": "retain original creation and attempt history",
+      "functional_failure": "remains failure",
+      "budget_miss": "advisory warning",
+      "revised_recipe_p50_seconds": null,
+      "revised_recipe_p95_seconds": null
+    }
+  },
+  "measured_local": {
+    "kind": "Fixed-fixture local measurements, not GitHub shard/workflow percentiles",
+    "source_base_sha": "5b5b1281e292f4293c23a46aeaca009b20ff2879",
+    "retained_source_sha256": {
+      "crates/clonk-resources/src/group.rs": "8bfdd057323f47397a459a67f9c05a07668251797d30ccc2314d32c470804cb3",
+      "crates/clonk-resources/src/group_writer.rs": "a6795d2d8cf93b7e8f0c11da200672f917835cb505e55994973f1776b2e20019"
+    },
+    "host": {
+      "cpu": "AMD Ryzen 9 9900X 12 cores 24 threads",
+      "memory_total_kib": 63365024
+    },
+    "toolchain": {
+      "rust": "1.98.1",
+      "llvm": "22.1.8",
+      "cargo_llvm_cov": "0.8.7",
+      "capture_nextest": "0.9.140",
+      "scheduling_nextest": "0.9.91"
+    },
+    "capture": {
+      "test": "options_key_capture_frames_match_the_native_oracle",
+      "independent_fixture_boots": 4,
+      "current_app_inventory": 804,
+      "warm_compile_excluded": true,
+      "ordinary_before_seconds": 3.194,
+      "ordinary_sort_only_seconds": 2.789,
+      "instrumented_before_seconds": 16.75,
+      "instrumented_sort_only_seconds": 10.045,
+      "classic_group_lookups_per_boot": 753,
+      "profiled_total_seconds": 16.59,
+      "profiled_group_entries_seconds": 6.752777409,
+      "profiled_wildcard_lookup_seconds": 0.008469739,
+      "ordering": "descending first wildcard rank and ASCII lowercase; raw-byte directory tie order; stable writer equal-name order",
+      "fresh_directory_io": true,
+      "directory_listing_cache_retained": false,
+      "temporary_timers_retained": false,
+      "resource_ffi_tests_passed": 407,
+      "resource_ffi_tests_skipped": 0,
+      "witnessed_red_rank_evaluations": 46,
+      "green_rank_evaluations": 24,
+      "focused_clippy": "passed; test profile, -D warnings",
+      "limit": "Focused local samples; baseline profiling had timers; no aggregate CI or overall RAM improvement claim"
+    },
+    "strict_host_reference": {
+      "test": "selected_clonkmars_host_reference_is_queryable_within_one_second",
+      "physical_cores": 4,
+      "ordinary_before_ms": [
+        482.9,
+        518.17
+      ],
+      "ordinary_sort_only_reference_ms": 364.463097,
+      "ordinary_sort_only_stage_ms": 362.52705,
+      "full_fixture_test_seconds": 10.921,
+      "instrumented_sort_only_reference_seconds": 1.936319073,
+      "instrumented_result": "functional pass only; pre-existing coverage configuration disables ordinary wall-clock threshold",
+      "new_queue_stability": "unmeasured"
+    },
+    "scheduling": {
+      "same_tests": 12,
+      "test_threads": 4,
+      "physical_cores": 4,
+      "default_elapsed_seconds": 25.272,
+      "ci_elapsed_seconds": 13.101,
+      "elapsed_reduction_percent": 48.16001899335232,
+      "median_per_test_ratio": 1.0118756549074397,
+      "maximum_per_test_ratio": 1.0459140690817186,
+      "default_peak_aggregate_rss_mib": 740.03125,
+      "ci_peak_aggregate_rss_mib": 1415.0,
+      "default_peak_aggregate_pss_mib": 734.111328125,
+      "ci_peak_aggregate_pss_mib": 1364.625,
+      "concurrent_test_processes": [
+        1,
+        2
+      ],
+      "default_local_weight": 12,
+      "ci_memory_weight": 2,
+      "strict_contracts_remain_exclusive": true,
+      "ordinary_lobby_sample_ms": 182.96,
+      "ordinary_reference_sample_ms_before_sort": 483.43,
+      "limit": "Focused twelve-test pair; RAM increases; whole-workflow latency unmeasured"
+    },
+    "rejected_image_cache": {
+      "retained": false,
+      "ordinary_capture_seconds": 2.656,
+      "instrumented_capture_seconds": 9.826,
+      "ordinary_host_reference_ms": 366.990186,
+      "ordinary_host_rss_without_kib": 835512,
+      "ordinary_host_rss_with_kib": 902988,
+      "instrumented_host_rss_without_kib": 830664,
+      "instrumented_host_rss_with_kib": 875884,
+      "decision": "Small capture gain, no host-reference gain and added host RSS; sorting only retained"
+    },
+    "historical_audio_window": {
+      "sequence": [
+        "A",
+        "B",
+        "A"
+      ],
+      "commits": {
+        "A": "7b6752938c6d2c31d7a291bed667e16cc18630f5",
+        "B": "3e2620aa1d50ca43885a73174b9f6f4ced712f7d"
+      },
+      "execution_seconds": [
+        15.898,
+        15.776,
+        15.715
+      ],
+      "compile_seconds": [
+        168.0,
+        30.82,
+        33.32
+      ],
+      "b_runtime_change_vs_mean_a_percent": -0.19295859298389395,
+      "content_gitlink": "0888b4f3bd10762c976c2fe93aa650d7909c1c6f",
+      "app_inventory": 778,
+      "test": "options_key_capture_frames_match_the_native_oracle",
+      "audio": "Sound/Music/MenuMusic/MenuSound false; voice default false",
+      "same_compiler_instrumentation_runner_fixture": true,
+      "fresh_raw_profiles_per_run": true,
+      "isolated_targets_and_fingerprints": true,
+      "initial_bound_seconds": 420,
+      "authorized_extension_limit_seconds": 180,
+      "extension_used_seconds": 96.35,
+      "scratch_cleaned": true,
+      "outcome": "Reported2-3x and completed17% regression did not reproduce for the controlled silent canonical fixture on this host. No cloud-host root-cause claim and no audio-enabled-test conclusion.",
+      "scope_limit": "Not original Azure runner, full shard or audio-enabled test; sorting is not proof of historical onset"
+    },
+    "pinned_coverage_command_probe": {
+      "kind": "isolated offline zero-dependency fixture; instrumentation/JUnit/no-run contract proof",
+      "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "cargo_llvm_cov": "cargo-llvm-cov 0.8.7",
+      "cargo_nextest": "cargo-nextest 0.9.91 (154ba8be6 2025-02-14)",
+      "instrumentation": "pinned show-env exported wrapper and context, direct nextest",
+      "exported_instrumentation_keys": [
+        "CARGO_LLVM_COV",
+        "CARGO_LLVM_COV_BUILD_DIR",
+        "CARGO_LLVM_COV_SHOW_ENV",
+        "CARGO_LLVM_COV_TARGET_DIR",
+        "LLVM_PROFILE_FILE",
+        "LLVM_PROFILE_FILE_NAME",
+        "RUSTC_WRAPPER",
+        "__CARGO_LLVM_COV_RUSTC_WRAPPER",
+        "__CARGO_LLVM_COV_RUSTC_WRAPPER_CRATE_NAMES",
+        "__CARGO_LLVM_COV_RUSTC_WRAPPER_RUSTFLAGS"
+      ],
+      "no_run_test_body_executed": false,
+      "no_run_junit_generated": false,
+      "no_run_discovery_raw_profiles": 2,
+      "discovery_profiles_cleaned_before_execution": true,
+      "executed_raw_profiles": 3,
+      "lcov_lines": 11,
+      "lcov_hit_lines": 11,
+      "positive_line_counter_total": 14,
+      "junit_tests": 1,
+      "junit_failures": 0,
+      "junit_errors": 0,
+      "junit_workspace_path": "target/nextest/ci/junit.xml",
+      "cargo_target_dir": "target/coverage-build",
+      "junit_location_independent_of_cargo_target_dir": true,
+      "coverage_contract_guards_passed": 11,
+      "wrapper_and_junit_regressions": "witnessed RED then GREEN by probe builder",
+      "limit": "Not a workspace run, live Actions acceptance, latency result or proof of retained whole-workspace coverage floor"
+    }
+  },
+  "scheduler_model": {
+    "kind": "MODEL, not measured revised CI or p95",
+    "input": "Historical release job execution intervals; source order and longest-first list scheduling; no extrapolated cold-host speedup",
+    "candidate_capacities": {
+      "release_linux": 5,
+      "coverage": 6,
+      "platform_chain": 4,
+      "windows_smoke": 2,
+      "independent_native": 3,
+      "total": 20,
+      "ordinary_linux": 17
+    },
+    "platform_capacity_edge": "own runtime(s) before own packaging tool; Linux1 + Windows1 + macOS2 lanes; own package/GPU follows own inputs",
+    "longest_first_modeled_seconds": {
+      "linux_at_5": 1585,
+      "coverage_at_6": 1386,
+      "linux_at_4_rejected": 1977,
+      "coverage_at_4_rejected": 1941
+    },
+    "platform_chains_before_new_gpu_seconds": {
+      "linux": 933,
+      "windows": 1472,
+      "macos": 1285
+    },
+    "probe_timeout_seconds_per_backend": 60,
+    "approximate_total_with_bounded_probe_identity_and_tail_seconds": 1635,
+    "request_order_is_not_guaranteed_start_order": true,
+    "candidate_priority": true,
+    "queue_build_concurrency": 1,
+    "outside_candidate_envelope": "Noncancelled bounded authoritative cache publishers and other repositories; account occupancy/starvation remains to be measured"
+  },
+  "native_windows_observed": {
+    "runtime_job_url": "https://github.com/clonk-org/clonk-rs/actions/runs/37379197541/job/111996550058",
+    "compiled_workspace_crates": 26,
+    "compiled_third_party_crates": 0,
+    "dependency_cache": "hit",
+    "cargo_seconds": 828,
+    "encompassing_build_step_seconds": 862,
+    "final_application_link_seconds": 357.029,
+    "final_application_thin_lto_seconds": 355.583,
+    "later_tools_run_url": "https://github.com/clonk-org/clonk-rs/actions/runs/37395442272/job/112050541995",
+    "later_runtime_cargo_seconds": 900,
+    "old_release_profile_tool_cargo_seconds": 694,
+    "duplicated_gpu_compile_seconds": 934,
+    "gpu_probe_after_compile_seconds": 10.037,
+    "windows_probe_venv_pillow_seconds": 11.52,
+    "limit": "Link telemetry observed; remaining Cargo time is not a disjoint compile-only measurement; no native codegen partition or matched revised recipe/capacity experiment"
+  },
+  "optional_infrastructure_decision": {
+    "current": "retain standard Windows; no billing or runner change performed",
+    "experiment_status": "requires explicit owner authorization; unmeasured",
+    "sku": "windows_8_core",
+    "os": "x64 Windows",
+    "vcpus": 8,
+    "ram_gib": 32,
+    "usd_per_minute": 0.042,
+    "runs": 4,
+    "maximum_minutes_per_run": 20,
+    "maximum_concurrency": 1,
+    "compute_ceiling_usd": 3.36,
+    "cost_limits": "Partial minutes round up; storage/plan fees excluded; larger-runner included minutes do not apply",
+    "availability": "Team/Enterprise Cloud; owner-configured capacity and repository access",
+    "must_match": [
+      "exact source SHA/tree/content",
+      "Rust1.98.1",
+      "LLVM22.1.8",
+      "target/profile/features/flags",
+      "static CRT",
+      "unwind",
+      "native image/SDK where available"
+    ],
+    "must_measure": [
+      "cold provisioning",
+      "cold source build",
+      "warm build",
+      "whole qualification",
+      "same-recipe functional correctness"
+    ],
+    "under_ten_minute_runtime_claim": false,
+    "official_source_urls": [
+      "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+      "https://docs.github.com/en/actions/reference/runners/larger-runners",
+      "https://docs.github.com/en/actions/concepts/runners/larger-runners",
+      "https://docs.github.com/en/actions/how-tos/manage-runners/larger-runners/manage-larger-runners"
+    ]
+  },
+  "pending_live_validation": [
+    "final gate revision recorded on issues/PR",
+    "all-platform exact-candidate producer and consumer digests",
+    "18 Linux/2 Windows/12 coverage inventory and seven public artifacts",
+    "fresh raw profiles and retained LCOV floor",
+    "missing/corrupt cache and receipt fallback",
+    "atomic stale generated PR refresh under main race; existing App-token API authorization and scratch cleanup; no Workflows grant",
+    "bounded noncancelled publishers and account-wide queue occupancy",
+    "native GPU/runtime validation",
+    "matched warm/cold and source-changing revised Actions samples",
+    "revised recipe operation clocks and eligible p50/p95 sample counts"
+  ],
+  "raw_evidence": [
+    {
+      "id": "release_job_inventory",
+      "name": "clonk-ci-release-baseline.json",
+      "representation": "GitHub API jobs inventory; JSON array of pages",
+      "bytes": 201213,
+      "sha256": "2ef041837c6a445228dc8596e67d399850db08a99e5e8b930fe08e7d5eb881a9",
+      "source_url": "https://github.com/clonk-org/clonk-rs/actions/runs/37379197541",
+      "availability": "GitHub run/API evidence; hash identifies the captured representation"
+    },
+    {
+      "id": "ordinary_job_inventory",
+      "name": "clonk-ci-ordinary-baseline.json",
+      "representation": "GitHub API jobs inventory; JSON array of pages",
+      "bytes": 84619,
+      "sha256": "e4831711e1b5999fc4448397c0ecc95e82e6dabd2cc02df388a934e28f4d41c4",
+      "source_url": "https://github.com/clonk-org/clonk-rs/actions/runs/37499319669",
+      "availability": "GitHub run/API evidence; hash identifies the captured representation"
+    },
+    {
+      "id": "historical_latency_report",
+      "name": "clonk-latency-release-baseline-with-concurrency-report.json",
+      "representation": "Current latency reporter JSON; concurrency, advisory operations and limited comparable history",
+      "bytes": 384615,
+      "sha256": "58144b880d30ef610e988fa4ada4c865c4e0c3c7a0bec21aa4fbc7175d72ca88",
+      "source_url": "https://github.com/clonk-org/clonk-rs/actions/runs/37379197541",
+      "availability": "GitHub run/API evidence; hash identifies the captured representation"
+    },
+    {
+      "id": "native_windows_runtime",
+      "name": "clonk-ci-windows-runtime-baseline.log",
+      "representation": "gh run view job log text",
+      "bytes": 153146,
+      "sha256": "d51e2702fc400909726333c46b1aa58969ca0d6406f39d1f963592b814927870",
+      "source_url": "https://github.com/clonk-org/clonk-rs/actions/runs/37379197541/job/111996550058",
+      "availability": "GitHub run/API evidence; hash identifies the captured representation"
+    },
+    {
+      "id": "native_windows_tools",
+      "name": "clonk-ci-windows-tools-baseline.log",
+      "representation": "gh run view job log text",
+      "bytes": 139852,
+      "sha256": "b500c61fc98ba204453bd8ecade59028e6c5693ad414b171bc8c8141083ef45c",
+      "source_url": "https://github.com/clonk-org/clonk-rs/actions/runs/37395442272/job/112050541995",
+      "availability": "GitHub run/API evidence; hash identifies the captured representation"
+    },
+    {
+      "id": "native_windows_gpu",
+      "name": "clonk-ci-windows-gpu-baseline.log",
+      "representation": "gh run view job log text",
+      "bytes": 142397,
+      "sha256": "a8c2c760ed73d90bdcc6b57ff96bc8da62b859ac6ea739b688d3bda6ada73c1c",
+      "source_url": "https://github.com/clonk-org/clonk-rs/actions/runs/37379197541/job/112001202222",
+      "availability": "GitHub run/API evidence; hash identifies the captured representation"
+    },
+    {
+      "id": "local_capture_baseline",
+      "name": "coverage-scout-pairs.json",
+      "representation": "Local fixed-fixture measurements and temporary profiling summary",
+      "bytes": 9050,
+      "sha256": "ed38de23bf9ddc9de3d121c22c2bcbed31cbb8ab6e5b6a1972644f792f8eb6b8",
+      "source_url": null,
+      "availability": "Local raw experiment evidence; curated figures are recorded here"
+    },
+    {
+      "id": "local_sort_and_history",
+      "name": "coverage-scout-sort-evidence.json",
+      "representation": "Local fixed-fixture sort/image-cache trials and historical A/B/A",
+      "bytes": 31922,
+      "sha256": "b1214013ea99d183ff7dff4daba322925383655b73416b98f1a15ed72c66b2fb",
+      "source_url": null,
+      "availability": "Local raw experiment evidence; curated figures are recorded here"
+    },
+    {
+      "id": "local_nextest_scheduling",
+      "name": "clonk-nextest-memory-comparison.json",
+      "representation": "Local twelve-test elapsed/RSS/PSS comparison",
+      "bytes": 2757,
+      "sha256": "37752d36c8654fe6d0afe7ffed4c3c4bf7051568a295232dab8844e924cd61b0",
+      "source_url": null,
+      "availability": "Local raw experiment evidence; curated figures are recorded here"
+    },
+    {
+      "id": "scheduler_model",
+      "name": "clonk-ci-scheduling-investigation.json",
+      "representation": "Historical job-interval reconstruction and deterministic scheduling model",
+      "bytes": 283871,
+      "sha256": "68650b64c89356f04fd286663e6cd2df80af01b0bed70a72d7651e3b9fcf4d60",
+      "source_url": null,
+      "availability": "Local raw experiment evidence; curated figures are recorded here"
+    },
+    {
+      "id": "pinned_coverage_command_receipt",
+      "name": "receipt.json",
+      "bundle": "clonk-ci-direct-coverage-r8l1t6l_",
+      "representation": "Local pinned-tool command receipt JSON",
+      "bytes": 2939,
+      "sha256": "e2d382be59e9158eab474fb0eed76601b790a41ba286c69c5b2725ab510390be",
+      "source_url": null,
+      "availability": "Local isolated proof; curated figures are recorded here; no raw log payload committed"
+    },
+    {
+      "id": "pinned_coverage_command_driver",
+      "name": "run-proof.py",
+      "bundle": "clonk-ci-direct-coverage-r8l1t6l_",
+      "representation": "Local isolated command-proof driver source",
+      "bytes": 4464,
+      "sha256": "ebd5a96367ff05a93754fcb63852230485173d302bc230ca553dd7d9b044a5ae",
+      "source_url": null,
+      "availability": "Local isolated proof; curated figures are recorded here; no raw log payload committed"
+    },
+    {
+      "id": "pinned_coverage_command_lcov",
+      "name": "coverage.lcov",
+      "bundle": "clonk-ci-direct-coverage-r8l1t6l_",
+      "representation": "Local isolated fixture LCOV text",
+      "bytes": 520,
+      "sha256": "8f89490224e20f7da0329de8ca801bde52d0937d5fc71c78c1c0fffce0bdbfd0",
+      "source_url": null,
+      "availability": "Local isolated proof; curated figures are recorded here; no raw log payload committed"
+    },
+    {
+      "id": "pinned_coverage_command_junit",
+      "name": "target/nextest/ci/junit.xml",
+      "bundle": "clonk-ci-direct-coverage-r8l1t6l_",
+      "representation": "Local isolated fixture nextest JUnit XML",
+      "bytes": 535,
+      "sha256": "4db03f031af45bee88abcaa1c96dd4c65770d2069d53f77aaaf1e99afa3d1622",
+      "source_url": null,
+      "availability": "Local isolated proof; curated figures are recorded here; no raw log payload committed"
+    }
+  ]
+}

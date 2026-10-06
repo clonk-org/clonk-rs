@@ -29,6 +29,7 @@ concurrency:
 env:
   CARGO_INCREMENTAL: '0'
   CARGO_TERM_COLOR: always
+  NEXTEST_PROFILE: ci
 
 jobs:
   pull-request-title:
@@ -91,33 +92,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Resolve pinned content revision
-        id: content
-        run: |
-          revision=$(git rev-parse HEAD:content)
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "invalid content gitlink: $revision" >&2
-            exit 1
-          fi
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-
-      - name: Restore pinned content checkout
-        id: content-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .git/modules/content
-          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
-
-      - name: Materialize pinned content checkout
-        run: git submodule update --init --force --depth=1 --filter=blob:none content
-
-      - name: Verify pinned content checkout
-        env:
-          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
-        run: |
-          actual=$(git -C content rev-parse HEAD)
-          [[ "$actual" == "$CONTENT_REVISION" ]]
-          [[ -z "$(git -C content status --porcelain --untracked-files=all)" ]]
+      - name: Materialize verified pinned content
+        uses: ./.github/actions/verified-content
+        timeout-minutes: 10
 
       - name: Install native dependencies
         timeout-minutes: 10
@@ -130,9 +107,25 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: . -> target
+          cache-targets: false
           shared-key: full-parity
           save-if: false
+
+      - name: Restore verified workspace build inputs
+        uses: ./.github/actions/workspace-cache
+        with:
+          operation: restore
+          lane: landing-linux
+          target: target
+          ledger: .ci-cache-ledgers/landing.json
+          recipe: landing-v1
+
+      - name: Verify restored workspace artifacts
+        id: workspace-inputs
+        run: python3 scripts/ci-workspace-cache.py prepare --target target --recipe landing-v1 --ledger .ci-cache-ledgers/landing.json --github-output "$GITHUB_OUTPUT"
+
+      - name: 'CI cache receipt: ${{ steps.workspace-inputs.outputs.cache-state }}'
+        run: 'true'
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -165,6 +158,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MERGE_SHA: ${{ github.sha }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
           # The push-only `head_commit` field is absent here. The merge-group
           # payload carries the exact candidate commit and its squash subject.
           MERGE_SUBJECT: ${{ github.event.merge_group.head_commit.message }}
@@ -197,6 +191,41 @@ jobs:
             exit 1
           fi
 
+          prepared_sha=$(jq -r '.head.sha' <<<"$pr")
+          if [[ ! "$prepared_sha" =~ ^[0-9a-f]{40}$ || ! "$MERGE_BASE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release preparation or queue base SHA is invalid" >&2
+            exit 1
+          fi
+          prepared=$(gh api "repos/${REPOSITORY}/commits/${prepared_sha}")
+          if ! jq -e --arg repository "$REPOSITORY" \
+            '.commits == 1 and .user.login == "clonk-rs-release[bot]" and .user.type == "Bot"
+             and .base.repo.full_name == $repository' <<<"$pr" >/dev/null \
+            || ! jq -e --arg message "chore: release ${version}" \
+              '.commit.message == $message
+               and .author.login == "clonk-rs-release[bot]" and .author.type == "Bot"
+               and .committer.login == "clonk-rs-release[bot]" and .committer.type == "Bot"
+               and .commit.author.name == "clonk-rs-release[bot]"
+               and .commit.committer.name == "clonk-rs-release[bot]"
+               and .commit.author.email == "311066358+clonk-rs-release[bot]@users.noreply.github.com"
+               and .commit.committer.email == "311066358+clonk-rs-release[bot]@users.noreply.github.com"' \
+              <<<"$prepared" >/dev/null; then
+            echo "release preparation is not the automation-owned generated commit" >&2
+            exit 1
+          fi
+          if ! jq -e --arg base "$MERGE_BASE" \
+            '.parents | length == 1 and .[0].sha == $base' <<<"$prepared" >/dev/null; then
+            echo "release metadata is stale; refresh release/next from the queue base" >&2
+            exit 1
+          fi
+          changed_files=$(gh api --paginate --slurp \
+            "repos/${REPOSITORY}/pulls/${pr_number}/files?per_page=100")
+          if ! jq -e 'flatten | length > 0 and length <= 3
+            and all(.[]; .filename == "Cargo.toml" or .filename == "Cargo.lock" or .filename == "CHANGELOG.md")' \
+            <<<"$changed_files" >/dev/null; then
+            echo "release preparation contains non-generated source edits" >&2
+            exit 1
+          fi
+
           merge_tree=$(gh api "repos/${REPOSITORY}/git/commits/${MERGE_SHA}" --jq '.tree.sha')
           if [[ ! "$merge_tree" =~ ^[0-9a-f]{40}$ ]]; then
             echo "merge-group release tree is invalid" >&2
@@ -208,38 +237,32 @@ jobs:
           echo "tree-sha=$merge_tree" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  release-prebuild:
-    name: Prebuild release candidate
+  release-build:
+    name: Build release candidate / ${{ matrix.platform }}
     needs: release-context
     if: needs.release-context.outputs.release == 'true'
     permissions:
       contents: read
       pull-requests: read
-    uses: ./.github/workflows/release-prebuild.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, windows, macos]
+    uses: ./.github/workflows/release-platform.yml
     with:
       source-sha: ${{ github.sha }}
       tree-sha: ${{ needs.release-context.outputs.tree-sha }}
       version: ${{ needs.release-context.outputs.version }}
       pr-number: ${{ needs.release-context.outputs.pr-number }}
-
-  release-build:
-    name: Build release candidate
-    needs: [release-context, release-prebuild]
-    if: needs.release-context.outputs.release == 'true'
-    permissions:
-      contents: read
-    uses: ./.github/workflows/release-build.yml
-    with:
-      source-sha: ${{ github.sha }}
-      tree-sha: ${{ needs.release-context.outputs.tree-sha }}
-      version: ${{ needs.release-context.outputs.version }}
+      platform: ${{ matrix.platform }}
 
   release-qualification:
     name: Qualify release candidate
-    needs: [release-context, linux, windows-smoke]
+    needs: release-context
     if: needs.release-context.outputs.release == 'true'
     permissions:
       contents: read
+      actions: read
     uses: ./.github/workflows/exact-sha-qualification.yml
     with:
       source-sha: ${{ github.sha }}
@@ -250,17 +273,19 @@ jobs:
       # Publication resolves exactly seven payload artifacts plus this run's
       # twelve non-publishable coverage handoffs.
       upload-diagnostics: false
+      qualify-device-loss: false
 
   linux:
     name: Linux / ${{ matrix.name }}
-    if: github.event_name != 'pull_request'
+    needs: release-context
+    if: always() && github.event_name != 'pull_request' && (needs.release-context.result == 'success' || needs.release-context.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.timeout || 15 }}
     env:
       # nextest resolves a relative JUnit path below CARGO_TARGET_DIR. Keep
       # this source explicit so the reset, wrapper, metadata, and upload all
       # refer to the same report even when a shard invokes Cargo repeatedly.
-      JUNIT_SOURCE: target/nextest/default/junit.xml
+      JUNIT_SOURCE: target/nextest/ci/junit.xml
     # Every required queue row uses a run-scoped lane. The non-cancelling cache
     # producer and cancellable post-merge diagnostics retain their rolling
     # lanes in rust.yml; sharing either here could cancel a required row.
@@ -272,27 +297,17 @@ jobs:
         shell: bash
     strategy:
       fail-fast: false
-      # One Linux row waits so release context plus the two Windows rows never
-      # push an ordinary merge-group run beyond the 20-runner pool.
-      max-parallel: 17
+      # Ordinary candidates retain 17 Linux slots. Releases reserve 6 coverage,
+      # 4 platform pipeline, 2 Windows smoke and 3 native qualification slots.
+      max-parallel: ${{ needs.release-context.outputs.release == 'true' && 5 || 17 }}
       matrix:
         include:
-          - name: app 1/12
+          - name: presentation captures
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
-            artifact: app-1
-          - name: app 12/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-12 --no-fail-fast --locked
-            artifact: app-12
-          - name: app 3+10/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-3,app-test-shard-10 --no-fail-fast --locked
-            artifact: app-3-10
-          - name: app 2+7/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
-            artifact: app-2-7
+            oracle: true
+            timeout: 30
+            command: cargo xtask presentation verify-current --profile release --output-dir "$RUNNER_TEMP/presentation-current"
+            artifact: presentation-captures
           - name: app 4+9/12
             # The shader-landscape scenario test renders through a real wgpu
             # device; Mesa's lavapipe provides one on the runner.
@@ -311,48 +326,26 @@ jobs:
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
             artifact: app-5
-          - name: app 11/12
+          - name: app 3+10/12
             apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-11 --no-fail-fast --locked
-            artifact: app-11
+            command: cargo nextest run -p clonk-app --features app-test-shard-3,app-test-shard-10 --no-fail-fast --locked
+            artifact: app-3-10
+          - name: app 2+7/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
+            artifact: app-2-7
           - name: app 6/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-6 --no-fail-fast --locked
             artifact: app-6
-          - name: app 8/12
-            apt: libasound2-dev libudev-dev
-            command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
-            artifact: app-8
-          - name: engine integration 1/3
-            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
-            artifact: engine-1
-          - name: engine integration 2/3
-            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
-            artifact: engine-2
-          - name: engine integration 3/3
-            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-3 --no-fail-fast --locked
-            artifact: engine-3
-          - name: engine and frontend unit and parity
-            apt: libasound2-dev libudev-dev
-            command: |
-              failed=0
-              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked --features clonk-engine-unit-tests/ffi || failed=1
-              cargo nextest run -p clonk-resources --features ffi --locked --no-tests=fail -E 'test(/^ffi::tests::/)' || failed=1
-              # These comparators already belong to this required unit row.
-              # Run each package separately so the no-tests failure policy detects an
-              # absent or renamed comparator instead of succeeding on the
-              # other package's match.
-              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --locked --features clonk-engine-unit-tests/ffi --no-tests=fail -E 'package(clonk-engine-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
-              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --locked --features clonk-engine-unit-tests/ffi --no-tests=fail -E 'package(clonk-frontend-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
-              exit "$failed"
-            artifact: engine-and-frontend-units
-          - name: remaining workspace 1/2
-            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-network-integration-tests -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
-            artifact: remaining-1
           - name: remaining workspace 2/2
             apt: libasound2-dev libxmp4 mesa-vulkan-drivers
             command: cargo nextest run -p clonk-app-menus -p clonk-app-render -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-protocol -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-test-support -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
             artifact: remaining-2
+          - name: app 1/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
+            artifact: app-1
           - name: workspace quality
             apt: libasound2-dev libudev-dev python3-pil
             oracle: true
@@ -378,12 +371,6 @@ jobs:
               cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1
               exit "$failed"
             artifact: workspace-quality
-          - name: presentation captures
-            apt: libasound2-dev libudev-dev
-            oracle: true
-            timeout: 30
-            command: cargo xtask presentation verify-current --profile release --output-dir "$RUNNER_TEMP/presentation-current"
-            artifact: presentation-captures
           - name: engine contracts
             oracle: true
             command: |
@@ -391,6 +378,44 @@ jobs:
               cargo xtask engine-snapshots verify
               cargo xtask compat verify
             artifact: engine-contracts
+          - name: app 12/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-12 --no-fail-fast --locked
+            artifact: app-12
+          - name: engine integration 1/3
+            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
+            artifact: engine-1
+          - name: engine integration 3/3
+            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-3 --no-fail-fast --locked
+            artifact: engine-3
+          - name: engine and frontend unit and parity
+            apt: libasound2-dev libudev-dev
+            command: |
+              failed=0
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked --features clonk-engine-unit-tests/ffi || failed=1
+              cargo nextest run -p clonk-resources --features ffi --locked --no-tests=fail -E 'test(/^ffi::tests::/)' || failed=1
+              # These comparators already belong to this required unit row.
+              # Run each package separately so the no-tests failure policy detects an
+              # absent or renamed comparator instead of succeeding on the
+              # other package's match.
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --locked --features clonk-engine-unit-tests/ffi --no-tests=fail -E 'package(clonk-engine-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
+              cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --locked --features clonk-engine-unit-tests/ffi --no-tests=fail -E 'package(clonk-frontend-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
+              exit "$failed"
+            artifact: engine-and-frontend-units
+          - name: app 11/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-11 --no-fail-fast --locked
+            artifact: app-11
+          - name: app 8/12
+            apt: libasound2-dev libudev-dev
+            command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
+            artifact: app-8
+          - name: remaining workspace 1/2
+            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-network-integration-tests -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
+            artifact: remaining-1
+          - name: engine integration 2/3
+            command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
+            artifact: engine-2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -428,7 +453,7 @@ jobs:
               "name": os.environ["MATRIX_NAME"],
               "source_sha": os.environ["SOURCE_SHA"],
               "command": os.environ["SHARD_COMMAND"],
-              "nextest_profile": "default",
+              "nextest_profile": "ci",
               "junit": os.environ["JUNIT_SOURCE"],
               "retained_junit": "junit/*.xml",
           }
@@ -440,85 +465,14 @@ jobs:
         if: matrix.oracle == true
         run: git fetch --no-tags --depth=1 origin 7d43b47b7d789b533f32d005e64596e0a07019cd
 
-      - name: Resolve pinned content revision
-        id: content
-        run: |
-          revision=$(git rev-parse HEAD:content)
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "invalid content gitlink: $revision" >&2
-            exit 1
-          fi
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-
-      - name: Restore pinned content checkout
-        id: content-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .git/modules/content
-          key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
-
-      # These operations touch independent state. Hiding content hydration and
-      # apt behind the hosted-toolchain probe removes setup from every shard's
-      # critical path while the waits and exact revision checks remain closed.
-      - name: Prepare content, dependencies, and exact Rust
+      # Content, apt and the hosted-toolchain probe operate on independent inputs.
+      - name: Prepare verified content, dependencies, and exact Rust
         id: preinstalled-rust
-        env:
-          CONTENT_REVISION: ${{ steps.content.outputs.revision }}
-          APT_PACKAGES: ${{ matrix.apt }}
-          RUSTUP_AUTO_INSTALL: '0'
+        uses: ./.github/actions/verified-content
         timeout-minutes: 10
-        run: |
-          content_log="$RUNNER_TEMP/content-materialization.log"
-          git submodule update --init --force --depth=1 --filter=blob:none content \
-            >"$content_log" 2>&1 &
-          content_pid=$!
-
-          apt_pid=
-          apt_log="$RUNNER_TEMP/native-dependencies.log"
-          if [[ -n "$APT_PACKAGES" ]]; then
-            (
-              read -r -a packages <<< "$APT_PACKAGES"
-              scripts/install-apt-packages.sh "${packages[@]}"
-            ) >"$apt_log" 2>&1 &
-            apt_pid=$!
-          fi
-
-          required='rustc 1.98.1 '
-          exact=false
-          if command -v rustup >/dev/null; then
-            while read -r toolchain _; do
-              if version=$(rustup run "$toolchain" rustc --version 2>/dev/null) &&
-                [[ "$version" == "$required"* ]]; then
-                sysroot=$(rustup run "$toolchain" rustc --print sysroot)
-                echo "$sysroot/bin" >> "$GITHUB_PATH"
-                echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
-                exact=true
-                break
-              fi
-            done < <(rustup toolchain list)
-          fi
-          echo "exact=$exact" >> "$GITHUB_OUTPUT"
-
-          failed=0
-          if ! wait "$content_pid"; then
-            failed=1
-          fi
-          cat "$content_log"
-          if [[ "$failed" -eq 0 ]]; then
-            actual=$(git -C content rev-parse HEAD) || failed=1
-            [[ "$actual" == "$CONTENT_REVISION" ]] || failed=1
-            if ! content_status=$(git -C content status --porcelain --untracked-files=all); then
-              failed=1
-            fi
-            [[ -z "$content_status" ]] || failed=1
-          fi
-          if [[ -n "$apt_pid" ]]; then
-            if ! wait "$apt_pid"; then
-              failed=1
-            fi
-            cat "$apt_log"
-          fi
-          exit "$failed"
+        with:
+          apt-packages: ${{ matrix.apt }}
+          probe-rust: 'true'
 
       - name: Install exact Rust toolchain
         if: steps.preinstalled-rust.outputs.exact != 'true'
@@ -546,9 +500,25 @@ jobs:
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: . -> target
+          cache-targets: false
           shared-key: full-parity
           save-if: false
+
+      - name: Restore verified workspace build inputs
+        uses: ./.github/actions/workspace-cache
+        with:
+          operation: restore
+          lane: landing-linux
+          target: target
+          ledger: .ci-cache-ledgers/landing.json
+          recipe: landing-v1
+
+      - name: Verify restored workspace artifacts
+        id: workspace-inputs
+        run: python3 scripts/ci-workspace-cache.py prepare --target target --recipe landing-v1 --ledger .ci-cache-ledgers/landing.json --github-output "$GITHUB_OUTPUT"
+
+      - name: 'CI cache receipt: ${{ steps.workspace-inputs.outputs.cache-state }}'
+        run: 'true'
 
       - name: Reset stale JUnit report
         if: always()
@@ -657,6 +627,12 @@ jobs:
           shared-key: windows-runtime-msvc-v2
           save-if: false
 
+      - name: Validate native Windows content timeout boundaries
+        if: matrix.installer
+        env:
+          PYTHONPATH: scripts/tests
+        run: python -m unittest test_ci_content.NativeWindowsBoundsTests
+
       - name: Run ${{ matrix.name }}
         env:
           SHARD_COMMAND: ${{ matrix.command }}
@@ -689,6 +665,47 @@ jobs:
             scripts/windows-installer.nsi
           test -s target/dist/stand-in-setup.exe
 
+  release-evidence:
+    name: Retain release qualification evidence
+    needs: [release-context, release-build, release-qualification, linux, windows-smoke]
+    if: github.event_name == 'merge_group' && needs.release-context.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Materialize verified pinned content
+        uses: ./.github/actions/verified-content
+        timeout-minutes: 10
+
+      - name: Verify all required jobs and immutable artifact digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/release-qualification-evidence.py write \
+            --repository "$REPOSITORY" --source-sha "$SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --output "$RUNNER_TEMP/release-qualification-evidence.json"
+
+      - name: Retain verified qualification receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-qualification-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/release-qualification-evidence.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
   landing-gate:
     name: Landing gate
     if: always()
@@ -701,9 +718,9 @@ jobs:
       - dependency-license-corpus
       - pull-request-quality
       - release-context
-      - release-prebuild
       - release-build
       - release-qualification
+      - release-evidence
       - linux
       - windows-smoke
     defaults:
@@ -717,8 +734,8 @@ jobs:
           LICENSE_CORPUS_RESULT: ${{ needs.dependency-license-corpus.result }}
           QUALITY_RESULT: ${{ needs.pull-request-quality.result }}
           RELEASE_CONTEXT_RESULT: ${{ needs.release-context.result }}
-          RELEASE_PREBUILD_RESULT: ${{ needs.release-prebuild.result }}
           RELEASE_BUILD_RESULT: ${{ needs.release-build.result }}
+          RELEASE_EVIDENCE_RESULT: ${{ needs.release-evidence.result }}
           RELEASE_QUALIFICATION_RESULT: ${{ needs.release-qualification.result }}
           IS_RELEASE: ${{ needs.release-context.outputs.release }}
           LINUX_RESULT: ${{ needs.linux.result }}
@@ -738,9 +755,9 @@ jobs:
             require_result license-corpus "$LICENSE_CORPUS_RESULT" success
             require_result quality "$QUALITY_RESULT" success
             require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
-            require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
             require_result release-build "$RELEASE_BUILD_RESULT" skipped
             require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
+            require_result release-evidence "$RELEASE_EVIDENCE_RESULT" skipped
             require_result linux "$LINUX_RESULT" skipped
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" skipped
           elif [[ "$EVENT_NAME" == "merge_group" ]]; then
@@ -750,14 +767,14 @@ jobs:
             require_result release-context "$RELEASE_CONTEXT_RESULT" success
             case "$IS_RELEASE" in
               true)
-                require_result release-prebuild "$RELEASE_PREBUILD_RESULT" success
                 require_result release-build "$RELEASE_BUILD_RESULT" success
                 require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" success
+                require_result release-evidence "$RELEASE_EVIDENCE_RESULT" success
                 ;;
               false)
-                require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
                 require_result release-build "$RELEASE_BUILD_RESULT" skipped
                 require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
+                require_result release-evidence "$RELEASE_EVIDENCE_RESULT" skipped
                 ;;
               *)
                 echo "::error::release context output was '$IS_RELEASE'"
@@ -771,61 +788,50 @@ jobs:
             require_result license-corpus "$LICENSE_CORPUS_RESULT" skipped
             require_result quality "$QUALITY_RESULT" skipped
             require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
-            require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
             require_result release-build "$RELEASE_BUILD_RESULT" skipped
             require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
+            require_result release-evidence "$RELEASE_EVIDENCE_RESULT" skipped
             require_result linux "$LINUX_RESULT" success
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
           fi
           exit "$failed"
 
-      # The v0.9.4 release candidate took 1,797 seconds on its critical Windows
-      # lane (Landing run 31343777447). This outer job measures the complete
-      # reusable build action without adding its own runtime to that span.
-      - name: Enforce release build latency
-        if: github.event_name == 'merge_group' && needs.release-context.outputs.release == 'true'
+  latency-report:
+    name: CI latency report
+    continue-on-error: true
+    if: always() && github.event_name != 'pull_request'
+    needs: [landing-gate, release-context]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Measure original candidate clocks and comparable history
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          MAX_RELEASE_BUILD_SECONDS: '898'
           REPOSITORY: ${{ github.repository }}
+          IS_RELEASE: ${{ needs.release-context.outputs.release }}
         run: |
-          response=$(gh api \
-            "repos/${REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100")
-          elapsed=$(jq -er '
-            def expected: [
-              "Build release candidate / Package linux",
-              "Build release candidate / Package macos",
-              "Build release candidate / Package windows"
-            ] | sort;
-            if (.jobs | type) != "array"
-              or (.total_count | type) != "number"
-              or .total_count != (.jobs | length)
-            then error("incomplete workflow job inventory")
-            else .jobs end
-            | map(select(.name | startswith("Build release candidate / "))) as $jobs
-            | ($jobs | map(.name) | sort) as $names
-            | if $names != expected
-              then error("unexpected release-build job inventory: \($names | join(", "))")
-              else $jobs end
-            | if all(.[];
-                .status == "completed"
-                and .conclusion == "success"
-                and (.started_at | type) == "string"
-                and (.completed_at | type) == "string")
-              then .
-              else error("release-build job is incomplete or unsuccessful") end
-            | ((map(.completed_at | fromdateiso8601) | max)
-              - (map(.started_at | fromdateiso8601) | min))
-            | if . < 0 or . != floor
-              then error("invalid release-build elapsed time")
-              else . end
-          ' <<< "$response")
-          if [[ ! "$elapsed" =~ ^[0-9]+$ ]]; then
-            echo "invalid release build elapsed time: $elapsed" >&2
-            exit 1
-          fi
-          if [[ "$elapsed" -gt "$MAX_RELEASE_BUILD_SECONDS" ]]; then
-            echo "release build took ${elapsed}s, exceeding ${MAX_RELEASE_BUILD_SECONDS}s" >&2
-            exit 1
-          fi
-          echo "release build completed in ${elapsed}s (limit ${MAX_RELEASE_BUILD_SECONDS}s)"
+          python3 scripts/ci-latency-report.py --repository "$REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --phase landing --allow-running true \
+            --release "${IS_RELEASE:-false}" --history-limit 20 \
+            --output "$RUNNER_TEMP/ci-latency.json"
+
+      - name: Retain candidate latency evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-latency-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-latency.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 30
