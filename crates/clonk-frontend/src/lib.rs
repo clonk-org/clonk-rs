@@ -611,8 +611,7 @@ mod tests {
                 let scalar = sampler.modulation_sample(normalized_x, normalized_y);
                 let cached = sampler
                     .modulation_sample_for_axes(x_samples[x as usize], y_samples[y as usize]);
-                front_assert_eq! {cached.modulation => scalar.modulation};
-                front_assert_eq! {cached.weights => scalar.weights};
+                front_assert_eq! {cached => scalar};
                 front_assert_eq! {cached.interpolate() => scalar.interpolate()};
             }
         }
@@ -650,7 +649,7 @@ mod tests {
         front_assert_eq! {local_box.x_ranges[0] => (0.0, 16.0)};
         front_assert_eq! {world_aligned_box.x_ranges[0] => (0.0, 11.0)};
 
-        let vertex_first = FogModulationSample {
+        let vertex_first = FogModulationSample::Vertex {
             modulation: [0, 0x0002_0202, 0, 0],
             weights: [0.5, 0.5, 0.0, 0.0],
         };
@@ -665,7 +664,7 @@ mod tests {
             SpriteBlitState {
                 mode: C4GFXBLIT_MOD2,
                 modulation: Some(0x00ff_ffff),
-                fog_modulation: Some(FogModulationSample {
+                fog_modulation: Some(FogModulationSample::Vertex {
                     modulation: [0, 0x0002_0202, 0, 0],
                     weights: [1.0, 0.0, 0.0, 0.0],
                 }),
@@ -2530,7 +2529,7 @@ mod tests {
                 0,
                 None,
             )
-            .with_fog_modulation(FogModulationSample {
+            .with_fog_modulation(FogModulationSample::Vertex {
                 modulation: [0x0040_4040, 0x0080_8080, 0x00c0_c0c0, 0x00ff_ffff],
                 weights,
             });
@@ -3705,7 +3704,7 @@ mod tests {
         let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
-        let blit = SpriteBlitState::normal().with_fog_modulation(FogModulationSample {
+        let blit = SpriteBlitState::normal().with_fog_modulation(FogModulationSample::Vertex {
             modulation: [0x0020_2020, 0x0040_4040, 0x0060_6060, 0x0080_8080],
             weights: [0.25; 4],
         });
