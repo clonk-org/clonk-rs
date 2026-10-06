@@ -134,12 +134,20 @@ impl GameApp {
     }
 
     fn finish_runtime_flash_draw(&mut self) {
-        let Some(message) = self.runtime_flash_message.as_mut() else {
+        if self.saves.pending_native_slots != 0 {
+            return;
+        }
+        let notice = if self.saves.notification.is_some() {
+            &mut self.saves.notification
+        } else {
+            &mut self.runtime_flash_message
+        };
+        let Some(message) = notice.as_mut() else {
             return;
         };
         message.remaining_draws = message.remaining_draws.saturating_sub(1);
         if message.remaining_draws == 0 {
-            self.runtime_flash_message = None;
+            *notice = None;
         }
     }
 

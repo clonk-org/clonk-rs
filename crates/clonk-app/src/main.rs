@@ -3633,6 +3633,8 @@ impl GameApp {
             && self.ingame_selection_frame().is_none()
             && !self.dialogs.help_visible
             && !self.runtime_halt_active()
+            && self.saves.notification.is_none()
+            && self.saves.pending_native_slots == 0
             && self
                 .runtime_flash_message
                 .as_ref()
@@ -4595,6 +4597,9 @@ impl GameApp {
     }
 
     fn preflight_visible_runtime_flash(&self) -> Result<Option<RuntimeFlashMessage>> {
+        if let Some(message) = self.visible_save_notification() {
+            return Ok(Some(message));
+        }
         let Some(message) = self
             .runtime_flash_message
             .as_ref()
@@ -9788,6 +9793,7 @@ impl GameApp {
         self.clear_pending_league_player_auth();
         self.dialogs.help_visible = false;
         self.runtime_flash_message = None;
+        self.saves.notification = None;
         self.dialogs.client_list = None;
         self.dialogs.stack.clear();
         self.dialogs.running_active = None;
