@@ -1383,10 +1383,38 @@ fn capture_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
         f32::from(modulation[2]) / 255.0,
         f32::from(transparency) / 255.0,
     ];
+    let software_sprite = surface.add_gpu_software_sprite(clonk_graphics::GpuSoftwareSprite {
+        destination: [tx, ty, rect.size.width, rect.size.height],
+        source: [
+            inset[0],
+            inset[1],
+            image.width() as f32,
+            image.height() as f32,
+        ],
+        inverse: clonk_graphics::Transform::identity(),
+        translation: [0.0, 0.0],
+        flip_x: false,
+        inclusive_source_end: false,
+        gamma: gamma
+            .filter(|gamma| !gamma.is_passthrough())
+            .map(clonk_graphics::GpuGammaLut::from_ramp),
+        mapping: clonk_graphics::GpuSoftwareSpriteMapping::Font {
+            shear,
+            center_y,
+            texture_indent,
+            physical_size: physical_texture_size,
+            normalize_transparent: crate::active_advanced_renderer_config()
+                .is_some_and(|config| config.changes_generic_textured_blit(0, true)),
+        },
+        fog: None,
+    });
     let vertices = std::array::from_fn(|index| {
-        GpuVertex::new(positions[index], uv[index], packed_modulation)
+        let mut vertex = GpuVertex::new(positions[index], uv[index], packed_modulation)
             .with_outer_modulation(GpuOuterModulation::Combine)
             .with_sample_tile(0.0, 0.0, physical_texture_size)
+            .with_software_alpha_mode(clonk_graphics::GpuSolidAlphaMode::NonSeparate);
+        vertex.software_sprite = software_sprite;
+        vertex
     });
     let resource = texture.gpu_texture_resource();
     if !resource.is_valid() {
@@ -2342,6 +2370,100 @@ pub fn build_native_font_set_recipe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_fractional_font_facets_preserve_local_sampling_and_padding() {
+        // StdFont.cpp:814-903 submits native glyph facets; StdGL.cpp:1072-1075
+        // filters the selected physical texture before modulation and blending.
+        let image = ImageData::new(
+            3,
+            5,
+            (0..15)
+                .flat_map(|index| {
+                    [
+                        37 + index * 11,
+                        211 - index * 7,
+                        53 + index * 9,
+                        if index == 4 { 0 } else { 133 + index * 8 },
+                    ]
+                })
+                .collect(),
+        );
+        let mut atlas_pixels = [255, 255, 255, 0].repeat(64 * 64);
+        for y in 0..5 {
+            let offset = ((y + 7) * 64 + 9) * 4;
+            atlas_pixels[offset..offset + 12]
+                .copy_from_slice(&image.pixels()[y * 12..(y + 1) * 12]);
+        }
+        let atlas = ImageData::new(64, 64, atlas_pixels);
+        for config in [
+            crate::AdvancedRendererConfig::DEFAULT,
+            crate::AdvancedRendererConfig {
+                tex_indent: 250,
+                blit_offset: 25,
+                no_alpha_add: true,
+                ..crate::AdvancedRendererConfig::DEFAULT
+            },
+        ] {
+            let _config = crate::activate_advanced_renderer_config(config);
+            let mut expected = Surface::new(32, 32, clonk_graphics::PixelFormat::Rgba8888);
+            expected.fill(Color::opaque(8, 12, 24));
+            draw_scaled_native_image(
+                &mut expected,
+                &image,
+                Some((&atlas, [9.0, 7.0])),
+                2.37,
+                3.19,
+                17.3,
+                21.7,
+                None,
+                -0.3,
+                [177, 193, 213],
+                187,
+                Some(32),
+            );
+            let mut captured = Surface::new(32, 32, clonk_graphics::PixelFormat::Rgba8888);
+            captured.fill(Color::opaque(8, 12, 24));
+            captured.begin_gpu_scene_capture();
+            draw_scaled_native_image(
+                &mut captured,
+                &image,
+                Some((&atlas, [9.0, 7.0])),
+                2.37,
+                3.19,
+                17.3,
+                21.7,
+                None,
+                -0.3,
+                [177, 193, 213],
+                187,
+                Some(32),
+            );
+            let scene = captured
+                .take_gpu_scene_capture()
+                .expect("native capture")
+                .into_scene([32, 32], Color::opaque(8, 12, 24), &GammaRamp::identity());
+            let mut actual = vec![0; 32 * 32 * 4];
+            clonk_graphics::CpuSceneRenderer::default()
+                .render(&scene, &mut actual)
+                .expect("retained font raster");
+            let mismatch = actual
+                .iter()
+                .zip(expected.pixels())
+                .position(|(actual, expected)| actual != expected);
+            assert_eq!(
+                mismatch,
+                None,
+                "config={config:?}, first={:?}",
+                mismatch.map(|offset| (
+                    offset / 4 % 32,
+                    offset / 4 / 32,
+                    &actual[offset / 4 * 4..offset / 4 * 4 + 4],
+                    &expected.pixels()[offset / 4 * 4..offset / 4 * 4 + 4]
+                ))
+            );
+        }
+    }
 
     fn endeavour_bytes() -> Vec<u8> {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

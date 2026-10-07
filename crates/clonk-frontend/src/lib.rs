@@ -23,6 +23,8 @@ pub mod game_option_buttons;
 mod graphics_system;
 pub mod hud;
 pub use clonk_gui::ime;
+#[cfg(test)]
+mod cpu_scene_tests;
 pub mod enhanced_chat;
 pub mod enhanced_chat_view;
 pub mod info_dialog;
@@ -19019,7 +19021,7 @@ mod tests {
                 front_assert! {captured.draw_ground_textured(engine.landscape(), None)};
                 let scene = captured.finish_gpu_scene_capture(&gamma).test_value();
                 capture_samples.push(started.elapsed());
-                for texture in scene.textures {
+                for texture in &scene.textures {
                     captured_dirty_rects = captured_dirty_rects.saturating_add(texture.dirty.len());
                     captured_dirty_bytes = captured_dirty_bytes.saturating_add(
                         texture.dirty.iter().fold(0, |bytes, rect| {

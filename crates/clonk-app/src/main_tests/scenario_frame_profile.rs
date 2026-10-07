@@ -27,32 +27,41 @@ struct FrameProfileSample {
     update: std::time::Duration,
     snapshot: std::time::Duration,
     render: std::time::Duration,
-    #[cfg(target_os = "linux")]
-    render_cpu: std::time::Duration,
+    render_cpu: Option<std::time::Duration>,
     update_allocation_calls: u64,
     update_allocation_bytes: u64,
     render_allocation_calls: u64,
     render_allocation_bytes: u64,
+    rasterized_tiles: u64,
+    reused_tiles: u64,
+    render_max_allocation_bytes: u64,
+    render_frame_sized_allocation_calls: u64,
+    camera_origin: [f32; 2],
 }
 
 #[cfg(target_os = "linux")]
-fn frame_profile_process_cpu() -> std::time::Duration {
+fn frame_profile_process_cpu_time() -> Option<std::time::Duration> {
     #[repr(C)]
     struct Timespec {
         seconds: std::ffi::c_long,
         nanoseconds: std::ffi::c_long,
     }
     unsafe extern "C" {
-        fn clock_gettime(clock: std::ffi::c_int, value: *mut Timespec) -> std::ffi::c_int;
+        fn clock_gettime(clock_id: std::ffi::c_int, time: *mut Timespec) -> std::ffi::c_int;
     }
-    let mut value = Timespec {
+    let mut time = Timespec {
         seconds: 0,
         nanoseconds: 0,
     };
-    // Linux CLOCK_PROCESS_CPUTIME_ID includes the Rayon worker while excluding
-    // descheduled time. Keep wall time as the acceptance metric.
-    assert_eq!(unsafe { clock_gettime(2, &mut value) }, 0);
-    std::time::Duration::new(value.seconds as u64, value.nanoseconds as u32)
+    // Linux CLOCK_PROCESS_CPUTIME_ID includes the sole Rayon worker as well
+    // as the calling thread. The initialized output has the native C layout.
+    let result = unsafe { clock_gettime(2, &mut time) };
+    (result == 0).then(|| std::time::Duration::new(time.seconds as u64, time.nanoseconds as u32))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn frame_profile_process_cpu_time() -> Option<std::time::Duration> {
+    None
 }
 
 impl FrameProfileSample {
@@ -67,6 +76,10 @@ enum FrameProfilePath {
     Software,
     /// `GameApp::render_retained_gpu_frame` lowering into a `GpuScene`.
     Retained,
+    RetainedCpu,
+    RetainedCpuRedraw,
+    RetainedCpuScroll,
+    RetainedCpuLightning,
 }
 
 impl FrameProfilePath {
@@ -74,6 +87,10 @@ impl FrameProfilePath {
         match self {
             Self::Software => "software",
             Self::Retained => "retained",
+            Self::RetainedCpu => "retained_cpu",
+            Self::RetainedCpuRedraw => "retained_cpu_redraw",
+            Self::RetainedCpuScroll => "retained_cpu_scroll",
+            Self::RetainedCpuLightning => "retained_cpu_lightning",
         }
     }
 }
@@ -86,7 +103,7 @@ impl FrameProfilePath {
 fn present_frame(app: &mut GameApp, path: FrameProfilePath, frame: &mut [u8]) {
     match path {
         FrameProfilePath::Software => {
-            app.render(frame).test_value();
+            app.render_immediate_oracle(frame).test_value();
         }
         FrameProfilePath::Retained => {
             let rendered = app
@@ -96,6 +113,27 @@ fn present_frame(app: &mut GameApp, path: FrameProfilePath, frame: &mut [u8]) {
                 ))
                 .test_value();
             drop(rendered);
+        }
+        FrameProfilePath::RetainedCpu
+        | FrameProfilePath::RetainedCpuRedraw
+        | FrameProfilePath::RetainedCpuScroll
+        | FrameProfilePath::RetainedCpuLightning => {
+            if matches!(
+                path,
+                FrameProfilePath::RetainedCpuScroll | FrameProfilePath::RetainedCpuLightning
+            ) {
+                retained_cpu_stress_input(
+                    app,
+                    path == FrameProfilePath::RetainedCpuScroll,
+                    path == FrameProfilePath::RetainedCpuLightning,
+                );
+            }
+            if path == FrameProfilePath::RetainedCpuRedraw {
+                for renderer in &mut app.presentation.cpu_scene_renderers {
+                    renderer.invalidate();
+                }
+            }
+            app.render(frame).test_value();
         }
     }
 }
@@ -111,32 +149,50 @@ fn frame_profile_sample(
             app.test_update();
             (started.elapsed(), app.engine.snapshot_timings().total)
         });
-    let (render_times, render_allocation_calls, render_allocation_bytes) =
+    let ((render, render_cpu), render_allocation_calls, render_allocation_bytes) =
         measure_app_profile_allocations(|| {
-            #[cfg(target_os = "linux")]
-            let cpu_started = frame_profile_process_cpu();
+            let cpu_started = frame_profile_process_cpu_time();
             let started = std::time::Instant::now();
             present_frame(app, path, frame);
-            let elapsed = started.elapsed();
-            #[cfg(target_os = "linux")]
-            return (elapsed, frame_profile_process_cpu() - cpu_started);
-            #[cfg(not(target_os = "linux"))]
-            elapsed
+            let wall = started.elapsed();
+            let cpu = cpu_started
+                .zip(frame_profile_process_cpu_time())
+                .map(|(started, finished)| finished.saturating_sub(started));
+            (wall, cpu)
         });
-    #[cfg(target_os = "linux")]
-    let (render, render_cpu) = render_times;
-    #[cfg(not(target_os = "linux"))]
-    let render = render_times;
+    let camera_origin = app
+        .rendering
+        .graphics
+        .active_viewport_projections()
+        .first()
+        .map_or([0.0; 2], |viewport| {
+            [viewport.content_origin_x, viewport.content_origin_y]
+        });
     FrameProfileSample {
+        render_max_allocation_bytes: PROFILE_MAX_ALLOCATION_BYTES.load(AtomicOrdering::Relaxed),
+        render_frame_sized_allocation_calls: PROFILE_FRAME_SIZED_ALLOCATION_CALLS
+            .load(AtomicOrdering::Relaxed),
+        camera_origin,
         update,
         snapshot,
         render,
-        #[cfg(target_os = "linux")]
         render_cpu,
         update_allocation_calls,
         update_allocation_bytes,
         render_allocation_calls,
         render_allocation_bytes,
+        rasterized_tiles: app
+            .presentation
+            .cpu_scene_renderers
+            .iter()
+            .map(|r| r.stats().rasterized_tiles as u64)
+            .sum(),
+        reused_tiles: app
+            .presentation
+            .cpu_scene_renderers
+            .iter()
+            .map(|r| r.stats().reused_tiles as u64)
+            .sum(),
     }
 }
 
@@ -170,6 +226,38 @@ fn report_frame_profile(
     app: &GameApp,
     samples: &[FrameProfileSample],
 ) {
+    if let Some(directory) = std::env::var_os("CLONK_FRAME_PROFILE_OUTPUT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).test_value();
+        let name = scenario_key.rsplit('/').next().test_value();
+        let mut raw = String::from("sample,update_ns,snapshot_ns,render_wall_ns,render_process_cpu_ns,update_allocation_calls,update_allocation_bytes,render_allocation_calls,render_allocation_bytes,rasterized_tiles,reused_tiles,render_max_allocation_bytes,render_frame_sized_allocation_calls,camera_x,camera_y\n");
+        for (index, sample) in samples.iter().enumerate() {
+            use std::fmt::Write;
+            writeln!(
+                &mut raw,
+                "{index},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                sample.update.as_nanos(),
+                sample.snapshot.as_nanos(),
+                sample.render.as_nanos(),
+                sample
+                    .render_cpu
+                    .map_or_else(String::new, |cpu| cpu.as_nanos().to_string()),
+                sample.update_allocation_calls,
+                sample.update_allocation_bytes,
+                sample.render_allocation_calls,
+                sample.render_allocation_bytes,
+                sample.rasterized_tiles,
+                sample.reused_tiles,
+                sample.render_max_allocation_bytes,
+                sample.render_frame_sized_allocation_calls,
+                sample.camera_origin[0],
+                sample.camera_origin[1]
+            )
+            .test_value();
+        }
+        std::fs::write(directory.join(format!("{name}-{}.csv", path.label())), raw).test_value();
+    }
+    eprintln!("scenario_frame_profile_extra scenario={scenario_key} path={} render_max_allocation_bytes={} render_frame_sized_allocation_calls_total={} camera_x_range={:?} camera_y_range={:?}", path.label(), samples.iter().map(|sample| sample.render_max_allocation_bytes).max().unwrap_or(0), samples.iter().map(|sample| sample.render_frame_sized_allocation_calls).sum::<u64>(), samples.iter().map(|sample| sample.camera_origin[0]).fold([f32::INFINITY,f32::NEG_INFINITY],|r,v|[r[0].min(v),r[1].max(v)]), samples.iter().map(|sample| sample.camera_origin[1]).fold([f32::INFINITY,f32::NEG_INFINITY],|r,v|[r[0].min(v),r[1].max(v)]));
     let snapshot = app.engine.snapshot();
     eprintln!(
         "scenario_frame_profile scenario={scenario_key} path={} window={FRAME_PROFILE_WIDTH}x{FRAME_PROFILE_HEIGHT} \
@@ -178,8 +266,9 @@ frame_p50_ms={:.3} frame_p95_ms={:.3} frame_p99_ms={:.3} \
 update_p50_ms={:.3} update_p95_ms={:.3} \
 snapshot_p50_ms={:.3} \
 render_p50_ms={:.3} render_p95_ms={:.3} render_p99_ms={:.3} \
+render_cpu_p50_ms={:.3} render_cpu_p95_ms={:.3} render_cpu_p99_ms={:.3} \
 update_allocation_calls_mean={} update_allocation_bytes_mean={} \
-render_allocation_calls_mean={} render_allocation_bytes_mean={}",
+render_allocation_calls_mean={} render_allocation_bytes_mean={} rasterized_tiles_mean={} reused_tiles_mean={}",
         path.label(),
         samples.len(),
         snapshot.objects.len(),
@@ -203,18 +292,23 @@ render_allocation_calls_mean={} render_allocation_bytes_mean={}",
         frame_profile_percentile(samples, 0.50, |sample| sample.render),
         frame_profile_percentile(samples, 0.95, |sample| sample.render),
         frame_profile_percentile(samples, 0.99, |sample| sample.render),
+        frame_profile_percentile(samples, 0.50, |sample| sample.render_cpu.unwrap_or_default()),
+        frame_profile_percentile(samples, 0.95, |sample| sample.render_cpu.unwrap_or_default()),
+        frame_profile_percentile(samples, 0.99, |sample| sample.render_cpu.unwrap_or_default()),
         frame_profile_mean(samples, |sample| sample.update_allocation_calls),
         frame_profile_mean(samples, |sample| sample.update_allocation_bytes),
         frame_profile_mean(samples, |sample| sample.render_allocation_calls),
         frame_profile_mean(samples, |sample| sample.render_allocation_bytes),
+        frame_profile_mean(samples, |sample| sample.rasterized_tiles),
+        frame_profile_mean(samples, |sample| sample.reused_tiles),
     );
     #[cfg(target_os = "linux")]
     eprintln!(
         "scenario_frame_cpu scenario={scenario_key} path={} render_cpu_p50_ms={:.3} render_cpu_p95_ms={:.3} render_cpu_p99_ms={:.3}",
         path.label(),
-        frame_profile_percentile(samples, 0.50, |sample| sample.render_cpu),
-        frame_profile_percentile(samples, 0.95, |sample| sample.render_cpu),
-        frame_profile_percentile(samples, 0.99, |sample| sample.render_cpu),
+        frame_profile_percentile(samples, 0.50, |sample| sample.render_cpu.unwrap_or_default()),
+        frame_profile_percentile(samples, 0.95, |sample| sample.render_cpu.unwrap_or_default()),
+        frame_profile_percentile(samples, 0.99, |sample| sample.render_cpu.unwrap_or_default()),
     );
 }
 
@@ -223,7 +317,15 @@ fn profile_one_pass(
     scenario_key: &str,
     path: FrameProfilePath,
 ) {
-    clonk_engine::particles::install_presentation_safe_random_seed(1);
+    struct SeedGuard;
+    impl Drop for SeedGuard {
+        fn drop(&mut self) {
+            clonk_engine::particles::clear_presentation_safe_random_seed();
+        }
+    }
+    let _seed = SeedGuard;
+    crate::seed_classic_safe_random(587);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
     let mut fixture = prepared.instantiate_with_window(
         "Frame Profile",
         false,
@@ -232,6 +334,15 @@ fn profile_one_pass(
     );
     let app = &mut fixture.app;
     let mut frame = vec![0_u8; FRAME_PROFILE_WIDTH as usize * FRAME_PROFILE_HEIGHT as usize * 4];
+    if path == FrameProfilePath::RetainedCpuScroll {
+        prepare_retained_cpu_observer(app);
+    }
+    if matches!(
+        path,
+        FrameProfilePath::RetainedCpuScroll | FrameProfilePath::RetainedCpuLightning
+    ) {
+        app.render(&mut frame).test_value();
+    }
     for _ in 0..FRAME_PROFILE_WARMUP_FRAMES {
         app.test_update();
         present_frame(app, path, &mut frame);
@@ -305,7 +416,7 @@ fn profile_one_pass(
             )
             .test_value();
             #[cfg(target_os = "linux")]
-            write!(csv, ",{}", sample.render_cpu.as_nanos()).test_value();
+            write!(csv, ",{}", sample.render_cpu.unwrap_or_default().as_nanos()).test_value();
             csv.push('\n');
         }
         std::fs::write(output.join(format!("{stem}.csv")), csv).test_value();
@@ -334,7 +445,7 @@ fn profile_one_pass(
             report["render_cpu_ns"] = serde_json::to_value(
                 samples
                     .iter()
-                    .map(|sample| sample.render_cpu.as_nanos() as u64)
+                    .map(|sample| sample.render_cpu.unwrap_or_default().as_nanos() as u64)
                     .collect::<Vec<_>>(),
             )
             .test_value();
@@ -359,7 +470,12 @@ fn profile_one_pass(
 
 fn profile_one_scenario(scenario_key: &str) {
     let prepared = PreparedRealInstalledScenario::new(scenario_key);
-    for path in [FrameProfilePath::Software, FrameProfilePath::Retained] {
+    for path in [
+        FrameProfilePath::Software,
+        FrameProfilePath::Retained,
+        FrameProfilePath::RetainedCpu,
+        FrameProfilePath::RetainedCpuRedraw,
+    ] {
         if std::env::var("CLONK_FRAME_PROFILE_PATH")
             .map_or(true, |selected| selected == path.label())
         {
@@ -381,8 +497,13 @@ fn scenario_frame_profile() {
     );
     let selected = std::env::var("CLONK_FRAME_PROFILE_SCENARIO").ok();
     assert!(
-        std::env::var("CLONK_FRAME_PROFILE_PATH").map_or(true, |selected| ["software", "retained"]
-            .contains(&selected.as_str())),
+        std::env::var("CLONK_FRAME_PROFILE_PATH").map_or(true, |selected| [
+            "software",
+            "retained",
+            "retained_cpu",
+            "retained_cpu_redraw"
+        ]
+        .contains(&selected.as_str())),
         "unknown profile path"
     );
     assert!(
@@ -398,5 +519,124 @@ fn scenario_frame_profile() {
         {
             profile_one_scenario(scenario_key);
         }
+    }
+}
+
+#[test]
+#[ignore = "manual retained CPU timing and exact production capture probe"]
+fn scenario_cpu_scene_profile() {
+    struct PresentationSeedGuard;
+    impl Drop for PresentationSeedGuard {
+        fn drop(&mut self) {
+            clonk_engine::particles::clear_presentation_safe_random_seed();
+        }
+    }
+    let _seed_guard = PresentationSeedGuard;
+    let prepared = PreparedRealInstalledScenario::new(FRAME_PROFILE_SCENARIOS[2]);
+    crate::seed_classic_safe_random(587);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
+    let mut oracle = prepared.instantiate_with_window(
+        "CPU scene",
+        false,
+        FRAME_PROFILE_WIDTH,
+        FRAME_PROFILE_HEIGHT,
+    );
+    crate::seed_classic_safe_random(587);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
+    let mut retained = prepared.instantiate_with_window(
+        "CPU scene",
+        false,
+        FRAME_PROFILE_WIDTH,
+        FRAME_PROFILE_HEIGHT,
+    );
+    let mut expected = vec![0; FRAME_PROFILE_WIDTH as usize * FRAME_PROFILE_HEIGHT as usize * 4];
+    let mut actual = expected.clone();
+    let mut renderer = clonk_graphics::CpuSceneRenderer::default();
+    let warmup = std::env::var("CLONK_CPU_SCENE_PROFILE_WARMUP_FRAMES")
+        .map(|value| value.parse::<usize>().test_value())
+        .unwrap_or(FRAME_PROFILE_WARMUP_FRAMES);
+    for _ in 0..warmup {
+        oracle.app.test_update();
+        retained.app.test_update();
+        oracle
+            .app
+            .render_immediate_oracle(&mut expected)
+            .test_value();
+        retained.app.render(&mut actual).test_value();
+    }
+    for tick in 0..20 {
+        oracle.app.test_update();
+        retained.app.test_update();
+        assert!(
+            oracle.app.snapshot == retained.app.snapshot,
+            "different input snapshots at tick {tick}"
+        );
+        oracle
+            .app
+            .render_immediate_oracle(&mut expected)
+            .test_value();
+        let gamma = retained.app.retained_gpu_frame_gamma();
+        let gamma_mode =
+            retained_gpu_gamma_mode(retained.app.rendering.graphics.advanced_renderer_config());
+        let scene = retained
+            .app
+            .capture_retained_logical_gpu_frame(
+                clonk_graphics::GpuPresentation::identity(
+                    FRAME_PROFILE_WIDTH,
+                    FRAME_PROFILE_HEIGHT,
+                ),
+                &gamma,
+                gamma_mode,
+                false,
+            )
+            .test_value();
+        assert_eq!(scene.layers.len(), 1);
+        let cpu_started = frame_profile_process_cpu_time();
+        let started = std::time::Instant::now();
+        renderer.invalidate();
+        renderer
+            .render(&scene.layers[0].scene, &mut actual)
+            .test_value();
+        eprintln!(
+            "retained_cpu_capture tick={tick} elapsed_ns={} cpu_ns={:?}",
+            started.elapsed().as_nanos(),
+            cpu_started
+                .zip(frame_profile_process_cpu_time())
+                .map(|(start, end)| end.saturating_sub(start).as_nanos())
+        );
+        let mismatch = actual
+            .iter()
+            .zip(&expected)
+            .position(|(actual, expected)| actual != expected);
+        assert_eq!(
+            mismatch,
+            None,
+            "tick={tick} first={:?}",
+            mismatch.map(|offset| (
+                offset / 4 % FRAME_PROFILE_WIDTH as usize,
+                offset / 4 / FRAME_PROFILE_WIDTH as usize,
+                &actual[offset / 4 * 4..offset / 4 * 4 + 4],
+                &expected[offset / 4 * 4..offset / 4 * 4 + 4]
+            ))
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual 500-frame exact comparison of all three production scenario captures"]
+fn scenario_cpu_production_capture_profile() {
+    assert_retained_cpu_real_scenarios_match_immediate_captures(500);
+}
+
+#[test]
+#[ignore = "manual fast-scroll and full-screen lightning output profiling probe"]
+fn scenario_cpu_stress_profile() {
+    let scenario = FRAME_PROFILE_SCENARIOS[2];
+    let prepared = PreparedRealInstalledScenario::new(scenario);
+    for path in [
+        FrameProfilePath::RetainedCpuScroll,
+        FrameProfilePath::RetainedCpuLightning,
+    ] {
+        profile_one_pass(&prepared, scenario, path);
     }
 }

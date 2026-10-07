@@ -4948,3 +4948,246 @@ include!("main_tests/scenario_frame_profile.rs");
 
 include_main_test_fragment!("app-test-shard-10", "main_tests/voice_setup.rs");
 include_main_test_fragment!("app-test-shard-10", "main_tests/unified_settings.rs");
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn retained_cpu_composes_logical_layers_and_native_load_in_painter_order() {
+    use clonk_graphics::*;
+    let make_scene = |extent, clear| {
+        GpuScene::new(
+            extent,
+            clear,
+            GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+    let frame = RetainedGpuFrame {
+        layers: vec![
+            RetainedGpuFrameLayer {
+                software_fade: None,
+                scene: make_scene([2, 1], Color::opaque(17, 31, 73)),
+                presentation: GpuPresentation::identity(2, 1),
+                owner: None,
+                software: RetainedSoftwareLayer::Base,
+            },
+            RetainedGpuFrameLayer {
+                software_fade: None,
+                scene: make_scene([2, 1], Color::opaque(99, 2, 3)),
+                presentation: GpuPresentation::identity(2, 1),
+                owner: None,
+                software: RetainedSoftwareLayer::Overlay {
+                    clip: Some(Rect::new(1, 0, 1, 1)),
+                },
+            },
+            RetainedGpuFrameLayer {
+                software_fade: None,
+                scene: make_scene([4, 2], Color::opaque(255, 0, 0)),
+                presentation: GpuPresentation::identity(4, 2),
+                owner: None,
+                software: RetainedSoftwareLayer::Physical,
+            },
+        ],
+        capture_stats: Default::default(),
+        physical_damage: None,
+    };
+    let mut presenter = clonk_scaling::FramePresenter::new(2.0, 4, 2);
+    let mut renderers = Vec::new();
+    let mut output = vec![0; 32];
+    frame
+        .render_cpu(&mut renderers, &mut presenter, &mut output)
+        .test_value();
+    // The empty physical layer loads the accumulated image. The logical clip
+    // covers only the two right physical pixels after scale.
+    assert_eq!(
+        output,
+        [
+            17, 31, 73, 255, 17, 31, 73, 255, 99, 2, 3, 255, 99, 2, 3, 255, 17, 31, 73, 255, 17,
+            31, 73, 255, 99, 2, 3, 255, 99, 2, 3, 255
+        ]
+    );
+}
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn retained_native_glyph_lowering_preserves_fixed_function_no_alpha_add() {
+    use clonk_graphics::clonk_font::{CapturedClonkText, TextAlign};
+    let mut app = new_menu_app(80, 40);
+    install_native_test_fonts(&mut app, 1.0);
+    app.console_session.enabled = true;
+    let config = clonk_frontend::AdvancedRendererConfig {
+        no_alpha_add: true,
+        disable_gamma: true,
+        ..clonk_frontend::AdvancedRendererConfig::DEFAULT
+    };
+    app.rendering.graphics.set_advanced_renderer_config(config);
+    let fonts = app.native_startup_fonts.test_ref().clone();
+    let command = CapturedClonkText {
+        role: ClonkFontRole::GuiText,
+        x: 4,
+        y: 4,
+        text: "Test".into(),
+        color: [177, 193, 213, 64],
+        align: TextAlign::Left,
+        markup: false,
+        clip: None,
+        gamma: None,
+        images: Vec::new(),
+        zoom: 1.0,
+    };
+    let mut expected = Surface::new(80, 40, PixelFormat::Rgba8888);
+    expected.fill(Color::opaque(8, 12, 24));
+    {
+        // StdFont.cpp:814-903 lowers glyph facets under the active CStdGL
+        // NoAlphaAdd policy, including scale-native replay after logical capture.
+        let _config = clonk_frontend::activate_advanced_renderer_config(config);
+        fonts.draw_captured_text_to(&mut expected, std::slice::from_ref(&command), (80, 40));
+    }
+    app.presentation.pending_native_presentation = Some(NativePresentationPlan {
+        batches: vec![NativePresentationBatch {
+            software_fade: None,
+            logical_layer: None,
+            clip: None,
+            native_loader_text: false,
+            text: vec![command],
+            fonts: Some(fonts),
+            gpu_recorder: Some(GpuSceneRecorder::default()),
+            owner: None,
+        }],
+        monitor_gamma: None,
+    });
+    let retained = app
+        .capture_retained_logical_gpu_frame(
+            GpuPresentation::identity(80, 40),
+            &clonk_graphics::GammaRamp::identity(),
+            GpuGammaMode::Disabled,
+            false,
+        )
+        .test_value();
+    let physical = retained
+        .layers
+        .iter()
+        .find(|layer| matches!(layer.software, RetainedSoftwareLayer::Physical))
+        .test_value();
+    let mut actual = [8, 12, 24, 255].repeat(80 * 40);
+    clonk_graphics::CpuSceneRenderer::default()
+        .render_loaded(&physical.scene, &mut actual)
+        .test_value();
+    let mismatch = actual
+        .iter()
+        .zip(expected.pixels())
+        .position(|(actual, expected)| actual != expected);
+    assert_eq!(
+        mismatch,
+        None,
+        "first={:?}",
+        mismatch.map(|offset| (
+            offset / 4 % 80,
+            offset / 4 / 80,
+            &actual[offset / 4 * 4..offset / 4 * 4 + 4],
+            &expected.pixels()[offset / 4 * 4..offset / 4 * 4 + 4]
+        ))
+    );
+}
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn retained_cpu_startup_main_matches_immediate_font_and_chrome_pixels() {
+    crate::seed_classic_safe_random(587);
+    let mut oracle = new_real_classic_menu_app(320, 200);
+    crate::seed_classic_safe_random(587);
+    let mut retained = new_real_classic_menu_app(320, 200);
+    let mut expected = vec![0; 320 * 200 * 4];
+    let mut actual = expected.clone();
+    oracle.render_immediate_oracle(&mut expected).test_value();
+    retained.render(&mut actual).test_value();
+    let mismatch = actual.iter().zip(&expected).position(|(a, b)| a != b);
+    assert_eq!(
+        mismatch,
+        None,
+        "first={:?}",
+        mismatch.map(|offset| (
+            offset / 4 % 320,
+            offset / 4 / 320,
+            &actual[offset / 4 * 4..offset / 4 * 4 + 4],
+            &expected[offset / 4 * 4..offset / 4 * 4 + 4]
+        ))
+    );
+}
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn retained_cpu_presentation_keeps_monitor_gamma_at_lowest_gpu_detail() {
+    crate::seed_classic_safe_random(587);
+    let mut oracle = new_real_classic_menu_app(320, 200);
+    crate::seed_classic_safe_random(587);
+    let mut retained = new_real_classic_menu_app(320, 200);
+    for app in [&mut oracle, &mut retained] {
+        install_native_test_fonts(app, 1.0);
+        let config = app.rendering.graphics.advanced_renderer_config();
+        app.rendering.graphics.set_advanced_renderer_config(
+            clonk_frontend::AdvancedRendererConfig {
+                shader: false,
+                disable_gamma: false,
+                ..config
+            },
+        );
+        app.presentation.presentation_detail = PresentationDetail::NoGammaPass;
+    }
+    let (_, expected, _) = render_ordered_test_frame(&mut oracle, 1.0, 320, 200);
+    let mut actual = vec![0; expected.len()];
+    let mut presenter = clonk_scaling::FramePresenter::new(1.0, 320, 200);
+    retained
+        .render_retained_cpu_presentation(&mut presenter, &mut actual)
+        .test_value();
+    let mismatch = actual
+        .iter()
+        .zip(&expected)
+        .position(|(actual, expected)| actual != expected);
+    assert_eq!(
+        mismatch,
+        None,
+        "first={:?}",
+        mismatch.map(|offset| (
+            offset / 4 % 320,
+            offset / 4 / 320,
+            &actual[offset / 4 * 4..offset / 4 * 4 + 4],
+            &expected[offset / 4 * 4..offset / 4 * 4 + 4]
+        ))
+    );
+    let gpu = retained
+        .render_retained_gpu_frame(GpuPresentation::identity(320, 200))
+        .test_value();
+    assert!(gpu
+        .layers
+        .iter()
+        .all(|layer| layer.scene.gamma_mode == GpuGammaMode::Disabled));
+}
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn retained_cpu_console_shell_skips_fullscreen_monitor_gamma() {
+    // C4GraphicsSystem.cpp:174-177 returns before fullscreen gamma/chrome.
+    let mut oracle = new_lightweight_running_sandbox_app();
+    let mut retained = new_lightweight_running_sandbox_app();
+    for app in [&mut oracle, &mut retained] {
+        app.console_session.enabled = true;
+        app.rendering.graphics.set_advanced_renderer_config(
+            clonk_frontend::AdvancedRendererConfig {
+                use_shader_gamma: false,
+                ..clonk_frontend::AdvancedRendererConfig::DEFAULT
+            },
+        );
+        assert!(app
+            .snapshot
+            .environment
+            .gamma
+            .set_ramp(5, [0x174169, 0x729ab3, 0xdff1fb]));
+    }
+    let mut expected = vec![0; oracle.rendering.graphics.surface().pixels().len()];
+    let mut actual = expected.clone();
+    oracle.render_immediate_oracle(&mut expected).test_value();
+    retained.render(&mut actual).test_value();
+    assert_eq!(actual.iter().zip(&expected).position(|(a, b)| a != b), None);
+}

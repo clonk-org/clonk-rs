@@ -391,20 +391,29 @@ pub fn draw_facet_stretch(
     ) {
         return;
     }
-    if crate::capture_gpu_gui_image(
+    if crate::sprite_capture::capture_gpu_sprite_impl(
         surface,
-        (target_x, target_y, target_width, target_height),
+        destination,
+        destination,
+        &clonk_graphics::Transform::identity(),
         image,
+        None,
         crate::FloatSourceRect {
             x: source_x,
             y: source_y,
             width: source_width,
             height: source_height,
         },
-        clonk_graphics::GpuSampler::Linear,
-        crate::BilinearBlend::AlphaOver,
+        false,
         None,
+        crate::SpriteBlitState::normal(),
         gamma,
+        None,
+        clonk_graphics::GpuSampler::Linear,
+        false,
+        None,
+        false,
+        clonk_graphics::GpuSoftwareSpriteMapping::GuiFacetLinear,
     ) {
         return;
     }
@@ -574,7 +583,7 @@ pub fn draw_facet_nearest(
     ) {
         return;
     }
-    if crate::capture_gpu_gui_image(
+    if crate::sprite_capture::capture_gpu_sprite_impl(
         surface,
         (
             destination.x as f32,
@@ -582,17 +591,31 @@ pub fn draw_facet_nearest(
             destination.width as f32,
             destination.height as f32,
         ),
+        (
+            destination.x as f32,
+            destination.y as f32,
+            destination.width as f32,
+            destination.height as f32,
+        ),
+        &clonk_graphics::Transform::identity(),
         image,
+        None,
         crate::FloatSourceRect {
             x: source.x as f32,
             y: source.y as f32,
             width: source.width as f32,
             height: source.height as f32,
         },
-        clonk_graphics::GpuSampler::Nearest,
-        crate::BilinearBlend::AlphaOver,
+        false,
         None,
+        crate::SpriteBlitState::normal(),
         gamma,
+        None,
+        clonk_graphics::GpuSampler::Nearest,
+        false,
+        None,
+        false,
+        clonk_graphics::GpuSoftwareSpriteMapping::IntegerStretch,
     ) {
         return;
     }
@@ -718,9 +741,8 @@ pub fn draw_engine_box(
     }
     let width = i64::from(x2) - i64::from(x1) + 1;
     let height = i64::from(y2) - i64::from(y1) + 1;
-    if surface.is_gpu_scene_capture_active()
-        || crate::active_advanced_renderer_config()
-            .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    if crate::active_advanced_renderer_config()
+        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
     {
         crate::draw_color_rect(
             surface,
@@ -738,6 +760,50 @@ pub fn draw_engine_box(
             ),
             gamma,
         );
+        return;
+    }
+
+    if surface.is_gpu_scene_capture_active() {
+        use clonk_graphics::{
+            GpuBlend, GpuCommand, GpuPrimitiveTopology, GpuSoftwareBlend, GpuSolidAlphaMode,
+            GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, Rect,
+        };
+        let Some(bounds) =
+            Rect::new(x1, y1, width as u32, height as u32).intersection(surface.bounds())
+        else {
+            return;
+        };
+        let rgba = [
+            ((color >> 16) & 255) as f32 / 255.0,
+            ((color >> 8) & 255) as f32 / 255.0,
+            (color & 255) as f32 / 255.0,
+            (255 - ((color >> 24) & 255)) as f32 / 255.0,
+        ];
+        let vertex = |x, y| GpuSolidVertex {
+            position: [x, y, 1.0],
+            color: rgba,
+            outer_modulation: GpuSolidOuterModulation::PackedC4,
+        };
+        let left = bounds.x as f32;
+        let top = bounds.y as f32;
+        let right = left + bounds.width as f32;
+        let bottom = top + bounds.height as f32;
+        surface.push_gpu_command(GpuCommand::Solid {
+            vertices: vec![
+                vertex(left, top),
+                vertex(right, top),
+                vertex(left, bottom),
+                vertex(left, bottom),
+                vertex(right, top),
+                vertex(right, bottom),
+            ],
+            topology: GpuPrimitiveTopology::TriangleList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
+            clip: surface.clip(),
+            blend: GpuBlend::Normal,
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough()))
+                .with_software_blend(GpuSoftwareBlend::GuiBox),
+        });
         return;
     }
 
@@ -1048,7 +1114,8 @@ pub fn draw_engine_line(
             blend: clonk_graphics::GpuBlend::Normal,
             style: clonk_graphics::GpuSolidStyle::with_gamma(
                 gamma.is_some_and(|gamma| !gamma.is_passthrough()),
-            ),
+            )
+            .with_software_blend(clonk_graphics::GpuSoftwareBlend::GuiBox),
         });
         return;
     }

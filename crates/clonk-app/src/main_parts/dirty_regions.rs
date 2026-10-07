@@ -205,7 +205,7 @@ pub(crate) fn retained_gpu_frame_paint_owners(
                     },
                     bounds,
                     RetainedGpuPaintVisual {
-                        command: atom,
+                        command: gpu_paint_command(atom),
                         texture_revisions: referenced_texture_revisions,
                     },
                 ));
@@ -248,6 +248,44 @@ pub(crate) fn retained_gpu_physical_bounds(
         logical_target,
     );
     projected_rect(logical_bounds, projection)?.intersection(target)
+}
+
+// Scene-local software sampling IDs carry no GPU draw state. A changed
+// earlier text run can renumber them without changing any later pixels.
+fn gpu_paint_command(mut command: GpuCommand) -> GpuCommand {
+    match &mut command {
+        GpuCommand::Quad { vertices, .. } | GpuCommand::Landscape { vertices, .. } => {
+            for vertex in vertices {
+                vertex.software_sprite = None;
+            }
+        }
+        GpuCommand::SpriteBatch { quads, .. } => {
+            for quad in quads {
+                quad.software_sprite = None;
+            }
+        }
+        GpuCommand::ObjectBatch { sprites, .. } => {
+            for sprite in sprites {
+                let owner = sprite.owner_layer();
+                let mut canonical = clonk_graphics::GpuObjectSprite::new(
+                    sprite.positions,
+                    sprite.uv,
+                    sprite.modulation,
+                    sprite.sampler(),
+                    sprite.sample_tile_size,
+                    sprite.mod2(),
+                    sprite.outer_modulation(),
+                )
+                .with_software_shader(sprite.software_shader());
+                if owner {
+                    canonical = canonical.with_owner_layer();
+                }
+                *sprite = canonical;
+            }
+        }
+        GpuCommand::Solid { .. } => {}
+    }
+    command
 }
 
 fn split_command_into(command: &GpuCommand, atoms: &mut Vec<GpuCommand>) {
@@ -555,6 +593,8 @@ mod tests {
     fn frame(scene: GpuScene, presentation: GpuPresentation) -> RetainedGpuFrame {
         RetainedGpuFrame {
             layers: vec![RetainedGpuFrameLayer {
+                software_fade: None,
+                software: crate::RetainedSoftwareLayer::Base,
                 scene,
                 presentation,
                 owner: None,
@@ -757,11 +797,15 @@ mod tests {
             &RetainedGpuFrame {
                 layers: vec![
                     RetainedGpuFrameLayer {
+                        software_fade: None,
+                        software: crate::RetainedSoftwareLayer::Base,
                         scene: scene([80, 40], vec![texture(texture_id, 1)], vec![first]),
                         presentation,
                         owner: None,
                     },
                     RetainedGpuFrameLayer {
+                        software_fade: None,
+                        software: crate::RetainedSoftwareLayer::Base,
                         scene: scene([80, 40], vec![texture(texture_id, 1)], vec![last]),
                         presentation,
                         owner: None,
@@ -819,6 +863,8 @@ mod tests {
             rect: [left, 2.0, left + 3.0, 6.0],
             uv: [0.0, 0.0, 1.0, 1.0],
             modulation: 0x00ff_ffff,
+            software_sprite: None,
+            software_shader: true,
         };
         let object = |left: f32| {
             GpuObjectSprite::new(

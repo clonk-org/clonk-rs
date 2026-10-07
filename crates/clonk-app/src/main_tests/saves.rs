@@ -2062,6 +2062,30 @@ fn screenshot_png_encoding_preserves_png_017_bytes() {
 }
 
 #[test]
+fn retained_cpu_save_thumbnail_waits_for_the_presented_frame() {
+    // C4Game.cpp:2102-2138 saves the presented back buffer, including gamma.
+    let directory = tempdir();
+    let save_path = directory.path().join("round.c4s");
+    let thumbnail_path = save_path.with_extension("png");
+    let mut app = new_running_sandbox_app();
+    // MainRedraw selects the physical presenter before logical capture.
+    app.presentation.retained_cpu_presentation_active = true;
+    let (width, height) = (
+        app.rendering.graphics.surface().width(),
+        app.rendering.graphics.surface().height(),
+    );
+    let mut frame = vec![0; width as usize * height as usize * 4];
+    app.render(&mut frame).test_value();
+    app.write_save_thumbnail(&save_path).test_value();
+    main_assert_eq!(app.saves.pending_gpu_thumbnail_paths.iter().collect::<Vec<_>>() => vec![&thumbnail_path]);
+    main_assert!(!thumbnail_path.exists());
+    let presented = [255, 0, 0, 255, 0, 0, 255, 255];
+    app.finish_retained_cpu_sidecar_save_thumbnails(&presented, 2, 1);
+    main_assert!(app.saves.pending_gpu_thumbnail_paths.is_empty());
+    main_assert_eq!(fs::read(thumbnail_path).test_value() => encode_presented_save_thumbnail(2,1,&presented).test_value());
+}
+
+#[test]
 fn retained_gpu_save_thumbnail_waits_for_the_presented_frame() {
     let directory = tempdir();
     let save_path = directory.path().join("round.c4s");
@@ -4751,6 +4775,67 @@ fn completed_slot_save_shows_non_modal_notice_without_debug_hud() {
     main_assert!(notice.remaining_draws > 0);
     main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.engine.snapshot() => before);
+}
+
+#[test]
+fn cpu_native_title_patch_waits_for_earlier_save_publication() {
+    // C4Game.cpp:2102-2138 adds Title.png to the same save generation.
+    // A late thumbnail must never republish an older group's game state.
+    let directory = tempdir();
+    let path = directory.path().join("slot.c4s");
+    let mut original = MutableGroup::new("slot.c4s");
+    original
+        .add_file("Game.bin", b"old state".to_vec())
+        .test_value();
+    let original = original.pack().test_value();
+    fs::write(&path, &original).test_value();
+    let mut replacement = MutableGroup::new("slot.c4s");
+    replacement
+        .add_file("Game.bin", b"new state".to_vec())
+        .test_value();
+    let replacement = replacement.pack().test_value();
+    let mut app = new_state_only_lightweight_running_sandbox_app();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker_path = path.clone();
+    let worker_replacement = replacement.clone();
+    app.saves
+        .submit_background_job(Box::new(move || {
+            started_tx.send(()).expect("report held publication");
+            release_rx.recv().expect("release save publication");
+            fs::write(worker_path, worker_replacement).expect("publish newer save");
+            save_worker::BackgroundSaveCompletion::PlayerFile(
+                save_worker::PlayerFileSaveCompletion {
+                    player_number: -1,
+                    info_id: -1,
+                    path: PathBuf::new(),
+                    official_derivation: false,
+                    derivation: None,
+                    result: Ok(()),
+                    persistence: Duration::ZERO,
+                },
+            )
+        }))
+        .test_value();
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .test_value();
+    let pixels = [31, 73, 129, 255, 197, 151, 103, 255];
+    app.saves.pending_cpu_native_thumbnails.push_back((
+        Arc::new(PendingNativeSaveThumbnail {
+            path: path.clone(),
+            packed_group: original.clone(),
+        }),
+        CpuNativeSaveTitle::Captured(Some(Arc::from(
+            encode_presented_save_thumbnail(2, 1, &pixels).test_value(),
+        ))),
+    ));
+    app.finish_retained_cpu_native_save_thumbnails(&pixels, 2, 1);
+    let before_release = fs::read(&path).test_value();
+    release_tx.send(()).test_value();
+    app.finish_background_save_jobs();
+    main_assert_eq!(before_release => original, "thumbnail publication shares the save worker's FIFO");
+    main_assert_eq!(fs::read(path).test_value() => replacement, "a stale title cannot replace the newer game state");
 }
 
 #[test]

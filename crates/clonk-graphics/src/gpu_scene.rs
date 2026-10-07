@@ -90,18 +90,48 @@ impl GpuTextureResource {
 }
 
 /// Exact native 16-bit per-channel lookup texture for one frame.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GpuGammaLut {
     pub revision: u64,
     pub channels: Arc<[[u16; 256]; 3]>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static GPU_GAMMA_REVISION_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn gpu_gamma_revision(ramp: &GammaRamp) -> u64 {
+    #[cfg(test)]
+    GPU_GAMMA_REVISION_HASHES.with(|hashes| hashes.set(hashes.get() + 1));
+    ramp.gpu_revision()
+}
+
 impl GpuGammaLut {
     pub fn from_ramp(ramp: &GammaRamp) -> Self {
-        Self {
-            revision: ramp.gpu_revision(),
-            channels: Arc::new(ramp.channels()),
+        thread_local! {
+            static LOOKUPS: std::cell::RefCell<Vec<GpuGammaLut>> = const { std::cell::RefCell::new(Vec::new()) };
         }
+        let channels = ramp.channels();
+        LOOKUPS.with(|cached| {
+            let mut cached = cached.borrow_mut();
+            let lookup = if let Some(index) = cached
+                .iter()
+                .position(|entry| entry.channels.as_ref() == &channels)
+            {
+                cached.remove(index)
+            } else {
+                Self {
+                    revision: gpu_gamma_revision(ramp),
+                    channels: Arc::new(channels),
+                }
+            };
+            if cached.len() == 8 {
+                cached.remove(0);
+            }
+            cached.push(lookup.clone());
+            lookup
+        })
     }
 }
 
@@ -247,6 +277,86 @@ pub enum GpuOuterModulation {
 /// Textured vertex. `position` is homogeneous logical `[x, y, w]`; retaining
 /// W lets the backend preserve perspective-correct projective sampling.
 /// Modulation is normalized packed-C4 `[r, g, b, transparency]`.
+/// Original Surface sampling and packed-color arithmetic. GPU UVs alone
+/// cannot distinguish integer stretching from pixel-center sampling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuSoftwareBlit {
+    pub source: crate::Rect,
+    pub mapping: GpuSoftwareBlitMapping,
+    pub modulation: crate::Color,
+    pub mode: Option<crate::BlitMode>,
+    pub translation: [f32; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GpuSoftwareBlitMapping {
+    Unscaled(crate::Point),
+    Stretched(crate::Rect),
+    Transformed {
+        origin: crate::Point,
+        inverse: crate::Transform,
+    },
+}
+
+/// Original native sampling coordinates. Normalized GPU UVs and transformed
+/// corner positions discard f32 evaluation order and half-open coverage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuSoftwareSprite {
+    pub destination: [f32; 4],
+    pub source: [f32; 4],
+    pub inverse: crate::Transform,
+    pub translation: [f32; 2],
+    pub flip_x: bool,
+    pub inclusive_source_end: bool,
+    pub mapping: GpuSoftwareSpriteMapping,
+    pub fog: Option<GpuSoftwareFog>,
+    /// The draw-specific ramp used by the immediate renderer, independent of monitor gamma.
+    pub gamma: Option<GpuGammaLut>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuSoftwareFog {
+    pub destination: [f32; 4],
+    pub source_range: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GpuSoftwareSpriteMapping {
+    Native,
+    PixelCorner,
+    GuiNearest,
+    /// Unscaled background tiling copies texels, including alpha, verbatim.
+    TileCopy,
+    GuiLinear {
+        modulation: Option<u32>,
+    },
+    /// Classic facet compatibility quantizes filtered RGB before source-over.
+    GuiFacetLinear,
+    Font {
+        shear: f32,
+        center_y: f32,
+        texture_indent: f32,
+        physical_size: f32,
+        normalize_transparent: bool,
+    },
+    IntegerStretch,
+    RotatedCorner {
+        center: [f32; 2],
+        cos: f32,
+        sin: f32,
+    },
+    Landscape {
+        zoom: f32,
+        world_extent: [u32; 2],
+        tile_origin: [u32; 2],
+        texture_size: u32,
+        indent: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuSoftwareSpriteId(std::num::NonZeroU32);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuVertex {
     pub position: [f32; 3],
@@ -263,6 +373,15 @@ pub struct GpuVertex {
     /// independently clamped/padded `C4TexRef` tiles instead of filtering
     /// across their seams. Other draws leave it disabled.
     pub sample_tile: [f32; 4],
+    /// CPU Surface source preparation uses integer packed-color arithmetic.
+    /// Native sprite fragments keep float shader precision instead. GPU
+    /// transport ignores this software-oracle provenance.
+    pub software_blit: Option<GpuSoftwareBlit>,
+    /// The fixed-function software path subtracts modulation transparency
+    /// during Mod2; the shader path retains the sampled alpha.
+    pub software_shader: bool,
+    pub software_sprite: Option<GpuSoftwareSpriteId>,
+    pub software_alpha_mode: GpuSolidAlphaMode,
 }
 
 /// One affine, axis-aligned sprite in a retained painter-order batch.
@@ -276,6 +395,8 @@ pub struct GpuSpriteQuad {
     pub rect: [f32; 4],
     pub uv: [f32; 4],
     pub modulation: u32,
+    pub software_sprite: Option<GpuSoftwareSpriteId>,
+    pub software_shader: bool,
 }
 
 /// One compact object face in retained painter order.
@@ -307,6 +428,9 @@ impl GpuObjectSprite {
     const OUTER_MODULATION_MASK: u32 = 0b11 << Self::OUTER_MODULATION_SHIFT;
     const DEFINED_FLAGS_MASK: u32 =
         Self::FLAG_MOD2 | Self::FLAG_LINEAR | Self::OUTER_MODULATION_MASK | Self::FLAG_OWNER_LAYER;
+    const SOFTWARE_FIXED_FUNCTION: u32 = 1 << 31;
+    const SOFTWARE_SPRITE_SHIFT: u32 = 6;
+    const SOFTWARE_SPRITE_MASK: u32 = 0x7fff_ffc0;
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -360,12 +484,16 @@ impl GpuObjectSprite {
 
     /// Packed renderer transport bits produced by the safe constructor.
     pub const fn packed_flags(self) -> u32 {
-        self.flags
+        self.flags & !(Self::SOFTWARE_FIXED_FUNCTION | Self::SOFTWARE_SPRITE_MASK)
     }
 
     /// Whether the transport word contains only defined flags and policies.
     pub const fn has_valid_packed_flags(self) -> bool {
-        self.flags & !Self::DEFINED_FLAGS_MASK == 0
+        self.flags
+            & !(Self::DEFINED_FLAGS_MASK
+                | Self::SOFTWARE_FIXED_FUNCTION
+                | Self::SOFTWARE_SPRITE_MASK)
+            == 0
             && self.flags & Self::OUTER_MODULATION_MASK != Self::OUTER_MODULATION_MASK
     }
 
@@ -375,6 +503,32 @@ impl GpuObjectSprite {
             1 => GpuOuterModulation::Combine,
             _ => GpuOuterModulation::Ignore,
         }
+    }
+
+    pub const fn software_shader(self) -> bool {
+        self.flags & Self::SOFTWARE_FIXED_FUNCTION == 0
+    }
+
+    pub fn with_software_shader(mut self, shader: bool) -> Self {
+        if shader {
+            self.flags &= !Self::SOFTWARE_FIXED_FUNCTION;
+        } else {
+            self.flags |= Self::SOFTWARE_FIXED_FUNCTION;
+        }
+        self
+    }
+
+    pub fn with_software_sprite(mut self, id: GpuSoftwareSpriteId) -> Self {
+        self.flags = (self.flags & !Self::SOFTWARE_SPRITE_MASK)
+            | (id.0.get() << Self::SOFTWARE_SPRITE_SHIFT);
+        self
+    }
+
+    pub fn software_sprite(self) -> Option<GpuSoftwareSpriteId> {
+        std::num::NonZeroU32::new(
+            (self.flags & Self::SOFTWARE_SPRITE_MASK) >> Self::SOFTWARE_SPRITE_SHIFT,
+        )
+        .map(GpuSoftwareSpriteId)
     }
 
     fn translate(&mut self, x: f32, y: f32) {
@@ -403,6 +557,10 @@ impl GpuVertex {
             outer_modulation,
             owner_outer_modulation: outer_modulation,
             sample_tile: [0.0; 4],
+            software_blit: None,
+            software_shader: true,
+            software_sprite: None,
+            software_alpha_mode: GpuSolidAlphaMode::SourceOver,
         }
     }
 
@@ -423,9 +581,22 @@ impl GpuVertex {
         self
     }
 
+    pub fn with_software_blit(mut self, blit: GpuSoftwareBlit) -> Self {
+        self.software_blit = Some(blit);
+        self
+    }
+    pub fn with_software_alpha_mode(mut self, mode: GpuSolidAlphaMode) -> Self {
+        self.software_alpha_mode = mode;
+        self
+    }
+
     fn translate(&mut self, x: f32, y: f32) {
         self.position[0] += x * self.position[2];
         self.position[1] += y * self.position[2];
+        if let Some(blit) = &mut self.software_blit {
+            blit.translation[0] += x;
+            blit.translation[1] += y;
+        }
     }
 }
 
@@ -501,6 +672,17 @@ pub enum GpuCommand {
 /// Solid draws carry more than one independent fragment decision, and every
 /// one of them has to reach the shader as a vertex flag. Keeping them in one
 /// value means adding another does not touch every construction site.
+/// Software arithmetic is independent of GPU blend factors and alpha mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuSoftwareBlend {
+    #[default]
+    Shader,
+    Legacy,
+    RoundedLegacy,
+    /// Classic compatibility boxes round the red gamma LUT before blending.
+    GuiBox,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GpuSolidStyle {
     /// Resolve the monitor gamma ramp in the fragment shader.
@@ -509,12 +691,18 @@ pub struct GpuSolidStyle {
     /// sub-LSB noise offset. Only a real gradient asks for this; a flat fill
     /// has no banding to hide.
     pub dither: bool,
+    pub software_blend: GpuSoftwareBlend,
+    /// Original software raster target for a line captured in a child scene.
+    /// GPU scissoring ignores this CPU provenance.
+    pub software_line_bounds: Option<Rect>,
 }
 
 impl GpuSolidStyle {
     pub const NONE: Self = Self {
         gamma: false,
         dither: false,
+        software_blend: GpuSoftwareBlend::Shader,
+        software_line_bounds: None,
     };
 
     pub const fn with_gamma(gamma: bool) -> Self {
@@ -526,6 +714,13 @@ impl GpuSolidStyle {
 
     pub const fn dithered(self, dither: bool) -> Self {
         Self { dither, ..self }
+    }
+
+    pub const fn with_software_blend(self, software_blend: GpuSoftwareBlend) -> Self {
+        Self {
+            software_blend,
+            ..self
+        }
     }
 }
 
@@ -798,11 +993,17 @@ impl GpuCommand {
                 sprites.iter_mut().for_each(|sprite| sprite.translate(x, y));
                 translate_clip(clip, x, y);
             }
-            Self::Solid { vertices, clip, .. } => {
+            Self::Solid {
+                vertices,
+                clip,
+                style,
+                ..
+            } => {
                 vertices
                     .iter_mut()
                     .for_each(|vertex| vertex.translate(x, y));
                 translate_clip(clip, x, y);
+                translate_clip(&mut style.software_line_bounds, x, y);
             }
         }
     }
@@ -1228,9 +1429,21 @@ pub struct GpuScene {
     pub gamma_mode: GpuGammaMode,
     pub textures: Vec<GpuTextureResource>,
     pub commands: Vec<GpuCommand>,
+    pub software_sprites: Vec<GpuSoftwareSprite>,
 }
 
 impl GpuScene {
+    /// Captured resources are ID-sorted; public scene construction may supply any order.
+    pub fn texture(&self, id: GpuTextureId) -> Option<&GpuTextureResource> {
+        self.textures
+            .binary_search_by_key(&id, |texture| texture.id)
+            .ok()
+            .map(|index| &self.textures[index])
+            .or_else(|| self.textures.iter().find(|texture| texture.id == id))
+    }
+    pub fn software_sprite(&self, id: GpuSoftwareSpriteId) -> Option<&GpuSoftwareSprite> {
+        self.software_sprites.get(id.0.get() as usize - 1)
+    }
     pub fn new(
         logical_extent: [u32; 2],
         clear: Color,
@@ -1246,7 +1459,212 @@ impl GpuScene {
             gamma_mode,
             textures,
             commands,
+            software_sprites: Vec::new(),
         }
+    }
+}
+
+// Captures can outlive their producer. Recycle only their empty storage after
+// the final owner drops it, releasing every texture snapshot first. The pool
+// is local to the producing thread and has a fixed aggregate byte budget.
+#[derive(Default)]
+struct CaptureStorage {
+    bytes: usize,
+    commands: Vec<Vec<GpuCommand>>,
+    software: Vec<Vec<GpuSoftwareSprite>>,
+    textures: Vec<Vec<GpuTextureResource>>,
+    maps: Vec<HashMap<GpuTextureId, GpuTextureResource>>,
+    references: Vec<HashSet<GpuTextureId>>,
+    objects: Vec<Vec<GpuObjectSprite>>,
+    sprites: Vec<Vec<GpuSpriteQuad>>,
+    solids: Vec<Vec<GpuSolidVertex>>,
+}
+thread_local! {
+    static CAPTURE_STORAGE: std::cell::RefCell<CaptureStorage> = std::cell::RefCell::new(CaptureStorage::default());
+}
+const CAPTURE_STORAGE_BYTES: usize = 32 * 1024 * 1024;
+const CAPTURE_STORAGE_BUFFERS: usize = 1024;
+
+impl CaptureStorage {
+    fn make_room(&mut self, size: usize) -> bool {
+        if size == 0 || size > CAPTURE_STORAGE_BYTES {
+            return false;
+        }
+        while self.bytes > CAPTURE_STORAGE_BYTES - size {
+            // The returning capture is current. Release the largest old
+            // empty backing first, including storage from other categories.
+            let largest = [
+                largest_buffer(&self.commands),
+                largest_buffer(&self.software),
+                largest_buffer(&self.textures),
+                self.maps
+                    .iter()
+                    .enumerate()
+                    .map(|(index, map)| {
+                        (
+                            index,
+                            map.capacity()
+                                * std::mem::size_of::<(GpuTextureId, GpuTextureResource)>()
+                                * 2,
+                        )
+                    })
+                    .max_by_key(|(_, bytes)| *bytes),
+                self.references
+                    .iter()
+                    .enumerate()
+                    .map(|(index, references)| {
+                        (
+                            index,
+                            references.capacity() * std::mem::size_of::<GpuTextureId>() * 2,
+                        )
+                    })
+                    .max_by_key(|(_, bytes)| *bytes),
+                largest_buffer(&self.objects),
+                largest_buffer(&self.sprites),
+                largest_buffer(&self.solids),
+            ]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(kind, buffer)| buffer.map(|(index, bytes)| (kind, index, bytes)))
+            .max_by_key(|(_, _, bytes)| *bytes);
+            let Some((kind, index, bytes)) = largest else {
+                return false;
+            };
+            match kind {
+                0 => drop(self.commands.swap_remove(index)),
+                1 => drop(self.software.swap_remove(index)),
+                2 => drop(self.textures.swap_remove(index)),
+                3 => drop(self.maps.swap_remove(index)),
+                4 => drop(self.references.swap_remove(index)),
+                5 => drop(self.objects.swap_remove(index)),
+                6 => drop(self.sprites.swap_remove(index)),
+                7 => drop(self.solids.swap_remove(index)),
+                _ => unreachable!(),
+            }
+            self.bytes -= bytes;
+        }
+        true
+    }
+}
+
+fn largest_buffer<T>(buffers: &[Vec<T>]) -> Option<(usize, usize)> {
+    buffers
+        .iter()
+        .enumerate()
+        .map(|(index, buffer)| (index, buffer.capacity() * std::mem::size_of::<T>()))
+        .max_by_key(|(_, bytes)| *bytes)
+}
+
+fn take_buffer<T>(
+    buffers: &mut Vec<Vec<T>>,
+    bytes: &mut usize,
+    requested: usize,
+    reuse_large: bool,
+) -> Vec<T> {
+    let limit = requested.saturating_mul(4).max(64);
+    let selected = buffers
+        .iter()
+        .enumerate()
+        .filter(|(_, buffer)| {
+            buffer.capacity() >= requested
+                && (reuse_large || requested == 0 || buffer.capacity() <= limit)
+        })
+        .min_by_key(|(_, buffer)| buffer.capacity())
+        .map(|(index, _)| index);
+    selected.map_or_else(
+        || Vec::with_capacity(requested),
+        |index| {
+            let buffer = buffers.swap_remove(index);
+            *bytes -= buffer.capacity() * std::mem::size_of::<T>();
+            buffer
+        },
+    )
+}
+fn return_buffer<T>(
+    storage: &mut CaptureStorage,
+    select: fn(&mut CaptureStorage) -> &mut Vec<Vec<T>>,
+    mut buffer: Vec<T>,
+) {
+    buffer.clear();
+    let size = buffer.capacity().saturating_mul(std::mem::size_of::<T>());
+    if select(storage).len() < CAPTURE_STORAGE_BUFFERS && storage.make_room(size) {
+        storage.bytes += size;
+        select(storage).push(buffer);
+    }
+}
+fn capture_buffer<T>(
+    requested: usize,
+    select: impl FnOnce(&mut CaptureStorage) -> (&mut Vec<Vec<T>>, &mut usize),
+) -> Vec<T> {
+    capture_buffer_with_reuse(requested, false, select)
+}
+fn capture_buffer_with_reuse<T>(
+    requested: usize,
+    reuse_large: bool,
+    select: impl FnOnce(&mut CaptureStorage) -> (&mut Vec<Vec<T>>, &mut usize),
+) -> Vec<T> {
+    CAPTURE_STORAGE.with(|storage| {
+        let mut storage = storage.borrow_mut();
+        let (buffers, bytes) = select(&mut storage);
+        take_buffer(buffers, bytes, requested, reuse_large)
+    })
+}
+fn return_commands(storage: &mut CaptureStorage, mut commands: Vec<GpuCommand>) {
+    for command in commands.drain(..) {
+        match command {
+            GpuCommand::ObjectBatch { sprites, .. } => {
+                return_buffer(storage, |pool| &mut pool.objects, sprites)
+            }
+            GpuCommand::SpriteBatch { quads, .. } => {
+                return_buffer(storage, |pool| &mut pool.sprites, quads)
+            }
+            GpuCommand::Solid { vertices, .. } => return_solid_buffer(storage, vertices),
+            _ => {}
+        }
+    }
+    return_buffer(storage, |pool| &mut pool.commands, commands);
+}
+
+fn return_solid_buffer(storage: &mut CaptureStorage, vertices: Vec<GpuSolidVertex>) {
+    if storage.solids.len() >= CAPTURE_STORAGE_BUFFERS {
+        if let Some((index, capacity)) = storage
+            .solids
+            .iter()
+            .enumerate()
+            .map(|(index, buffer)| (index, buffer.capacity()))
+            .min_by_key(|(_, capacity)| *capacity)
+        {
+            let size = vertices
+                .capacity()
+                .saturating_mul(std::mem::size_of::<GpuSolidVertex>());
+            let replaced_size = capacity.saturating_mul(std::mem::size_of::<GpuSolidVertex>());
+            if vertices.capacity() > capacity && size <= CAPTURE_STORAGE_BYTES {
+                storage.solids.swap_remove(index);
+                storage.bytes -= replaced_size;
+            }
+        }
+    }
+    return_buffer(storage, |pool| &mut pool.solids, vertices);
+}
+
+impl Drop for GpuScene {
+    fn drop(&mut self) {
+        let _ = CAPTURE_STORAGE.try_with(|storage| {
+            if let Ok(mut storage) = storage.try_borrow_mut() {
+                let storage = &mut *storage;
+                return_commands(storage, std::mem::take(&mut self.commands));
+                return_buffer(
+                    storage,
+                    |pool| &mut pool.software,
+                    std::mem::take(&mut self.software_sprites),
+                );
+                return_buffer(
+                    storage,
+                    |pool| &mut pool.textures,
+                    std::mem::take(&mut self.textures),
+                );
+            }
+        });
     }
 }
 
@@ -1366,10 +1784,11 @@ impl GpuSceneCaptureStats {
 
 /// Mutable command sink carried by recording surfaces and flattened when a
 /// CPU scratch surface is presented into its parent.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct GpuSceneRecorder {
     textures: HashMap<GpuTextureId, GpuTextureResource>,
     commands: Vec<GpuCommand>,
+    software_sprites: Vec<GpuSoftwareSprite>,
     capture_stats: GpuSceneCaptureStats,
     object_run_capacity_hints: GpuObjectRunCapacityHints,
     next_object_run_hint: usize,
@@ -1377,7 +1796,50 @@ pub struct GpuSceneRecorder {
     next_solid_run_hint: usize,
 }
 
+impl Default for GpuSceneRecorder {
+    fn default() -> Self {
+        Self::with_capacities(0, 0, Default::default(), Default::default())
+    }
+}
+impl Drop for GpuSceneRecorder {
+    fn drop(&mut self) {
+        let _ = CAPTURE_STORAGE.try_with(|storage| {
+            if let Ok(mut storage) = storage.try_borrow_mut() {
+                let storage = &mut *storage;
+                return_commands(storage, std::mem::take(&mut self.commands));
+                return_buffer(
+                    storage,
+                    |pool| &mut pool.software,
+                    std::mem::take(&mut self.software_sprites),
+                );
+                let mut textures = std::mem::take(&mut self.textures);
+                textures.clear();
+                let size = textures
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(GpuTextureId, GpuTextureResource)>() * 2);
+                if storage.maps.len() < CAPTURE_STORAGE_BUFFERS && storage.make_room(size) {
+                    storage.bytes += size;
+                    storage.maps.push(textures);
+                }
+            }
+        });
+    }
+}
+
 impl GpuSceneRecorder {
+    pub fn add_software_sprite(
+        &mut self,
+        sprite: GpuSoftwareSprite,
+    ) -> Option<GpuSoftwareSpriteId> {
+        let id = u32::try_from(self.software_sprites.len())
+            .ok()?
+            .checked_add(1)?;
+        if id >= (1 << 25) {
+            return None;
+        }
+        self.software_sprites.push(sprite);
+        std::num::NonZeroU32::new(id).map(GpuSoftwareSpriteId)
+    }
     pub(crate) fn with_capacities(
         command_capacity: usize,
         texture_capacity: usize,
@@ -1385,8 +1847,30 @@ impl GpuSceneRecorder {
         solid_run_capacity_hints: GpuSolidRunCapacityHints,
     ) -> Self {
         Self {
-            textures: HashMap::with_capacity(texture_capacity),
-            commands: Vec::with_capacity(command_capacity),
+            textures: CAPTURE_STORAGE.with(|storage| {
+                let mut storage = storage.borrow_mut();
+                let selected = storage
+                    .maps
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, map)| map.capacity() >= texture_capacity)
+                    .min_by_key(|(_, map)| map.capacity())
+                    .map(|(index, _)| index);
+                selected.map_or_else(
+                    || HashMap::with_capacity(texture_capacity),
+                    |index| {
+                        let map = storage.maps.swap_remove(index);
+                        storage.bytes -= map.capacity()
+                            * std::mem::size_of::<(GpuTextureId, GpuTextureResource)>()
+                            * 2;
+                        map
+                    },
+                )
+            }),
+            commands: capture_buffer(command_capacity, |pool| {
+                (&mut pool.commands, &mut pool.bytes)
+            }),
+            software_sprites: capture_buffer(0, |pool| (&mut pool.software, &mut pool.bytes)),
             capture_stats: GpuSceneCaptureStats::default(),
             object_run_capacity_hints,
             next_object_run_hint: 0,
@@ -1495,7 +1979,9 @@ impl GpuSceneRecorder {
                     blend: *blend,
                     style: *style,
                 },
-                capacity: vertices.capacity().max(vertices.len()).max(1),
+                // Reused spare capacity may belong to a much larger earlier
+                // run; only the actual work predicts the next reservation.
+                capacity: vertices.len().max(1),
             });
         }
         self.solid_run_capacity_hints.0 = retained;
@@ -1531,7 +2017,10 @@ impl GpuSceneRecorder {
         key: SolidRunKey,
         endpoints: impl IntoIterator<Item = GpuSolidVertex>,
     ) {
-        let mut vertices = Vec::with_capacity(self.next_solid_run_capacity(key));
+        let mut vertices =
+            capture_buffer_with_reuse(self.next_solid_run_capacity(key), true, |pool| {
+                (&mut pool.solids, &mut pool.bytes)
+            });
         vertices.extend(endpoints);
         self.push_solid_run(key, vertices);
     }
@@ -1802,7 +2291,9 @@ impl GpuSceneRecorder {
             sprites.push(sprite);
             return;
         }
-        let mut sprites = Vec::with_capacity(self.next_object_run_capacity(key));
+        let mut sprites = capture_buffer(self.next_object_run_capacity(key), |pool| {
+            (&mut pool.objects, &mut pool.bytes)
+        });
         sprites.push(sprite);
         self.commands.push(GpuCommand::ObjectBatch {
             texture,
@@ -1931,10 +2422,56 @@ impl GpuSceneRecorder {
         destination_clip: Option<Rect>,
     ) {
         self.capture_stats.merge(child.capture_stats);
+        let software_offset = self.software_sprites.len() as u32;
+        self.software_sprites
+            .extend(child.software_sprites.drain(..).map(|mut sprite| {
+                sprite.translation[0] += offset_x as f32;
+                sprite.translation[1] += offset_y as f32;
+                sprite
+            }));
         for (_, resource) in child.textures.drain() {
             self.add_texture(resource);
         }
         for mut command in child.commands.drain(..) {
+            let remap = |id: &mut Option<GpuSoftwareSpriteId>| {
+                if let Some(value) = id {
+                    *id = std::num::NonZeroU32::new(value.0.get() + software_offset)
+                        .map(GpuSoftwareSpriteId);
+                }
+            };
+            match &mut command {
+                GpuCommand::Quad { vertices, .. } | GpuCommand::Landscape { vertices, .. } => {
+                    for vertex in vertices {
+                        remap(&mut vertex.software_sprite);
+                    }
+                }
+                GpuCommand::SpriteBatch { quads, .. } => {
+                    for quad in quads {
+                        remap(&mut quad.software_sprite);
+                    }
+                }
+                GpuCommand::ObjectBatch { sprites, .. } => {
+                    for sprite in sprites {
+                        if let Some(id) = sprite.software_sprite() {
+                            if let Some(id) =
+                                std::num::NonZeroU32::new(id.0.get() + software_offset)
+                                    .map(GpuSoftwareSpriteId)
+                            {
+                                *sprite = sprite.with_software_sprite(id);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if let GpuCommand::Solid {
+                topology: GpuPrimitiveTopology::LineList,
+                style,
+                ..
+            } = &mut command
+            {
+                style.software_line_bounds.get_or_insert(child_bounds);
+            }
             if !command.clip_to(child_bounds) {
                 continue;
             }
@@ -1946,13 +2483,22 @@ impl GpuSceneRecorder {
         }
     }
 
-    pub fn into_scene(self, logical_extent: [u32; 2], clear: Color, gamma: &GammaRamp) -> GpuScene {
-        let Self {
-            mut textures,
-            commands,
-            ..
-        } = self;
-        let mut referenced = HashSet::new();
+    pub fn into_scene(
+        mut self,
+        logical_extent: [u32; 2],
+        clear: Color,
+        gamma: &GammaRamp,
+    ) -> GpuScene {
+        let commands = std::mem::take(&mut self.commands);
+        let software_sprites = std::mem::take(&mut self.software_sprites);
+        let textures = &mut self.textures;
+        let mut referenced = CAPTURE_STORAGE.with(|storage| {
+            let mut storage = storage.borrow_mut();
+            storage.references.pop().map_or_else(HashSet::new, |set| {
+                storage.bytes -= set.capacity() * std::mem::size_of::<GpuTextureId>() * 2;
+                set
+            })
+        });
         for command in &commands {
             match command {
                 GpuCommand::Quad {
@@ -1996,16 +2542,30 @@ impl GpuSceneRecorder {
         // clipped while flattening. Do not upload or pin resources that have
         // no surviving draw in the final scene.
         textures.retain(|id, _| referenced.contains(id));
-        let mut textures = textures.into_values().collect::<Vec<_>>();
+        let mut texture_list =
+            capture_buffer(textures.len(), |pool| (&mut pool.textures, &mut pool.bytes));
+        texture_list.extend(textures.drain().map(|(_, resource)| resource));
+        referenced.clear();
+        CAPTURE_STORAGE.with(|storage| {
+            let mut storage = storage.borrow_mut();
+            let size = referenced.capacity() * std::mem::size_of::<GpuTextureId>() * 2;
+            if storage.references.len() < CAPTURE_STORAGE_BUFFERS && storage.make_room(size) {
+                storage.bytes += size;
+                storage.references.push(referenced);
+            }
+        });
+        let mut textures = texture_list;
         textures.sort_by_key(|resource| resource.id);
-        GpuScene::new(
+        let mut scene = GpuScene::new(
             logical_extent,
             clear,
             GpuGammaLut::from_ramp(gamma),
             GpuGammaMode::Fragment,
             textures,
             commands,
-        )
+        );
+        scene.software_sprites = software_sprites;
+        scene
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2016,6 +2576,687 @@ impl GpuSceneRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct AllocationCounter;
+    std::thread_local! {
+        static ALLOCATIONS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+    }
+    #[global_allocator]
+    static ALLOCATOR: AllocationCounter = AllocationCounter;
+    fn record_allocation(bytes: usize) {
+        let _ = ALLOCATIONS.try_with(|count| {
+            if let Some((calls, allocated)) = count.get() {
+                count.set(Some((calls + 1, allocated + bytes)));
+            }
+        });
+    }
+    // SAFETY: Pointer and layout arguments pass directly to System. The
+    // thread-local counter observes allocation sizes without owning memory.
+    unsafe impl std::alloc::GlobalAlloc for AllocationCounter {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            record_allocation(layout.size());
+            unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+        }
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, pointer, layout) }
+        }
+        unsafe fn realloc(
+            &self,
+            pointer: *mut u8,
+            layout: std::alloc::Layout,
+            bytes: usize,
+        ) -> *mut u8 {
+            record_allocation(bytes);
+            unsafe { std::alloc::GlobalAlloc::realloc(&std::alloc::System, pointer, layout, bytes) }
+        }
+    }
+    fn measure_allocations<T>(action: impl FnOnce() -> T) -> (T, (usize, usize)) {
+        ALLOCATIONS.with(|count| count.set(Some((0, 0))));
+        let result = action();
+        let allocations = ALLOCATIONS
+            .with(|count| count.take())
+            .expect("measurement active");
+        (result, allocations)
+    }
+
+    #[test]
+    fn immediate_surface_fills_do_not_allocate_command_storage() {
+        let mut surface = crate::Surface::new(8, 8, crate::PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(3, 5, 7));
+        let (_, allocations) = measure_allocations(|| {
+            surface.fill(Color::opaque(11, 13, 17));
+            for _ in 0..32 {
+                surface.fill_rect(Rect::new(1, 2, 3, 4), Color::new(19, 23, 29, 73));
+            }
+        });
+        assert_eq!(allocations, (0, 0));
+    }
+
+    #[test]
+    fn retained_surface_fills_reuse_warmed_solid_storage() {
+        let mut surface = crate::Surface::new(8, 8, crate::PixelFormat::Rgba8888);
+        let record = |surface: &mut crate::Surface| {
+            surface.begin_gpu_scene_capture();
+            surface.fill(Color::opaque(11, 13, 17));
+            for _ in 0..32 {
+                surface.fill_rect(Rect::new(1, 2, 3, 4), Color::new(19, 23, 29, 73));
+            }
+            drop(
+                surface
+                    .take_gpu_scene_capture()
+                    .expect("recording remains active"),
+            );
+        };
+        for _ in 0..3 {
+            record(&mut surface);
+        }
+        let (_, allocations) = measure_allocations(|| record(&mut surface));
+        assert_eq!(allocations, (0, 0));
+    }
+
+    #[test]
+    fn returned_font_storage_survives_other_capture_categories_filling_the_budget() {
+        const POINTS: usize = 24576;
+        let vertex = |color| GpuSolidVertex {
+            position: [0.5, 0.5, 1.0],
+            color,
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let scene = |vertices| {
+            GpuScene::new(
+                [1, 1],
+                Color::transparent(),
+                GpuGammaLut::from_ramp(&GammaRamp::identity()),
+                GpuGammaMode::Disabled,
+                vec![],
+                vec![GpuCommand::Solid {
+                    vertices,
+                    topology: GpuPrimitiveTopology::PointList,
+                    alpha_mode: GpuSolidAlphaMode::SourceOver,
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    style: GpuSolidStyle::NONE,
+                }],
+            )
+        };
+        let held = scene(vec![vertex([1.0, 0.0, 0.0, 1.0]); POINTS]);
+        let mut storage = CaptureStorage::default();
+        let obsolete = Vec::<GpuObjectSprite>::with_capacity(
+            (CAPTURE_STORAGE_BYTES - 256) / std::mem::size_of::<GpuObjectSprite>(),
+        );
+        return_buffer(&mut storage, |pool| &mut pool.objects, obsolete);
+        let released = vec![vertex([0.0, 0.0, 1.0, 1.0]); POINTS];
+        let pointer = released.as_ptr();
+        return_solid_buffer(&mut storage, released);
+        assert!(storage.bytes <= CAPTURE_STORAGE_BYTES);
+        assert!(storage.solids.len() <= CAPTURE_STORAGE_BUFFERS);
+        let (mut current, allocations) = measure_allocations(|| {
+            take_buffer(&mut storage.solids, &mut storage.bytes, POINTS, true)
+        });
+        eprintln!(
+            "font after other-category pressure: {} allocation calls, {} bytes",
+            allocations.0, allocations.1
+        );
+        current.resize(POINTS, vertex([0.0, 1.0, 0.0, 1.0]));
+        let current_pointer = current.as_ptr();
+        let current = scene(current);
+        // StdGL.cpp:846-891 preserves submitted primitive colours while
+        // retained captures continue owning their original vertex storage.
+        let mut pixels = [0; 4];
+        let mut renderer = crate::CpuSceneRenderer::default();
+        renderer
+            .render(&current, &mut pixels)
+            .expect("current scene");
+        assert_eq!(pixels, [0, 255, 0, 255]);
+        renderer.render(&held, &mut pixels).expect("held scene");
+        assert_eq!(pixels, [255, 0, 0, 255]);
+        assert!(storage.bytes <= CAPTURE_STORAGE_BYTES);
+        assert!(storage.solids.len() <= CAPTURE_STORAGE_BUFFERS);
+        assert_eq!(allocations, (0, 0));
+        assert_eq!(current_pointer, pointer);
+    }
+
+    #[test]
+    fn current_commands_and_metadata_reuse_storage_after_old_solids_fill_the_budget() {
+        let old_storage = || {
+            let mut storage = CaptureStorage::default();
+            let obsolete = Vec::<GpuSolidVertex>::with_capacity(
+                (CAPTURE_STORAGE_BYTES - 256) / std::mem::size_of::<GpuSolidVertex>(),
+            );
+            return_solid_buffer(&mut storage, obsolete);
+            storage
+        };
+        let pixels = std::sync::Arc::<[u8]>::from([40, 80, 120, 255]);
+        let texture =
+            GpuTextureResource::immutable_rgba(GpuTextureId::fresh(), 1, 1, pixels.clone());
+        let gamma = GpuGammaLut::from_ramp(&GammaRamp::identity());
+        let software = GpuSoftwareSprite {
+            destination: [0.0, 0.0, 1.0, 1.0],
+            source: [0.0, 0.0, 1.0, 1.0],
+            inverse: crate::Transform::identity(),
+            translation: [0.0; 2],
+            flip_x: false,
+            inclusive_source_end: false,
+            mapping: GpuSoftwareSpriteMapping::Native,
+            fog: None,
+            gamma: Some(gamma.clone()),
+        };
+        let mut held = GpuScene::new(
+            [1, 1],
+            Color::transparent(),
+            gamma.clone(),
+            GpuGammaMode::Disabled,
+            vec![texture.clone()],
+            vec![],
+        );
+        held.software_sprites.push(software.clone());
+        let mut commands = Vec::with_capacity(64);
+        commands.push(GpuCommand::Solid {
+            vertices: vec![],
+            topology: GpuPrimitiveTopology::PointList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
+            clip: None,
+            blend: GpuBlend::Normal,
+            style: GpuSolidStyle::NONE,
+        });
+        let command_pointer = commands.as_ptr();
+        let mut storage = old_storage();
+        return_commands(&mut storage, commands);
+        assert!(storage.bytes <= CAPTURE_STORAGE_BYTES);
+        let (commands, command_allocations) = measure_allocations(|| {
+            take_buffer(&mut storage.commands, &mut storage.bytes, 64, false)
+        });
+        assert!(commands.is_empty());
+        assert_eq!(commands.as_ptr(), command_pointer);
+
+        let mut metadata = Vec::with_capacity(64);
+        metadata.push(software);
+        let metadata_pointer = metadata.as_ptr();
+        let gamma_owners = std::sync::Arc::strong_count(&gamma.channels);
+        let mut storage = old_storage();
+        return_buffer(&mut storage, |pool| &mut pool.software, metadata);
+        assert_eq!(
+            std::sync::Arc::strong_count(&gamma.channels),
+            gamma_owners - 1
+        );
+        assert!(storage.bytes <= CAPTURE_STORAGE_BYTES);
+        let (metadata, metadata_allocations) = measure_allocations(|| {
+            take_buffer(&mut storage.software, &mut storage.bytes, 64, false)
+        });
+        assert!(metadata.is_empty());
+        assert_eq!(metadata.as_ptr(), metadata_pointer);
+
+        let mut resources = Vec::with_capacity(64);
+        resources.push(texture);
+        let resource_pointer = resources.as_ptr();
+        let pixel_owners = std::sync::Arc::strong_count(&pixels);
+        let mut storage = old_storage();
+        return_buffer(&mut storage, |pool| &mut pool.textures, resources);
+        assert_eq!(std::sync::Arc::strong_count(&pixels), pixel_owners - 1);
+        assert!(storage.bytes <= CAPTURE_STORAGE_BYTES);
+        let (resources, resource_allocations) = measure_allocations(|| {
+            take_buffer(&mut storage.textures, &mut storage.bytes, 64, false)
+        });
+        assert!(resources.is_empty());
+        assert_eq!(resources.as_ptr(), resource_pointer);
+        assert_eq!(held.textures[0].pixels.as_ref(), [40, 80, 120, 255]);
+        assert_eq!(held.software_sprites[0].gamma.as_ref(), Some(&gamma));
+        eprintln!(
+            "commands {:?}, metadata {:?}, textures {:?} after old-solid pressure",
+            command_allocations, metadata_allocations, resource_allocations
+        );
+        assert_eq!(command_allocations, (0, 0));
+        assert_eq!(metadata_allocations, (0, 0));
+        assert_eq!(resource_allocations, (0, 0));
+    }
+
+    #[test]
+    fn solid_capacity_hints_do_not_force_growth_past_available_run_storage() {
+        // StdGL.cpp:846-891 preserves primitive painter order. Spare capacity
+        // inherited from another capture must not change the next draw's size.
+        const POINTS: usize = 8192;
+        let vertex = |color| GpuSolidVertex {
+            position: [0.5, 0.5, 1.0],
+            color,
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let command = |capacity, color| {
+            let mut vertices = Vec::with_capacity(capacity);
+            vertices.resize(POINTS, vertex(color));
+            GpuCommand::Solid {
+                vertices,
+                topology: GpuPrimitiveTopology::PointList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Normal,
+                style: GpuSolidStyle::NONE,
+            }
+        };
+        let mut recorder =
+            GpuSceneRecorder::with_capacities(1, 0, Default::default(), Default::default());
+        recorder.push(command(24576, [1.0, 0.0, 0.0, 1.0]));
+        recorder.retain_solid_run_capacities();
+        let hints = recorder.take_solid_run_capacity_hints();
+        let held = recorder.into_scene([1, 1], Color::transparent(), &GammaRamp::identity());
+        let mut released =
+            GpuSceneRecorder::with_capacities(1, 0, Default::default(), Default::default());
+        released.push(command(16384, [0.0, 0.0, 1.0, 1.0]));
+        let released = released.into_scene([1, 1], Color::transparent(), &GammaRamp::identity());
+        let released_pointer = match &released.commands[0] {
+            GpuCommand::Solid { vertices, .. } => vertices.as_ptr(),
+            _ => unreachable!(),
+        };
+        drop(released);
+        let mut next = GpuSceneRecorder::with_capacities(1, 0, Default::default(), hints);
+        let (_, allocations) = measure_allocations(|| {
+            for _ in 0..POINTS {
+                next.push_solid_vertex(
+                    vertex([0.0, 1.0, 0.0, 1.0]),
+                    GpuPrimitiveTopology::PointList,
+                    GpuSolidAlphaMode::SourceOver,
+                    None,
+                    GpuBlend::Normal,
+                    GpuSolidStyle::NONE,
+                );
+            }
+        });
+        eprintln!(
+            "warmed solid run: {} allocation calls, {} bytes",
+            allocations.0, allocations.1
+        );
+        let scene = next.into_scene([1, 1], Color::transparent(), &GammaRamp::identity());
+        let mut actual = [0; 4];
+        let mut renderer = crate::CpuSceneRenderer::default();
+        renderer
+            .render(&scene, &mut actual)
+            .expect("valid new scene");
+        assert_eq!(actual, [0, 255, 0, 255]);
+        renderer
+            .render(&held, &mut actual)
+            .expect("valid held scene");
+        assert_eq!(actual, [255, 0, 0, 255]);
+        let GpuCommand::Solid { vertices, .. } = &scene.commands[0] else {
+            unreachable!()
+        };
+        assert_eq!(vertices.len(), POINTS);
+        assert_eq!(
+            allocations,
+            (0, 0),
+            "the released buffer already fits every point"
+        );
+        assert_eq!(vertices.as_ptr(), released_pointer);
+    }
+
+    #[test]
+    fn returned_font_run_is_reused_after_many_small_solid_runs() {
+        // StdGL.cpp:846-891 draws all primitive runs in submission order.
+        // A released tooltip run must remain available after many short runs.
+        const POINTS: usize = 24576;
+        let vertex = |color| GpuSolidVertex {
+            position: [0.5, 0.5, 1.0],
+            color,
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let command = |count, color| GpuCommand::Solid {
+            vertices: vec![vertex(color); count],
+            topology: GpuPrimitiveTopology::PointList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
+            clip: None,
+            blend: GpuBlend::Normal,
+            style: GpuSolidStyle::NONE,
+        };
+        let mut held =
+            GpuSceneRecorder::with_capacities(1, 0, Default::default(), Default::default());
+        held.push(command(POINTS, [1.0, 0.0, 0.0, 1.0]));
+        held.retain_solid_run_capacities();
+        let hints = held.take_solid_run_capacity_hints();
+        let held = held.into_scene([1, 1], Color::transparent(), &GammaRamp::identity());
+        let released = GpuScene::new(
+            [1, 1],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            GpuGammaMode::Disabled,
+            vec![],
+            vec![command(POINTS, [0.0, 0.0, 1.0, 1.0])],
+        );
+        let released_pointer = match &released.commands[0] {
+            GpuCommand::Solid { vertices, .. } => vertices.as_ptr(),
+            _ => unreachable!(),
+        };
+        let small_runs = GpuScene::new(
+            [1, 1],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            GpuGammaMode::Disabled,
+            vec![],
+            (0..1024)
+                .map(|_| command(8, [0.0, 0.0, 1.0, 1.0]))
+                .collect(),
+        );
+        drop(small_runs);
+        drop(released);
+        let mut next = GpuSceneRecorder::with_capacities(1, 0, Default::default(), hints);
+        let (_, allocations) = measure_allocations(|| {
+            for _ in 0..POINTS {
+                next.push_solid_vertex(
+                    vertex([0.0, 1.0, 0.0, 1.0]),
+                    GpuPrimitiveTopology::PointList,
+                    GpuSolidAlphaMode::SourceOver,
+                    None,
+                    GpuBlend::Normal,
+                    GpuSolidStyle::NONE,
+                );
+            }
+        });
+        eprintln!(
+            "warmed font after small runs: {} allocation calls, {} bytes",
+            allocations.0, allocations.1
+        );
+        let scene = next.into_scene([1, 1], Color::transparent(), &GammaRamp::identity());
+        let mut actual = [0; 4];
+        let mut renderer = crate::CpuSceneRenderer::default();
+        renderer
+            .render(&scene, &mut actual)
+            .expect("valid current frame");
+        assert_eq!(actual, [0, 255, 0, 255]);
+        renderer
+            .render(&held, &mut actual)
+            .expect("valid held frame");
+        assert_eq!(actual, [255, 0, 0, 255]);
+        assert_eq!(
+            allocations,
+            (0, 0),
+            "released font backing must survive small-run traffic"
+        );
+        let GpuCommand::Solid { vertices, .. } = &scene.commands[0] else {
+            unreachable!()
+        };
+        assert_eq!(vertices.as_ptr(), released_pointer);
+        CAPTURE_STORAGE.with(|storage| {
+            let storage = storage.borrow();
+            assert!(storage.solids.len() <= CAPTURE_STORAGE_BUFFERS);
+            assert!(storage.bytes <= CAPTURE_STORAGE_BYTES);
+        });
+    }
+
+    #[test]
+    fn appended_sprite_batch_keeps_its_child_sampling_metadata() {
+        let metadata = || GpuSoftwareSprite {
+            destination: [0.0, 0.0, 1.0, 1.0],
+            source: [0.0, 0.0, 2.0, 1.0],
+            inverse: crate::Transform::identity(),
+            translation: [0.0; 2],
+            flip_x: false,
+            inclusive_source_end: false,
+            mapping: GpuSoftwareSpriteMapping::PixelCorner,
+            fog: None,
+            gamma: None,
+        };
+        let texture = GpuTextureResource::immutable_rgba(
+            GpuTextureId::fresh(),
+            2,
+            1,
+            Arc::from([255, 0, 0, 255, 0, 255, 0, 255]),
+        );
+        let mut parent = GpuSceneRecorder::default();
+        let mut unrelated = metadata();
+        unrelated.source = [1.0, 0.0, 1.0, 1.0];
+        unrelated.mapping = GpuSoftwareSpriteMapping::Native;
+        parent
+            .add_software_sprite(unrelated)
+            .expect("parent metadata");
+        let mut child = GpuSceneRecorder::default();
+        let id = child
+            .add_software_sprite(metadata())
+            .expect("child metadata");
+        child.add_texture(texture.clone());
+        child.push(GpuCommand::SpriteBatch {
+            texture: texture.id,
+            quads: vec![GpuSpriteQuad {
+                rect: [0.0, 0.0, 1.0, 1.0],
+                uv: [0.0, 0.0, 1.0, 1.0],
+                modulation: 0x00ff_ffff,
+                software_sprite: Some(id),
+                software_shader: true,
+            }],
+            clip: None,
+            blend: GpuBlend::Normal,
+            mod2: false,
+            gamma: false,
+            outer_modulation: GpuOuterModulation::Ignore,
+        });
+        parent.append_translated(child, 1, 0, Rect::new(0, 0, 1, 1), None);
+        let scene = parent.into_scene([2, 1], Color::transparent(), &GammaRamp::identity());
+        let mut actual = [0; 8];
+        crate::CpuSceneRenderer::default()
+            .render(&scene, &mut actual)
+            .expect("valid translated scene");
+        assert_eq!(
+            actual,
+            [0, 0, 0, 0, 255, 0, 0, 255],
+            "the child samples the corner texel after its viewport translation"
+        );
+    }
+
+    #[test]
+    fn scene_texture_lookup_accepts_unsorted_public_resources() {
+        let first = GpuTextureResource::immutable_rgba(
+            GpuTextureId::fresh(),
+            1,
+            1,
+            Arc::from([1, 2, 3, 4]),
+        );
+        let second = GpuTextureResource::immutable_rgba(
+            GpuTextureId::fresh(),
+            1,
+            1,
+            Arc::from([5, 6, 7, 8]),
+        );
+        let scene = GpuScene::new(
+            [1, 1],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            GpuGammaMode::Disabled,
+            vec![second.clone(), first.clone()],
+            vec![],
+        );
+        assert_eq!(
+            scene
+                .texture(first.id)
+                .map(|texture| texture.pixels.as_ref()),
+            Some(first.pixels.as_ref())
+        );
+        assert_eq!(
+            scene
+                .texture(second.id)
+                .map(|texture| texture.pixels.as_ref()),
+            Some(second.pixels.as_ref())
+        );
+        assert!(scene.texture(GpuTextureId::fresh()).is_none());
+    }
+
+    #[test]
+    fn identical_gamma_captures_share_immutable_channel_storage() {
+        let ramp = GammaRamp::standard();
+        let first = GpuGammaLut::from_ramp(&ramp);
+        let second = GpuGammaLut::from_ramp(&ramp);
+        assert!(Arc::ptr_eq(&first.channels, &second.channels));
+        let different = GpuGammaLut::from_ramp(&GammaRamp::identity());
+        assert_ne!(*first.channels, *different.channels);
+        assert_eq!(*first.channels, ramp.channels());
+    }
+
+    #[test]
+    fn equal_gamma_captures_reuse_the_content_revision() {
+        // CGammaControl::SetClrChannel fixes all 256 lookup entries until
+        // controls change (StdDDraw2.cpp:237-271). Repeated retained draws
+        // must reuse the revision as well as the exact immutable table.
+        let controls = [0x172b3f, 0x7894a2, 0xdce3f1];
+        let first = GpuGammaLut::from_ramp(&GammaRamp::from_control_points(controls));
+        let hashes = GPU_GAMMA_REVISION_HASHES.with(std::cell::Cell::get);
+        for _ in 0..32 {
+            let same = GpuGammaLut::from_ramp(&GammaRamp::from_control_points(controls));
+            assert_eq!(same.revision, first.revision);
+            assert!(Arc::ptr_eq(&same.channels, &first.channels));
+        }
+        assert_eq!(GPU_GAMMA_REVISION_HASHES.with(std::cell::Cell::get), hashes);
+        let changed = GammaRamp::from_control_points([0x182b3f, 0x7894a2, 0xdce3f1]);
+        let changed_lut = GpuGammaLut::from_ramp(&changed);
+        assert_eq!(changed_lut.revision, changed.gpu_revision());
+        assert_eq!(changed_lut.channels.as_ref(), &changed.channels());
+        assert_eq!(
+            first.channels.as_ref(),
+            &GammaRamp::from_control_points(controls).channels()
+        );
+    }
+
+    #[test]
+    fn alternating_gamma_captures_reuse_immutable_channel_storage() {
+        let ramp = GammaRamp::standard();
+        let first = GpuGammaLut::from_ramp(&ramp);
+        let identity = GpuGammaLut::from_ramp(&GammaRamp::identity());
+        let repeated = GpuGammaLut::from_ramp(&ramp);
+        assert!(Arc::ptr_eq(&first.channels, &repeated.channels));
+        assert_eq!(*identity.channels, GammaRamp::identity().channels());
+        assert_eq!(*first.channels, ramp.channels());
+    }
+
+    #[test]
+    fn completed_scene_returns_empty_capture_storage_without_retaining_textures() {
+        let id = GpuTextureId::fresh();
+        let pixels: std::sync::Arc<[u8]> = std::sync::Arc::from([1u8, 2, 3, 255]);
+        let mut recorder =
+            GpuSceneRecorder::with_capacities(37, 19, Default::default(), Default::default());
+        recorder.add_texture(GpuTextureResource::immutable_rgba(id, 1, 1, pixels.clone()));
+        recorder.push(GpuCommand::Quad {
+            texture: id,
+            owner_mask: None,
+            vertices: std::array::from_fn(|_| {
+                GpuVertex::new([0.0, 0.0, 1.0], [0.0, 0.0], [1.0, 1.0, 1.0, 0.0])
+            }),
+            clip: None,
+            blend: GpuBlend::Normal,
+            base_mod2: false,
+            owner_mod2: false,
+            sampler: GpuSampler::Nearest,
+            gamma: false,
+        });
+        let scene = recorder.into_scene([1, 1], Color::new(0, 0, 0, 255), &GammaRamp::standard());
+        let capacity = scene.commands.capacity();
+        drop(scene);
+        assert_eq!(std::sync::Arc::strong_count(&pixels), 1);
+        let recorder =
+            GpuSceneRecorder::with_capacities(36, 18, Default::default(), Default::default());
+        assert_eq!(recorder.commands.capacity(), capacity);
+        assert!(recorder.commands.is_empty());
+        assert!(recorder.textures.is_empty());
+    }
+
+    #[test]
+    fn changed_solid_run_hints_reuse_released_storage_and_preserve_held_scenes() {
+        let pixels: Arc<[u8]> = Arc::from([17, 31, 71, 128]);
+        let texture =
+            GpuTextureResource::immutable_rgba(GpuTextureId::fresh(), 1, 1, Arc::clone(&pixels));
+        let capture = |hints, clip, color: [f32; 4]| {
+            let mut recorder = GpuSceneRecorder::with_capacities(2, 1, Default::default(), hints);
+            // StdGL.cpp:846-891 keeps each primitive before the later texture
+            // draw. A tooltip's thousands of sampled points form one run.
+            for _ in 0..4096 {
+                recorder.push_solid_vertex(
+                    GpuSolidVertex {
+                        position: [0.5, 0.5, 1.0],
+                        color,
+                        outer_modulation: GpuSolidOuterModulation::Ignore,
+                    },
+                    GpuPrimitiveTopology::PointList,
+                    GpuSolidAlphaMode::SourceOver,
+                    clip,
+                    GpuBlend::Normal,
+                    GpuSolidStyle::NONE,
+                );
+            }
+            recorder.add_texture(texture.clone());
+            recorder.push(GpuCommand::Quad {
+                texture: texture.id,
+                owner_mask: None,
+                vertices: std::array::from_fn(|index| {
+                    GpuVertex::new(
+                        [
+                            [0.0, 0.0, 1.0],
+                            [1.0, 0.0, 1.0],
+                            [0.0, 1.0, 1.0],
+                            [1.0, 1.0, 1.0],
+                        ][index],
+                        [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]][index],
+                        [1.0, 1.0, 1.0, 0.0],
+                    )
+                }),
+                clip: None,
+                blend: GpuBlend::Normal,
+                base_mod2: false,
+                owner_mod2: false,
+                sampler: GpuSampler::Nearest,
+                gamma: false,
+            });
+            recorder.retain_solid_run_capacities();
+            let hints = recorder.take_solid_run_capacity_hints();
+            let mut scene =
+                recorder.into_scene([1, 1], Color::transparent(), &GammaRamp::identity());
+            scene.gamma_mode = GpuGammaMode::Disabled;
+            (hints, scene)
+        };
+        let backing = |scene: &GpuScene| match &scene.commands[0] {
+            GpuCommand::Solid { vertices, .. } => vertices.as_ptr(),
+            _ => panic!("solid points precede the textured draw"),
+        };
+        let (hints, first) = capture(Default::default(), None, [1.0, 0.0, 0.0, 1.0]);
+        let first_pointer = backing(&first);
+        let (hints, held) = capture(hints, Some(Rect::new(0, 0, 1, 1)), [0.0, 0.0, 1.0, 1.0]);
+        assert_ne!(
+            backing(&held),
+            first_pointer,
+            "live snapshots cannot share mutable storage"
+        );
+        drop(first);
+        let (mut hints, third) = capture(hints, None, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(
+            backing(&third),
+            first_pointer,
+            "a shifted hint must reuse a released large run"
+        );
+        drop(third);
+        for index in 0..16 {
+            let (next_hints, scene) = capture(
+                hints,
+                (index % 2 == 0).then_some(Rect::new(0, 0, 1, 1)),
+                [0.0, 1.0, 0.0, 1.0],
+            );
+            hints = next_hints;
+            assert_eq!(backing(&scene), first_pointer);
+            let mut actual = [0; 4];
+            crate::CpuSceneRenderer::default()
+                .render(&scene, &mut actual)
+                .unwrap();
+            let expected = Color::new(17, 31, 71, 128).blend_over(Color::opaque(0, 255, 0));
+            assert_eq!(actual, [expected.r, expected.g, expected.b, expected.a]);
+        }
+        let mut actual = [0; 4];
+        crate::CpuSceneRenderer::default()
+            .render(&held, &mut actual)
+            .unwrap();
+        let expected = Color::new(17, 31, 71, 128).blend_over(Color::opaque(0, 0, 255));
+        assert_eq!(actual, [expected.r, expected.g, expected.b, expected.a]);
+        assert_eq!(
+            held.texture(texture.id).unwrap().pixels.as_ref(),
+            pixels.as_ref()
+        );
+        drop(held);
+        assert_eq!(
+            Arc::strong_count(&pixels),
+            2,
+            "empty storage cannot pin captured resources"
+        );
+    }
 
     #[test]
     fn appended_child_scene_accumulates_gpu_sprite_fallback_stats() {
@@ -2137,11 +3378,15 @@ mod tests {
                     rect: [6.75, 8.25, 2.25, 3.5],
                     uv: [0.0; 4],
                     modulation: 0x00ff_ffff,
+                    software_sprite: None,
+                    software_shader: true,
                 },
                 GpuSpriteQuad {
                     rect: [10.0, 1.0, 12.5, 4.0],
                     uv: [0.0; 4],
                     modulation: 0x00ff_ffff,
+                    software_sprite: None,
+                    software_shader: true,
                 },
             ],
             clip: None,

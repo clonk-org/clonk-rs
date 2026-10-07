@@ -340,6 +340,7 @@ pub(crate) struct RuntimeDynamicSaveCompletion {
 
 pub(crate) enum BackgroundSaveCompletion {
     NativeSlot(NativeSlotSaveCompletion),
+    NativeThumbnail { path: PathBuf, result: Result<bool> },
     PlayerFile(PlayerFileSaveCompletion),
     RuntimeDynamic(RuntimeDynamicSaveCompletion),
 }

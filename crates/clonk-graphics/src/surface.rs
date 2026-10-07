@@ -203,7 +203,7 @@ fn homogeneous_position(transform: &crate::transform::Transform, x: f32, y: f32)
     ]
 }
 
-fn solid_rect_vertices(rect: Rect, color: Color) -> Vec<GpuSolidVertex> {
+fn solid_rect_vertices(rect: Rect, color: Color) -> [GpuSolidVertex; 6] {
     let left = rect.x as f32;
     let top = rect.y as f32;
     let right = left + rect.width as f32;
@@ -213,7 +213,7 @@ fn solid_rect_vertices(rect: Rect, color: Color) -> Vec<GpuSolidVertex> {
         color: rgba(color),
         outer_modulation: GpuSolidOuterModulation::PackedC4,
     };
-    vec![
+    [
         vertex(left, top),
         vertex(right, top),
         vertex(left, bottom),
@@ -241,6 +241,13 @@ pub enum SurfaceError {
 /// Minimal pixel target used by draw routines that can operate directly on
 /// either an owned [`Surface`] or a borrowed RGBA framebuffer.
 pub trait SurfaceDrawTarget {
+    #[doc(hidden)]
+    fn add_gpu_software_sprite(
+        &mut self,
+        _sprite: crate::GpuSoftwareSprite,
+    ) -> Option<crate::GpuSoftwareSpriteId> {
+        None
+    }
     fn width(&self) -> u32;
     fn height(&self) -> u32;
     fn clip(&self) -> Option<Rect>;
@@ -737,6 +744,13 @@ impl Surface {
         true
     }
 
+    pub fn add_gpu_software_sprite(
+        &mut self,
+        sprite: crate::GpuSoftwareSprite,
+    ) -> Option<crate::GpuSoftwareSpriteId> {
+        self.gpu_scene.as_mut()?.add_software_sprite(sprite)
+    }
+
     pub fn push_gpu_command(&mut self, command: GpuCommand) -> bool {
         let Some(scene) = self.gpu_scene.as_mut() else {
             return false;
@@ -1138,14 +1152,17 @@ impl Surface {
 
     pub fn fill(&mut self, color: Color) {
         let bounds = self.bounds();
-        if self.push_gpu_command(GpuCommand::Solid {
-            vertices: solid_rect_vertices(bounds, color),
-            topology: GpuPrimitiveTopology::TriangleList,
-            alpha_mode: GpuSolidAlphaMode::SourceOver,
-            clip: None,
-            blend: GpuBlend::Replace,
-            style: GpuSolidStyle::NONE,
-        }) {
+        if let Some(scene) = self.gpu_scene.as_mut() {
+            for vertex in solid_rect_vertices(bounds, color) {
+                scene.push_solid_vertex(
+                    vertex,
+                    GpuPrimitiveTopology::TriangleList,
+                    GpuSolidAlphaMode::SourceOver,
+                    None,
+                    GpuBlend::Replace,
+                    GpuSolidStyle::NONE,
+                );
+            }
             return;
         }
         self.mark_gpu_dirty(bounds);
@@ -1165,14 +1182,17 @@ impl Surface {
             None => return,
         };
         let clip = self.clip;
-        if self.push_gpu_command(GpuCommand::Solid {
-            vertices: solid_rect_vertices(region, color),
-            topology: GpuPrimitiveTopology::TriangleList,
-            alpha_mode: GpuSolidAlphaMode::SourceOver,
-            clip,
-            blend: GpuBlend::Normal,
-            style: GpuSolidStyle::NONE,
-        }) {
+        if let Some(scene) = self.gpu_scene.as_mut() {
+            for vertex in solid_rect_vertices(region, color) {
+                scene.push_solid_vertex(
+                    vertex,
+                    GpuPrimitiveTopology::TriangleList,
+                    GpuSolidAlphaMode::SourceOver,
+                    clip,
+                    GpuBlend::Normal,
+                    GpuSolidStyle::NONE.with_software_blend(crate::GpuSoftwareBlend::Legacy),
+                );
+            }
             return;
         }
         self.mark_gpu_dirty(region);
@@ -1249,7 +1269,7 @@ impl Surface {
             GpuSolidAlphaMode::SourceOver,
             clip,
             GpuBlend::Normal,
-            GpuSolidStyle::NONE,
+            GpuSolidStyle::NONE.with_software_blend(crate::GpuSoftwareBlend::Legacy),
         ) {
             return Ok(());
         }
@@ -1405,7 +1425,16 @@ impl Surface {
             self.push_gpu_command(GpuCommand::Quad {
                 texture: src.gpu_texture_id,
                 owner_mask: None,
-                vertices: quad_vertices([left, top, right, bottom], uv, c4_modulation(modulation)),
+                vertices: quad_vertices([left, top, right, bottom], uv, c4_modulation(modulation))
+                    .map(|vertex| {
+                        vertex.with_software_blit(crate::GpuSoftwareBlit {
+                            source: src_rect,
+                            mapping: crate::GpuSoftwareBlitMapping::Unscaled(dest),
+                            modulation,
+                            mode: Some(mode),
+                            translation: [0.0; 2],
+                        })
+                    }),
                 clip,
                 blend: gpu_blend(mode),
                 base_mod2: matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive),
@@ -1552,7 +1581,19 @@ impl Surface {
                         positions,
                         rect_uv(src_rect, src.width, src.height),
                         c4_modulation(modulation),
-                    ),
+                    )
+                    .map(|vertex| {
+                        vertex.with_software_blit(crate::GpuSoftwareBlit {
+                            source: src_rect,
+                            mapping: crate::GpuSoftwareBlitMapping::Transformed {
+                                origin: dest_origin,
+                                inverse: inv,
+                            },
+                            modulation,
+                            mode: composite.map(|(_, mode)| mode),
+                            translation: [0.0; 2],
+                        })
+                    }),
                     clip,
                     blend,
                     base_mod2: matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive),
@@ -1721,7 +1762,16 @@ impl Surface {
                     ],
                     rect_uv(src_rect, src.width, src.height),
                     c4_modulation(modulation),
-                ),
+                )
+                .map(|vertex| {
+                    vertex.with_software_blit(crate::GpuSoftwareBlit {
+                        source: src_rect,
+                        mapping: crate::GpuSoftwareBlitMapping::Stretched(dest_rect),
+                        modulation,
+                        mode: Some(mode),
+                        translation: [0.0; 2],
+                    })
+                }),
                 clip,
                 blend: gpu_blend(mode),
                 base_mod2: matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive),
@@ -1882,6 +1932,12 @@ pub fn downsample_rgba_box(
 }
 
 impl SurfaceDrawTarget for Surface {
+    fn add_gpu_software_sprite(
+        &mut self,
+        sprite: crate::GpuSoftwareSprite,
+    ) -> Option<crate::GpuSoftwareSpriteId> {
+        Surface::add_gpu_software_sprite(self, sprite)
+    }
     fn width(&self) -> u32 {
         Surface::width(self)
     }
@@ -2100,6 +2156,26 @@ impl SurfaceDrawTarget for Surface {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_points_preserve_integer_and_float_blend_arithmetic() {
+        // The CPU convenience blend truncates integer products; the native
+        // fragment blend rounds on store (src/StdGL.cpp:908). A retained CPU
+        // executor must distinguish them even when their input bytes agree.
+        let capture = |rounded: bool| {
+            let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+            surface.begin_gpu_scene_capture();
+            if rounded {
+                surface
+                    .blend_fragment_over(0, 0, [1.0, 1.0, 1.0, 128.0], None)
+                    .unwrap();
+            } else {
+                surface.blend_pixel(0, 0, Color::new(1, 1, 1, 128)).unwrap();
+            }
+            std::mem::take(&mut finish_gpu_scene(&mut surface).commands)
+        };
+        assert_ne!(capture(false), capture(true));
+    }
+
     #[test]
     fn rasterized_rows_clip_and_preserve_shared_pixels() {
         use super::{Color, PixelFormat, Rect, Surface};

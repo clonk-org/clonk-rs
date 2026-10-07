@@ -15031,6 +15031,49 @@ fn save_to_slot_writes_native_c4group_savegame() {
     main_assert!(guarded.exists("External.txt"));
     main_assert!(!guarded.exists("Title.png"));
 
+    // C4Game.cpp:2102-2138 captures the previous presented back buffer,
+    // including its final gamma, independently of the presentation backend.
+    app.presentation.retained_gpu_presentation_active = false;
+    app.presentation.retained_cpu_presentation_active = true;
+    let cpu_slot = save_root.join("Missions.c4f").join("Missions5.c4s");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    app.saves
+        .submit_background_job(Box::new(move || {
+            held_tx.send(()).expect("report held CPU save worker");
+            release_rx.recv().expect("release CPU save worker");
+            save_worker::BackgroundSaveCompletion::PlayerFile(
+                save_worker::PlayerFileSaveCompletion {
+                    player_number: -1,
+                    info_id: -1,
+                    path: PathBuf::new(),
+                    official_derivation: false,
+                    derivation: None,
+                    result: Ok(()),
+                    persistence: Duration::ZERO,
+                },
+            )
+        }))
+        .test_value();
+    held_rx.recv_timeout(Duration::from_secs(10)).test_value();
+    app.save_to_slot(5);
+    let cpu_pixels = [31, 73, 129, 255, 197, 151, 103, 255];
+    // Freeze the request's back buffer before another redraw and before the
+    // worker completes; completion must not take a later frame's pixels.
+    app.finish_retained_cpu_native_save_thumbnails(&cpu_pixels, 2, 1);
+    // A successful GPU retry must not strand the already frozen CPU title.
+    app.presentation.retained_cpu_presentation_active = false;
+    app.presentation.retained_gpu_presentation_active = true;
+    release_tx.send(()).test_value();
+    app.finish_background_save_jobs();
+    main_assert_eq!(Group::open(&cpu_slot).test_value().read_file("Title.png").test_value() => encode_presented_save_thumbnail(2,1,&cpu_pixels).test_value());
+    let later_pixels = [255, 0, 0, 255, 0, 0, 255, 255];
+    app.finish_retained_cpu_native_save_thumbnails(&later_pixels, 2, 1);
+    main_assert!(app.saves.pending_native_thumbnails.is_empty());
+    main_assert_eq!(Group::open(&cpu_slot).test_value().read_file("Title.png").test_value() => encode_presented_save_thumbnail(2,1,&cpu_pixels).test_value());
+    app.presentation.retained_cpu_presentation_active = false;
+    app.presentation.retained_gpu_presentation_active = true;
+
     let repeated_slot = save_root.join("Missions.c4f").join("Missions6.c4s");
     let mut first_generation = app.engine.capture_state();
     first_generation.frame = 101;
