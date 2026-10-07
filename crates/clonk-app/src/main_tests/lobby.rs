@@ -536,6 +536,21 @@ fn fresh_network_lobby_state_preserves_the_native_focused_chat_caret() {
 }
 
 #[test]
+fn lobby_without_negotiated_release_reports_preserves_legacy_labels() {
+    let (mut app, _events) = joined_client_app_with_events(new_real_menu_app(1280, 720));
+    app.netplay
+        .control_clients
+        .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Local")]);
+    app.sync_classic_lobby_roster();
+    for row in &app_lobby(&app).roster_rows {
+        if let LobbyRosterRow::Client(client) = row {
+            main_assert!(client.release.is_none());
+            main_assert_eq!(client.display_name() => client.name.clone());
+        }
+    }
+}
+
+#[test]
 fn lobby_marks_releases_that_differ_from_the_host() {
     for (width, height) in [(1280, 720), (640, 480)] {
         let (mut app, events) = joined_client_app_with_events(new_real_menu_app(width, height));

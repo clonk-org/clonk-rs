@@ -783,7 +783,7 @@ pub struct LobbyTeamValue {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LobbyClientRow {
-    /// Optional port diagnostics; absent outside a live network lobby.
+    /// Optional port diagnostics; absent until a peer reports its release.
     pub release: Option<LobbyClientRelease>,
     pub id: i32,
     pub name: String,

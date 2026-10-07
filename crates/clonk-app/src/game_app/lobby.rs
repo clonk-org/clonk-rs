@@ -1472,12 +1472,14 @@ impl GameApp {
     fn apply_lobby_release_labels(rows: &mut [LobbyRosterRow], manager: &NetworkManager) {
         for row in rows {
             if let LobbyRosterRow::Client(client) = row {
-                client.release = Some(clonk_frontend::game_lobby::LobbyClientRelease {
-                    version: ClientId::try_from(client.id)
-                        .ok()
-                        .and_then(|id| manager.client_release(id))
-                        .map(str::to_string),
-                    host_version: manager.client_release(0).map(str::to_string),
+                client.release = manager.release_diagnostics_available().then(|| {
+                    clonk_frontend::game_lobby::LobbyClientRelease {
+                        version: ClientId::try_from(client.id)
+                            .ok()
+                            .and_then(|id| manager.client_release(id))
+                            .map(str::to_string),
+                        host_version: manager.client_release(0).map(str::to_string),
+                    }
                 });
             }
         }

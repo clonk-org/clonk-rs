@@ -5972,6 +5972,11 @@ impl NetworkManager {
     }
 
     /// Release identity is optional presentation metadata, never an admission key.
+    pub fn release_diagnostics_available(&self) -> bool {
+        !self.client_releases.is_empty()
+    }
+
+    /// The local release is known even before a peer negotiates diagnostics.
     pub fn client_release(&self, client_id: ClientId) -> Option<&str> {
         if client_id == self.local_client_id {
             Some(env!("CARGO_PKG_VERSION"))

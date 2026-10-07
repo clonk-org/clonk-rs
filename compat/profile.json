@@ -798,7 +798,7 @@
     {
       "id": "local-release-diagnostics",
       "area": "presentation",
-      "summary": "Capability-negotiated release reports show each client's port version in the lobby and identify differences from the host in synchronization-loss messages. Reports never enter lockstep controls or admission; older port and stock peers receive no release-report packets.",
+      "summary": "After the first capability-negotiated release report, annotations show each client's port version in the lobby and identify differences from the host in synchronization-loss messages. Host-only and non-negotiating sessions retain the legacy list. Reports never enter lockstep controls or admission; older port and stock peers receive no release-report packets.",
       "cited_in": [
         "crates/clonk-network/src/client_release.rs",
         "crates/clonk-network/src/session/host_dispatch.rs",

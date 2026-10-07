@@ -19,7 +19,9 @@ replays the host and existing participants' releases for late joiners. Peer
 routes cannot supply authoritative release reports, and the existing forwarding
 guard rejects the entire host-only `0x7x` range.
 
-The lobby keeps client identity and release metadata separate. A known mismatch
+The lobby keeps client identity and release metadata separate. Annotations appear
+after the first negotiated release report arrives, preserving the legacy client
+list in host-only and non-negotiating sessions. A known mismatch
 gets an amber `(!)` marker; its tooltip names the host release and explains that
 mixed releases may lose synchronization. Peers without release metadata show
 `[?]`, explained as `release unknown` in the tooltip. An unknown host release does not produce a mismatch warning.
