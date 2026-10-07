@@ -869,10 +869,20 @@ pub(crate) fn composite_sprite_fragment(
     gamma: Option<&clonk_graphics::GammaRamp>,
 ) -> Color {
     if let PreparedSpriteFragment::Layers { base, overlay } = source {
-        let destination = composite_sprite_fragment(base.into_fragment(), destination, blit, gamma);
-        return composite_sprite_fragment(overlay.into_fragment(), destination, blit, gamma);
+        let destination =
+            composite_single_sprite_fragment(base.into_fragment(), destination, blit, gamma);
+        return composite_single_sprite_fragment(overlay.into_fragment(), destination, blit, gamma);
     }
 
+    composite_single_sprite_fragment(source, destination, blit, gamma)
+}
+
+fn composite_single_sprite_fragment(
+    source: PreparedSpriteFragment,
+    destination: Color,
+    blit: SpriteBlitState,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+) -> Color {
     if let PreparedSpriteFragment::Legacy(source) = source {
         if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
             return blend_fragment_additive(source, destination, gamma);
