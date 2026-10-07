@@ -1019,14 +1019,19 @@ fn prepare_fog_span_quads(
     sampler
         .quads
         .iter()
-        .map(|quad| {
-            let colors = quad.modulation.map(|fog| {
-                if base == 0 {
-                    0
-                } else {
-                    modulate_c4_colors(base, fog)
-                }
-            });
+        .enumerate()
+        .map(|(index, quad)| {
+            let colors = sampler
+                .prepared_base_quad_colors(index, base)
+                .unwrap_or_else(|| {
+                    quad.modulation.map(|fog| {
+                        if base == 0 {
+                            0
+                        } else {
+                            modulate_c4_colors(base, fog)
+                        }
+                    })
+                });
             PreparedFogSpanQuad {
                 #[cfg(target_arch = "x86_64")]
                 float_colors: colors.map(|color| {
@@ -1265,6 +1270,7 @@ mod tests {
         // Combine C4 colors at the vertices before interpolation and decide
         // MOD2 from the entire quad (src/StdGL.cpp:471-503).
         let mut sampler = FogSpriteSampler {
+            prepared: None,
             source_width: 8.0,
             source_height: 8.0,
             columns: 1,
@@ -1379,6 +1385,7 @@ mod tests {
         // A black, alpha-preserving modulation quad disables MOD2
         // (src/StdGL.cpp:471-472); gamma follows shader modulation.
         let sampler = FogSpriteSampler {
+            prepared: None,
             source_width: 8.0,
             source_height: 8.0,
             columns: 1,
@@ -1410,6 +1417,7 @@ mod tests {
         // Fog combines vertex colors before interpolation (StdGL.cpp:471-503),
         // followed by the original gamma and framebuffer pipeline.
         let mut sampler = FogSpriteSampler {
+            prepared: None,
             source_width: 8.0,
             source_height: 8.0,
             columns: 1,
@@ -1733,6 +1741,7 @@ mod tests {
         // disables MOD2 for a wholly black quad (src/StdGL.cpp:471-472).
         for fog_color in [0, 0x00ff_ffff, 0x376b_a1ef] {
             let sampler = FogSpriteSampler {
+                prepared: None,
                 source_width: 4.0,
                 source_height: 4.0,
                 columns: 1,
@@ -1806,6 +1815,7 @@ mod tests {
             [0x0012_3456, 0x4578_9abc, 0x89de_f012, 0xcf34_5678],
         ] {
             let sampler = FogSpriteSampler {
+                prepared: None,
                 source_width: 16.0,
                 source_height: 16.0,
                 columns: 1,

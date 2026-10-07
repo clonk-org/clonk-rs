@@ -223,7 +223,7 @@ fn profile_one_pass(
     scenario_key: &str,
     path: FrameProfilePath,
 ) {
-    clonk_engine::particles::set_presentation_safe_random_seed(1);
+    clonk_engine::particles::install_presentation_safe_random_seed(1);
     let mut fixture = prepared.instantiate_with_window(
         "Frame Profile",
         false,
@@ -289,10 +289,13 @@ fn profile_one_pass(
         std::io::Write::flush(&mut pixels).test_value();
     }
     if let Some(output) = output {
-        let mut csv = String::from("frame,update_ns,snapshot_ns,render_ns\n");
+        let mut csv = String::from("frame,update_ns,snapshot_ns,render_ns");
+        #[cfg(target_os = "linux")]
+        csv.push_str(",render_cpu_ns");
+        csv.push('\n');
         for (index, sample) in samples.iter().enumerate() {
             use std::fmt::Write;
-            writeln!(
+            write!(
                 csv,
                 "{},{},{},{}",
                 FRAME_PROFILE_WARMUP_FRAMES + index + 1,
@@ -301,6 +304,9 @@ fn profile_one_pass(
                 sample.render.as_nanos(),
             )
             .test_value();
+            #[cfg(target_os = "linux")]
+            write!(csv, ",{}", sample.render_cpu.as_nanos()).test_value();
+            csv.push('\n');
         }
         std::fs::write(output.join(format!("{stem}.csv")), csv).test_value();
     }

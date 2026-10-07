@@ -347,10 +347,11 @@ pub(crate) struct FogSpriteSampler {
     pub(crate) x_ranges: Vec<(f32, f32)>,
     pub(crate) y_ranges: Vec<(f32, f32)>,
     pub(crate) quads: Vec<FogColorQuad>,
-    prepared: Option<PreparedFogQuads>,
+    pub(super) prepared: Option<PreparedFogQuads>,
 }
 
-struct PreparedFogQuads {
+pub(super) struct PreparedFogQuads {
+    base: u32,
     quads: Vec<PreparedFogQuad>,
     flat: bool,
     owner: bool,
@@ -419,6 +420,7 @@ impl FogSpriteSampler {
                 .map_or(owner, |global| modulate_c4_colors(owner, global))
         });
         self.prepared = Some(PreparedFogQuads {
+            base,
             quads: self
                 .quads
                 .iter()
@@ -449,6 +451,24 @@ impl FogSpriteSampler {
             owner: owner.is_some(),
         });
         self
+    }
+
+    /// Reuse this draw's exact combined vertices in the optimized span path.
+    /// The channels are integers in f32; packing them cannot change a byte.
+    pub(crate) fn prepared_base_quad_colors(&self, index: usize, base: u32) -> Option<[u32; 4]> {
+        self.prepared
+            .as_ref()
+            .filter(|prepared| prepared.base == base)
+            .map(|prepared| {
+                prepared.quads[index].modulation[0].map(|channels| {
+                    channels
+                        .into_iter()
+                        .enumerate()
+                        .fold(0, |packed, (channel, value)| {
+                            packed | ((value as u32) << (channel * 8))
+                        })
+                })
+            })
     }
 
     fn axis_range_capacity(origin: f32, extent: f32, chunk_size: f32) -> usize {
@@ -2260,6 +2280,7 @@ mod fog_chunk_capacity_tests {
         let rows = vec![vec![0]; 4];
         let context = SkyTileRowRenderContext {
             lit_texels: &texels,
+            opaque: true,
             image_width: 4,
             surface_width: 4,
             regions: &regions,
