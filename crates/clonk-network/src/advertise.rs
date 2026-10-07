@@ -387,6 +387,7 @@ pub struct NetworkGameAdvertiser {
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
     reference_addr: SocketAddr,
+    lan_discovery_warning: Option<String>,
 }
 
 impl NetworkGameAdvertiser {
@@ -436,6 +437,13 @@ impl NetworkGameAdvertiser {
         } else {
             Some(create_discovery_socket(config.discovery_port)?)
         };
+        let lan_discovery_warning = discovery.as_ref().and_then(|(_, interfaces)| {
+            crate::search::lan_discovery_unavailable_reason(
+                &crate::client_mesh::client_mesh_os_interface_endpoints(),
+                interfaces,
+            )
+            .map(crate::search::lan_discovery_unavailable_message)
+        });
         let reference = Arc::new(RwLock::new(reference));
         let worker_reference = Arc::clone(&reference);
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -480,11 +488,18 @@ impl NetworkGameAdvertiser {
             stop: stop_tx,
             worker: Some(worker),
             reference_addr,
+            lan_discovery_warning,
         })
     }
 
     pub fn reference_addr(&self) -> SocketAddr {
         self.reference_addr
+    }
+
+    /// Explains why LAN peers cannot discover this host, while its reference
+    /// server and direct connections remain available.
+    pub fn lan_discovery_warning(&self) -> Option<&str> {
+        self.lan_discovery_warning.as_deref()
     }
 
     pub fn update(&self, reference: &NetworkGameReference) {

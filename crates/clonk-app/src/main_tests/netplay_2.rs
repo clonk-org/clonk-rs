@@ -3421,11 +3421,63 @@ fn network_search_results_render_only_in_native_rows() {
     main_assert!(frame.iter().all(|byte| *byte == 0x6e));
 }
 
+fn capture_lan_discovery_notice(app: &mut GameApp, name: &str) {
+    let (width, height) = {
+        let surface = app.rendering.graphics.surface();
+        (surface.width(), surface.height())
+    };
+    let mut frame = vec![0; (width * height * 4) as usize];
+    app.render(&mut frame).test_value();
+    if let Some(directory) = std::env::var_os("CLONK_LAN_DISCOVERY_EVIDENCE_DIR") {
+        let directory = PathBuf::from(directory);
+        fs::create_dir_all(&directory).test_value();
+        fs::write(
+            directory.join(format!("lan-discovery-{name}-{width}x{height}.png")),
+            encode_screenshot_png(width, height, &frame).test_value(),
+        )
+        .test_value();
+    }
+}
+
+#[test]
+fn host_lan_discovery_warning_is_visible_in_the_lobby_log() {
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.app_paths = Some(paths);
+    install_test_classic_host_lobby(&mut app);
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .test_value();
+    app.loader.screen = prepare_tutorial_host_lobby(&app, repository).loader_screen;
+    let message = "LAN discovery is unavailable: no IPv6 link-local address on any interface. Join by IP address.";
+
+    app.show_host_lan_discovery_warning(message);
+
+    main_assert!(app
+        .lobby
+        .classic_host
+        .test_ref()
+        .controller
+        .logs()
+        .iter()
+        .any(|line| line.text == message));
+    main_assert!(app.dialogs.messages.is_empty());
+    main_assert!(app.status_text.is_empty());
+    main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
+    app.show_host_lan_discovery_warning(message);
+    main_assert_eq!(app.lobby.classic_host.test_ref().controller.logs().len() => 1);
+    capture_lan_discovery_notice(&mut app, "host");
+    app.resize(640, 480).test_value();
+    capture_lan_discovery_notice(&mut app, "host");
+}
+
 #[test]
 fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
-    let mut app = new_classic_menu_app(800, 600);
+    let mut app = new_real_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
-    let detail = "LAN discovery is unavailable: no multicast interface";
+    let detail = "LAN discovery is unavailable: no IPv6 link-local address on any interface. Join by IP address.";
 
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::SearchError {
         source: Some(clonk_network::ReferenceQuerySource::GameDiscovery),
@@ -3443,6 +3495,9 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(!app.take_exit_request());
+    capture_lan_discovery_notice(&mut app, "browser");
+    app.resize(640, 480).test_value();
+    capture_lan_discovery_notice(&mut app, "browser");
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();

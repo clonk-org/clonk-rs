@@ -6282,12 +6282,41 @@ impl GameApp {
         self.netplay.host_reference_paused = false;
         match clonk_network::NetworkGameAdvertiser::start_exact(config, reference.clone()) {
             Ok(advertiser) => {
+                if let Some(message) = advertiser.lan_discovery_warning() {
+                    self.show_host_lan_discovery_warning(message);
+                }
                 self.netplay.game_advertiser = Some(advertiser);
             }
             Err(error) => {
                 tracing::warn!(%error, "network game advertising unavailable");
                 self.netplay.game_advertiser = None;
             }
+        }
+    }
+
+    pub(crate) fn show_host_lan_discovery_warning(&mut self, message: &str) {
+        if self
+            .visible_classic_lobby_controller()
+            .is_some_and(|lobby| {
+                lobby
+                    .logs()
+                    .iter()
+                    .all(|line| !line.text.ends_with(message))
+            })
+        {
+            self.append_control_message_log(message.to_string(), 0x00ff_1f1f, None);
+        }
+    }
+
+    pub(crate) fn sync_host_lan_discovery_warning(&mut self) {
+        let message = self
+            .netplay
+            .game_advertiser
+            .as_ref()
+            .and_then(|advertiser| advertiser.lan_discovery_warning())
+            .map(str::to_string);
+        if let Some(message) = message {
+            self.show_host_lan_discovery_warning(&message);
         }
     }
 
@@ -7582,6 +7611,7 @@ impl GameApp {
                 self.sync_classic_lobby_roster();
                 self.sync_classic_lobby_resource_ready();
                 self.replace_startup_view(StartupView::NetworkLobby);
+                self.sync_host_lan_discovery_warning();
                 self.mode = AppMode::Menu;
                 self.status_text.clear();
                 if let Some(audio) = self.sound.context.as_ref() {
