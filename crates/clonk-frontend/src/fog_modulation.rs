@@ -1810,7 +1810,7 @@ pub(crate) fn prepare_sprite_fragment(
         (owner_mask, owner_color)
     {
         if overlay.a != 0 {
-            let base = prepare_sprite_fragment(source, None, None, blit).into_layer();
+            let base = prepare_base_sprite_fragment(source, blit).into_layer();
             let overlay = prepare_color_by_owner_fragment(overlay, modulation, blit).into_layer();
             return PreparedSpriteFragment::Layers { base, overlay };
         }
@@ -1818,7 +1818,7 @@ pub(crate) fn prepare_sprite_fragment(
 
     if let (Some(ColorByOwnerSample::Scalar(mask)), Some(modulation)) = (owner_mask, owner_color) {
         if mask == 0 {
-            return prepare_sprite_fragment(source, None, None, blit);
+            return prepare_base_sprite_fragment(source, blit);
         }
         // The mask stores the grey ClrByOwner texture intensity. Its main-sfc
         // pixel was cleared when C4Surface::CreateColorByOwner split the image
@@ -1830,6 +1830,10 @@ pub(crate) fn prepare_sprite_fragment(
         );
     }
 
+    prepare_base_sprite_fragment(source, blit)
+}
+
+fn prepare_base_sprite_fragment(source: Color, blit: SpriteBlitState) -> PreparedSpriteFragment {
     if blit.modulation.is_none() && blit.fog_modulation.is_none() && blit.mode & C4GFXBLIT_MOD2 == 0
     {
         return PreparedSpriteFragment::Legacy(source);
@@ -1864,7 +1868,7 @@ pub(crate) fn prepare_filtered_sprite_fragment(
         (owner_mask, owner_color)
     {
         if overlay[3] > 0.0 {
-            let base = prepare_filtered_sprite_fragment(source, None, None, blit).into_layer();
+            let base = prepare_base_filtered_sprite_fragment(source, blit).into_layer();
             let overlay =
                 prepare_filtered_color_by_owner_fragment(overlay, modulation, blit).into_layer();
             return PreparedSpriteFragment::Layers { base, overlay };
@@ -1875,7 +1879,7 @@ pub(crate) fn prepare_filtered_sprite_fragment(
         (owner_mask, owner_color)
     {
         if mask <= 0.0 {
-            return prepare_filtered_sprite_fragment(source, None, None, blit);
+            return prepare_base_filtered_sprite_fragment(source, blit);
         }
         return prepare_filtered_color_by_owner_fragment(
             [mask, mask, mask, source[3]],
@@ -1884,6 +1888,13 @@ pub(crate) fn prepare_filtered_sprite_fragment(
         );
     }
 
+    prepare_base_filtered_sprite_fragment(source, blit)
+}
+
+fn prepare_base_filtered_sprite_fragment(
+    source: [f32; 4],
+    blit: SpriteBlitState,
+) -> PreparedSpriteFragment {
     let mut modulation = blit.modulation.unwrap_or(0x00ff_ffff);
     let uses_mod2 = blit.mode & C4GFXBLIT_MOD2 != 0;
     let quad_modulation_is_nonzero = if modulation != 0 {
