@@ -6753,6 +6753,10 @@ fn selected_clonkmars_host_reference_sample() -> Duration {
         .expect("bind selected-host masterserver fixture");
     let master_endpoint = format!("http://{}/", master_listener.local_addr().test_value());
     let (master_request_tx, master_request_rx) = mpsc::channel();
+    // The fixture holds its reply until the test releases it, so the test
+    // observes the host while its Start is still unanswered instead of
+    // racing the finalizing worker for the response.
+    let (master_release_tx, master_release_rx) = mpsc::channel::<()>();
     let master_server = thread::spawn(move || {
         let (mut stream, _) = master_listener
             .accept()
@@ -6787,6 +6791,10 @@ fn selected_clonkmars_host_reference_sample() -> Duration {
             request.extend_from_slice(&chunk[..count]);
         }
         let body = request[header_end..header_end + content_length].to_vec();
+        master_request_tx.send((Instant::now(), body)).test_value();
+        master_release_rx
+            .recv()
+            .expect("release the selected-host masterserver response");
         let reply = b"[Response]\r\nStatus=Success\r\n";
         write!(
             stream,
@@ -6795,7 +6803,6 @@ fn selected_clonkmars_host_reference_sample() -> Duration {
         )
         .test_value();
         stream.write_all(reply).test_value();
-        master_request_tx.send((Instant::now(), body)).test_value();
     });
     persist_config_value(&paths, "Network", "ServerAddress", master_endpoint).test_value();
     let tcp_port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -6891,10 +6898,6 @@ fn selected_clonkmars_host_reference_sample() -> Duration {
             .any(|address| address.protocol == clonk_network::NetworkProtocol::Tcp),
         "an external reference query must return a client-reachable TCP route"
     );
-    main_assert!(
-        matches!(master_request_rx.try_recv(), Err(TryRecvError::Empty)),
-        "masterserver Start must retain the exact synchronized-response ordering"
-    );
     eprintln!(
         "selected ClonkMars host staged in {staging_elapsed:?} and exposed its reference in {elapsed:?} before the first lobby render"
     );
@@ -6906,6 +6909,56 @@ fn selected_clonkmars_host_reference_sample() -> Duration {
     let mut frame = vec![0_u8; 640 * 480 * 4];
     let lobby_rendered = app.test_render(&mut frame);
     main_assert!(lobby_rendered, "the queryable lobby must have rendered");
+
+    // The host registers only once exact preparation finished, and admission
+    // waits for that synchronized Start response. Whether the finalizing
+    // worker sends Start before or after the first external query depends
+    // only on how fast this thread ran, so the Start is awaited here rather
+    // than raced against that query.
+    let (master_received_at, master_request) = loop {
+        match master_request_rx.try_recv() {
+            Ok(request) => break request,
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                panic!("masterserver fixture ended before the prepared host registered")
+            }
+        }
+        main_assert!(
+            !app.netplay
+                .advertised_game_reference
+                .as_ref()
+                .is_some_and(|reference| reference.summary().join_allowed),
+            "admission opened before the masterserver Start was sent"
+        );
+        app.test_update();
+        main_assert!(
+            Instant::now() < deadline,
+            "the exact prepared host never registered with the masterserver: {}",
+            app.status_text
+        );
+        thread::yield_now();
+    };
+    for _ in 0..8 {
+        app.test_update();
+        thread::yield_now();
+    }
+    main_assert!(
+        app.startup_network.connection.is_some(),
+        "the prepared host must wait for its masterserver Start response"
+    );
+    let unanswered = query_first_classic_reference(
+        clonk_network::ReferenceEndpoint::Address(SocketAddr::from((
+            std::net::Ipv6Addr::LOCALHOST,
+            reference_port,
+        ))),
+        &clonk_network::ReferenceQueryConfig::default(),
+    )
+    .test_value();
+    main_assert!(
+        !unanswered.join_allowed,
+        "admission must stay closed while the masterserver Start is unanswered"
+    );
+    master_release_tx.send(()).test_value();
 
     while app.startup_network.connection.is_some()
         || !app
@@ -6922,9 +6975,6 @@ fn selected_clonkmars_host_reference_sample() -> Duration {
         );
         thread::yield_now();
     }
-    let (master_received_at, master_request) = master_request_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("the exact prepared host must register with the masterserver");
     master_server.test_join();
     main_assert!(
         master_request
