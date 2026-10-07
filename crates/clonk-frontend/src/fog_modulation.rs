@@ -761,6 +761,7 @@ impl FogSpriteSampler {
         ])
     }
 
+    #[cfg(test)]
     pub(crate) fn blit_at(
         &self,
         blit: SpriteBlitState,
@@ -779,6 +780,16 @@ impl FogSpriteSampler {
         blit: SpriteBlitState,
         x: FogAxisSample,
         y: FogAxisSample,
+    ) -> SpriteBlitState {
+        self.blit_at_axes_for_passes(blit, x, y, [true, true])
+    }
+
+    fn blit_at_axes_for_passes(
+        &self,
+        blit: SpriteBlitState,
+        x: FogAxisSample,
+        y: FogAxisSample,
+        passes: [bool; 2],
     ) -> SpriteBlitState {
         let sample = if let Some(prepared) = &self.prepared {
             let (quad, weights) = self.quad_and_weights_for_axes(x, y);
@@ -807,7 +818,14 @@ impl FogSpriteSampler {
             };
             FogModulationSample::Prepared {
                 modulation: quad.modulation,
-                fragments: [fragment(0), if prepared.owner { fragment(1) } else { 0 }],
+                fragments: [
+                    if passes[0] { fragment(0) } else { 0 },
+                    if prepared.owner && passes[1] {
+                        fragment(1)
+                    } else {
+                        0
+                    },
+                ],
                 nonzero: combined.nonzero,
             }
         } else {
@@ -826,8 +844,41 @@ pub(crate) fn fog_sprite_blit_at(
     target_x: i32,
     target_y: i32,
 ) -> SpriteBlitState {
+    fog_sprite_blit_at_for_passes(
+        sampler,
+        fog,
+        blit,
+        normalized_x,
+        normalized_y,
+        target_x,
+        target_y,
+        [true, true],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fog_sprite_blit_at_for_passes(
+    sampler: Option<&FogSpriteSampler>,
+    fog: Option<&FogDrawContext>,
+    blit: SpriteBlitState,
+    normalized_x: f32,
+    normalized_y: f32,
+    target_x: i32,
+    target_y: i32,
+    passes: [bool; 2],
+) -> SpriteBlitState {
+    // Both sampled surfaces are transparent, so the caller discards this
+    // fragment after preparation. Fog cannot change their zero opacity.
+    if passes == [false, false] {
+        return blit;
+    }
     if let Some(sampler) = sampler {
-        sampler.blit_at(blit, normalized_x, normalized_y)
+        sampler.blit_at_axes_for_passes(
+            blit,
+            FogSpriteSampler::axis_sample(&sampler.x_ranges, sampler.source_width, normalized_x),
+            FogSpriteSampler::axis_sample(&sampler.y_ranges, sampler.source_height, normalized_y),
+            passes,
+        )
     } else if let Some(fog) = fog {
         // A malformed/projective quad can fail sampler construction. Retain
         // visibility rather than dropping modulation for the complete draw.
@@ -1933,6 +1984,54 @@ pub(crate) fn prepare_liquid_animation_fragment(
 #[cfg(test)]
 mod fog_chunk_capacity_tests {
     use super::*;
+
+    #[test]
+    fn sprite_fog_interpolates_only_visible_base_and_owner_passes() {
+        // StdDDraw2.cpp:769-777 draws the main and owner surfaces separately;
+        // C4Surface.cpp:288-312 removes scalar owner pixels from the main one.
+        // Zero-alpha texels cannot change GL_SRC_ALPHA framebuffer blending.
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 1,
+                resolution_y: 1,
+                width: 5,
+                height: 5,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: (0..25)
+                    .map(|index| 0x0010_2040 + index * 0x0001_0101)
+                    .collect(),
+            }),
+            zoom: 1.0,
+        };
+        for sampling in [BlitSampling::Nearest, BlitSampling::Linear] {
+            for (alpha, mask_value, expected) in [(0, 0, 0), (255, 0, 16), (255, 127, 16)] {
+                let image = ImageData::new(4, 4, [17, 63, 191, alpha].repeat(16));
+                let mask = ColorByOwnerMask::new(4, 4, vec![mask_value; 16].into());
+                let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+                FOG_INTERPOLATION_CALLS.with(|calls| calls.set(0));
+                draw_image_region_float_source(
+                    &mut surface,
+                    &GuiRect::new(0.0, 0.0, 4.0, 4.0),
+                    &image,
+                    Some(&mask),
+                    &FloatSourceRect::scaled(SourceRect::new(0, 0, 4, 4), 1.0),
+                    sampling,
+                    false,
+                    Some(0x00ab_cdef),
+                    SpriteBlitState::normal(),
+                    None,
+                    Some(&fog),
+                );
+                assert_eq!(
+                    FOG_INTERPOLATION_CALLS.with(std::cell::Cell::get),
+                    expected,
+                    "alpha={alpha} mask={mask_value}",
+                );
+            }
+        }
+    }
 
     #[test]
     fn uniform_fog_chunks_reuse_their_exact_rounded_fragment() {
