@@ -2655,6 +2655,21 @@ impl GameApp {
             return Ok(self.attach_startup_gpu_damage(frame, startup_damage_eligible, true));
         }
 
+        self.capture_retained_logical_gpu_frame(
+            presentation,
+            &gamma,
+            gamma_mode,
+            startup_damage_eligible,
+        )
+    }
+
+    pub(crate) fn capture_retained_logical_gpu_frame(
+        &mut self,
+        presentation: GpuPresentation,
+        gamma: &clonk_graphics::GammaRamp,
+        gamma_mode: GpuGammaMode,
+        startup_damage_eligible: bool,
+    ) -> Result<RetainedGpuFrame> {
         self.rendering.graphics.begin_gpu_scene_capture();
         let mut ignored_cpu_pixel = [0_u8; 4];
         if let Err(error) = self.render_for_presentation_with_monitor_defer(
@@ -2664,18 +2679,18 @@ impl GameApp {
             false,
             true,
         ) {
-            let _ = self.rendering.graphics.finish_gpu_scene_capture(&gamma);
+            let _ = self.rendering.graphics.finish_gpu_scene_capture(gamma);
             return Err(error);
         }
         let (mut scene, capture_stats) = self
             .rendering
             .graphics
-            .finish_gpu_scene_capture_with_stats(&gamma)
+            .finish_gpu_scene_capture_with_stats(gamma)
             .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
         scene.gamma_mode = gamma_mode;
         if let Some(plan) = self.presentation.pending_native_presentation.take() {
             let mut frame =
-                self.retained_gpu_frame_from_native_plan(plan, presentation, &gamma, gamma_mode)?;
+                self.retained_gpu_frame_from_native_plan(plan, presentation, gamma, gamma_mode)?;
             if !scene.commands.is_empty() {
                 frame.layers.push(RetainedGpuFrameLayer {
                     scene,
