@@ -2853,6 +2853,64 @@ pub(crate) fn prepare_runtime_sprite_sample_with_texture_size(
     blit: SpriteBlitState,
     physical_texture_size: Option<i32>,
 ) -> Option<PreparedSpriteFragment> {
+    prepare_runtime_sprite_sample_with_blit(
+        image,
+        mask,
+        source,
+        fog_chunked,
+        source_edge_x,
+        source_edge_y,
+        sampling,
+        owner_color,
+        blit,
+        physical_texture_size,
+        |_| blit,
+    )
+    .map(|(fragment, _)| fragment)
+}
+
+pub(crate) fn runtime_sprite_passes(
+    source_alpha: f32,
+    owner_mask: Option<FilteredColorByOwnerSample>,
+    owner_color: Option<u32>,
+) -> [bool; 2] {
+    match (owner_mask, owner_color) {
+        (Some(FilteredColorByOwnerSample::Overlay(overlay)), Some(_)) if overlay[3] > 0.0 => {
+            [source_alpha > 0.0, true]
+        }
+        (Some(FilteredColorByOwnerSample::Scalar(mask)), Some(_)) if mask > 0.0 => {
+            [false, source_alpha > 0.0]
+        }
+        _ => [source_alpha > 0.0, false],
+    }
+}
+
+pub(crate) fn filtered_owner_sample(sample: ColorByOwnerSample) -> FilteredColorByOwnerSample {
+    match sample {
+        ColorByOwnerSample::Scalar(mask) => FilteredColorByOwnerSample::Scalar(f32::from(mask)),
+        ColorByOwnerSample::Overlay(color) => FilteredColorByOwnerSample::Overlay([
+            f32::from(color.r),
+            f32::from(color.g),
+            f32::from(color.b),
+            f32::from(color.a),
+        ]),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_runtime_sprite_sample_with_blit(
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: &FloatSourceRect,
+    fog_chunked: bool,
+    source_edge_x: f32,
+    source_edge_y: f32,
+    sampling: BlitSampling,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    physical_texture_size: Option<i32>,
+    prepare_blit: impl FnOnce([bool; 2]) -> SpriteBlitState,
+) -> Option<(PreparedSpriteFragment, SpriteBlitState)> {
     let (tile_x, tile_y, tile_size) = if let Some(tile_size) = physical_texture_size {
         if tile_size <= 0 || !source_edge_x.is_finite() || !source_edge_y.is_finite() {
             return None;
@@ -2918,10 +2976,13 @@ pub(crate) fn prepare_runtime_sprite_sample_with_texture_size(
                     && source_y < mask.height as i32)
                     .then(|| mask.value_at(source_x as u32, source_y as u32))
             });
-            Some(prepare_sprite_fragment(
-                color,
-                owner_mask,
+            let blit = prepare_blit(runtime_sprite_passes(
+                f32::from(color.a),
+                owner_mask.map(filtered_owner_sample),
                 owner_color,
+            ));
+            Some((
+                prepare_sprite_fragment(color, owner_mask, owner_color, blit),
                 blit,
             ))
         }
@@ -2933,10 +2994,9 @@ pub(crate) fn prepare_runtime_sprite_sample_with_texture_size(
             let owner_mask = mask.map(|mask| {
                 bilinear_sample_owner_tile(mask, tile_x, tile_y, tile_size, u_rel, v_rel)
             });
-            Some(prepare_filtered_sprite_fragment(
-                source,
-                owner_mask,
-                owner_color,
+            let blit = prepare_blit(runtime_sprite_passes(source[3], owner_mask, owner_color));
+            Some((
+                prepare_filtered_sprite_fragment(source, owner_mask, owner_color, blit),
                 blit,
             ))
         }
