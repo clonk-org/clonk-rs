@@ -6,6 +6,10 @@
 use super::*;
 
 const HOST_ROUTE_CLOSE_WRITE_GRACE: Duration = Duration::from_millis(25);
+/// How long a host route keeps reading after its writer failed. A reset peer
+/// ends the read side promptly; this only bounds a writer failure whose
+/// socket stays readable.
+const HOST_ROUTE_WRITE_FAILURE_READ_GRACE: Duration = Duration::from_millis(100);
 
 #[cfg(test)]
 struct HostRouteWriterPause {
@@ -288,6 +292,8 @@ where
         let mut disconnect_reason = None;
         let mut notify_disconnect = true;
         let mut liveness_timer = new_liveness_timer(liveness.next_timer_at());
+        let write_failure_read_grace = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(write_failure_read_grace);
         loop {
             let liveness_deadline = liveness.next_timer_at();
             if liveness_timer.deadline() != liveness_deadline {
@@ -297,7 +303,7 @@ where
                 _ = wait_for_route_retirement(&mut retire_rx) => {
                     break;
                 }
-                writer_result = &mut writer_task => {
+                writer_result = &mut writer_task, if !writer_finished => {
                     writer_finished = true;
                     match writer_result {
                         Ok(HostRouteWriterExit::Cancelled) => {}
@@ -306,12 +312,25 @@ where
                             notify_disconnect = false;
                         }
                         Ok(HostRouteWriterExit::Failed(reason)) => {
+                            // Native C4NetIOTCP::Peer::Send only records a
+                            // failed send. The connection closes on the read
+                            // path, after every byte already received has
+                            // been delivered, so a peer's queued ConnRe still
+                            // names the disconnect (oracle-src-pinned
+                            // src/C4NetIO.cpp:711-750,1363-1376).
                             disconnect_reason = Some(reason);
+                            write_failure_read_grace.as_mut().reset(
+                                tokio::time::Instant::now() + HOST_ROUTE_WRITE_FAILURE_READ_GRACE,
+                            );
+                            continue;
                         }
                         Err(error) => {
                             disconnect_reason = Some(format!("route writer task failed: {error}"));
                         }
                     }
+                    break;
+                }
+                _ = &mut write_failure_read_grace, if writer_finished => {
                     break;
                 }
                 packet = transport.read_packet() => {
@@ -350,8 +369,9 @@ where
                                 .send(HostOutboundMessage::Message(ControlMessage::Pong(packet)))
                                 .is_err()
                             {
-                                disconnect_reason =
-                                    Some("pong send failed: route writer closed".to_string());
+                                disconnect_reason.get_or_insert_with(|| {
+                                    "pong send failed: route writer closed".to_string()
+                                });
                                 break;
                             }
                         }
@@ -397,7 +417,8 @@ where
                             break;
                         }
                         Err(error) => {
-                            disconnect_reason = Some(format!("read failed: {error}"));
+                            disconnect_reason
+                                .get_or_insert_with(|| format!("read failed: {error}"));
                             break;
                         }
                     }
@@ -419,7 +440,7 @@ where
                         }
                         Ok(false) => {}
                         Err(reason) => {
-                            disconnect_reason = Some(reason);
+                            disconnect_reason.get_or_insert(reason);
                             break;
                         }
                     }

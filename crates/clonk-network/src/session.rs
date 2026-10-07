@@ -177,6 +177,37 @@ mod tests {
         }
     }
 
+    /// Reads like its duplex half, while every write fails as a peer reset.
+    struct ResetWriteDuplex(DuplexStream);
+
+    impl AsyncRead for ResetWriteDuplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_read(context, buffer)
+        }
+    }
+
+    impl AsyncWrite for ResetWriteDuplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     fn test_control_send_time_snapshot() -> ControlSendTimeSnapshot {
         ControlSendTimeSnapshot::default()
     }
@@ -14903,6 +14934,46 @@ mod tests {
             .await
             .test_value()
             .test_value();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn host_route_send_failure_does_not_overtake_the_peer_connection_reply() {
+        // Native C4NetIOTCP::Peer::Send only records a failed send; the
+        // connection closes on the read path after every byte already
+        // received has been delivered (oracle-src-pinned
+        // src/C4NetIO.cpp:711-750,1363-1376). A peer that parts with a
+        // negative ConnRe keeps its own reason even when the host's next
+        // write is reset before that reply is read.
+        let (host_stream, peer_stream) = duplex(256);
+        let mut peer = crate::ControlTransport::new(peer_stream);
+        let (outbound_tx, mut host_rx, task) =
+            start_test_host_route(ResetWriteDuplex(host_stream), 7);
+        outbound_tx
+            .send(ControlMessage::Status(NetworkStatus::new(
+                NETWORK_STATE_LOBBY,
+                1,
+                7,
+            )))
+            .await
+            .test_value();
+        // Paused time advances only once the route is idle, so its writer
+        // has already failed when the reply becomes readable.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let _ = peer
+            .send_message(ControlMessage::ConnectionReply(test_connection_reply(
+                false,
+                c4(b"removing client"),
+                false,
+            )))
+            .await;
+
+        let Some(HostLoopMessage::ClientDisconnected { reason, .. }) =
+            timeout(EVENT_WAIT, host_rx.recv()).await.test_value()
+        else {
+            panic!("host route ended without a disconnect notice");
+        };
+        assert_eq!(reason.as_deref(), Some("removing client"));
+        timeout(EVENT_WAIT, task).await.test_value().test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
