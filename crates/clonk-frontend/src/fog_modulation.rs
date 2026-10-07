@@ -299,6 +299,15 @@ pub(crate) struct FogAxisSample {
     offset: f32,
 }
 
+impl FogAxisSample {
+    pub(crate) fn chunk(self) -> usize {
+        self.chunk
+    }
+    pub(crate) fn offset(self) -> f32 {
+        self.offset
+    }
+}
+
 pub(crate) fn interpolate_quad_color(colors: [Color; 4], weights: [f32; 4]) -> Color {
     let channel = |select: fn(Color) -> u8| {
         colors
@@ -319,6 +328,13 @@ pub(crate) fn interpolate_quad_color(colors: [Color; 4], weights: [f32; 4]) -> C
 }
 
 impl FogSpriteSampler {
+    pub(crate) fn x_axis_at(&self, normalized: f32) -> FogAxisSample {
+        Self::axis_sample(&self.x_ranges, self.source_width, normalized)
+    }
+
+    pub(crate) fn y_axis_at(&self, normalized: f32) -> FogAxisSample {
+        Self::axis_sample(&self.y_ranges, self.source_height, normalized)
+    }
     fn axis_range_capacity(origin: f32, extent: f32, chunk_size: f32) -> usize {
         if !origin.is_finite()
             || !extent.is_finite()
@@ -687,6 +703,13 @@ pub(crate) fn rasterize_sprite_region(
     gamma: Option<&clonk_graphics::GammaRamp>,
     mut sample: impl FnMut(i32, i32) -> Option<(PreparedSpriteFragment, SpriteBlitState)>,
 ) {
+    // Inline unit callers retain the scalar oracle for span comparisons.
+    // Integration tests and the production renderer exercise the compositor.
+    let compositor = if cfg!(test) || surface.is_gpu_scene_capture_active() {
+        None
+    } else {
+        sprite_spans::SpanCompositor::new(gamma)
+    };
     if surface.rasterize_rgba_rows(region, |x, y, pixels| {
         for (column, pixel) in pixels.iter_mut().enumerate() {
             let Some((fragment, blit)) = sample(x as i32 + column as i32, y as i32) else {
@@ -695,11 +718,10 @@ pub(crate) fn rasterize_sprite_region(
             if fragment.alpha() == 0.0 {
                 continue;
             }
-            let output = composite_sprite_fragment(
-                fragment,
-                Color::new(pixel[0], pixel[1], pixel[2], pixel[3]),
-                blit,
-                gamma,
+            let destination = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]);
+            let output = compositor.as_ref().map_or_else(
+                || composite_sprite_fragment(fragment, destination, blit, gamma),
+                |compositor| compositor.composite(fragment, destination, blit),
             );
             *pixel = [output.r, output.g, output.b, output.a];
         }

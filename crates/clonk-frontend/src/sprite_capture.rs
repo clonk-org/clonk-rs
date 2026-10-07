@@ -1360,6 +1360,10 @@ pub(crate) fn draw_image_region_transformed_float_source(
             |x, y| transform.transform_point(x, y),
         )
     });
+    let prepared_fog = fog_sampler
+        .as_ref()
+        .filter(|_| mask.is_none() || owner_color.is_none())
+        .and_then(|sampler| sprite_spans::SpanFogBlit::new(blit, sampler));
 
     let corners = [
         (dest_x, dest_y),
@@ -1409,14 +1413,19 @@ pub(crate) fn draw_image_region_transformed_float_source(
 
             let (source_edge_x, source_edge_y) =
                 source.source_edge(normalized_x, normalized_y, flip_x);
-            let pixel_blit = fog_sprite_blit_at(
-                fog_sampler.as_ref(),
-                fog,
-                blit,
-                normalized_x,
-                normalized_y,
-                target_x,
-                target_y,
+            let pixel_blit = prepared_fog.as_ref().zip(fog_sampler.as_ref()).map_or_else(
+                || {
+                    fog_sprite_blit_at(
+                        fog_sampler.as_ref(),
+                        fog,
+                        blit,
+                        normalized_x,
+                        normalized_y,
+                        target_x,
+                        target_y,
+                    )
+                },
+                |(prepared, sampler)| prepared.at(sampler, normalized_x, normalized_y),
             );
             let Some(source) = prepare_runtime_sprite_sample(
                 image,
@@ -1524,6 +1533,23 @@ pub(crate) fn draw_image_region_float_source(
             |x, y| (x, y),
         )
     });
+
+    if sampling == BlitSampling::Nearest
+        && (mask.is_none() || owner_color.is_none())
+        && (fog.is_none() || fog_sampler.is_some())
+        && sprite_spans::draw_nearest_sprite_span(
+            surface,
+            image,
+            source,
+            SurfaceRect::new(dest_x, dest_y, dest_width, dest_height),
+            blit,
+            gamma,
+            flip_x,
+            fog_sampler.as_ref().map(|sampler| (sampler, rect)),
+        )
+    {
+        return;
+    }
 
     rasterize_sprite_region(
         surface,
@@ -2396,6 +2422,23 @@ pub fn draw_image_strip(
         BilinearBlend::AlphaOver,
         None,
         gamma,
+    ) {
+        return;
+    }
+    if sprite_spans::draw_nearest_sprite_span(
+        surface,
+        image,
+        &FloatSourceRect {
+            x: src_x as f32,
+            y: src_y as f32,
+            width: src_w as f32,
+            height: src_h as f32,
+        },
+        SurfaceRect::new(dest_x, dest_y, src_w, src_h),
+        SpriteBlitState::normal(),
+        gamma,
+        false,
+        None,
     ) {
         return;
     }

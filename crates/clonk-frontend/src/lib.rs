@@ -44,6 +44,9 @@ pub mod scoreboard;
 pub mod settings_overlay;
 mod software_draw;
 mod sprite_capture;
+mod sprite_spans;
+#[cfg(feature = "presentation-profile")]
+pub use sprite_spans::set_software_sprite_span_reference;
 mod sprites;
 mod startup_about;
 pub mod startup_about_dlg;

@@ -27,10 +27,32 @@ struct FrameProfileSample {
     update: std::time::Duration,
     snapshot: std::time::Duration,
     render: std::time::Duration,
+    #[cfg(target_os = "linux")]
+    render_cpu: std::time::Duration,
     update_allocation_calls: u64,
     update_allocation_bytes: u64,
     render_allocation_calls: u64,
     render_allocation_bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn frame_profile_process_cpu() -> std::time::Duration {
+    #[repr(C)]
+    struct Timespec {
+        seconds: std::ffi::c_long,
+        nanoseconds: std::ffi::c_long,
+    }
+    unsafe extern "C" {
+        fn clock_gettime(clock: std::ffi::c_int, value: *mut Timespec) -> std::ffi::c_int;
+    }
+    let mut value = Timespec {
+        seconds: 0,
+        nanoseconds: 0,
+    };
+    // Linux CLOCK_PROCESS_CPUTIME_ID includes the Rayon worker while excluding
+    // descheduled time. Keep wall time as the acceptance metric.
+    assert_eq!(unsafe { clock_gettime(2, &mut value) }, 0);
+    std::time::Duration::new(value.seconds as u64, value.nanoseconds as u32)
 }
 
 impl FrameProfileSample {
@@ -89,16 +111,28 @@ fn frame_profile_sample(
             app.test_update();
             (started.elapsed(), app.engine.snapshot_timings().total)
         });
-    let (render, render_allocation_calls, render_allocation_bytes) =
+    let (render_times, render_allocation_calls, render_allocation_bytes) =
         measure_app_profile_allocations(|| {
+            #[cfg(target_os = "linux")]
+            let cpu_started = frame_profile_process_cpu();
             let started = std::time::Instant::now();
             present_frame(app, path, frame);
-            started.elapsed()
+            let elapsed = started.elapsed();
+            #[cfg(target_os = "linux")]
+            return (elapsed, frame_profile_process_cpu() - cpu_started);
+            #[cfg(not(target_os = "linux"))]
+            elapsed
         });
+    #[cfg(target_os = "linux")]
+    let (render, render_cpu) = render_times;
+    #[cfg(not(target_os = "linux"))]
+    let render = render_times;
     FrameProfileSample {
         update,
         snapshot,
         render,
+        #[cfg(target_os = "linux")]
+        render_cpu,
         update_allocation_calls,
         update_allocation_bytes,
         render_allocation_calls,
@@ -174,6 +208,14 @@ render_allocation_calls_mean={} render_allocation_bytes_mean={}",
         frame_profile_mean(samples, |sample| sample.render_allocation_calls),
         frame_profile_mean(samples, |sample| sample.render_allocation_bytes),
     );
+    #[cfg(target_os = "linux")]
+    eprintln!(
+        "scenario_frame_cpu scenario={scenario_key} path={} render_cpu_p50_ms={:.3} render_cpu_p95_ms={:.3} render_cpu_p99_ms={:.3}",
+        path.label(),
+        frame_profile_percentile(samples, 0.50, |sample| sample.render_cpu),
+        frame_profile_percentile(samples, 0.95, |sample| sample.render_cpu),
+        frame_profile_percentile(samples, 0.99, |sample| sample.render_cpu),
+    );
 }
 
 fn profile_one_pass(
@@ -193,23 +235,121 @@ fn profile_one_pass(
         app.test_update();
         present_frame(app, path, &mut frame);
     }
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    let reference = std::env::var_os("CLONK_FRAME_PROFILE_SPRITE_REFERENCE").is_some();
+    let mut comparison = (path == FrameProfilePath::Software
+        && std::env::var_os("CLONK_FRAME_PROFILE_COMPARE_RGBA").is_some())
+    .then(|| vec![0; frame.len()]);
     let samples = (0..FRAME_PROFILE_MEASURED_FRAMES)
-        .map(|_| frame_profile_sample(app, path, &mut frame))
+        .map(|_| {
+            let sample = frame_profile_sample(app, path, &mut frame);
+            if let Some(comparison) = comparison.as_mut() {
+                // Separate correctness run: the second render is untimed, but
+                // can affect caches, so never report it as a timing experiment.
+                clonk_frontend::set_software_sprite_span_reference(!reference);
+                present_frame(app, path, comparison);
+                clonk_frontend::set_software_sprite_span_reference(reference);
+                assert_eq!(
+                    frame, *comparison,
+                    "scalar/span RGBA mismatch: {scenario_key}"
+                );
+            }
+            if path == FrameProfilePath::Software {
+                // Outside the timers: compare every measured frame's exact RGBA
+                // output between the scalar and span runs of one executable.
+                digest = frame.iter().fold(digest, |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+                });
+            }
+            sample
+        })
         .collect::<Vec<_>>();
     report_frame_profile(scenario_key, path, app, &samples);
+    if let Some(directory) = std::env::var_os("CLONK_FRAME_PROFILE_OUTPUT_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).test_value();
+        let mut report = serde_json::json!({
+            "scenario": scenario_key,
+            "path": path.label(),
+            "sprite_reference": reference,
+            "compared_rgba": comparison.is_some(),
+            "seed": app.engine.random_seed(),
+            "width": FRAME_PROFILE_WIDTH,
+            "height": FRAME_PROFILE_HEIGHT,
+            "warmup": FRAME_PROFILE_WARMUP_FRAMES,
+            "samples": FRAME_PROFILE_MEASURED_FRAMES,
+            "measured_rgba_fnv64": format!("{digest:016x}"),
+            "update_ns": samples.iter().map(|sample| sample.update.as_nanos() as u64).collect::<Vec<_>>(),
+            "snapshot_ns": samples.iter().map(|sample| sample.snapshot.as_nanos() as u64).collect::<Vec<_>>(),
+            "render_ns": samples.iter().map(|sample| sample.render.as_nanos() as u64).collect::<Vec<_>>(),
+        });
+        #[cfg(target_os = "linux")]
+        {
+            report["render_cpu_ns"] = serde_json::to_value(
+                samples
+                    .iter()
+                    .map(|sample| sample.render_cpu.as_nanos() as u64)
+                    .collect::<Vec<_>>(),
+            )
+            .test_value();
+        }
+        let filename = format!(
+            "{}-{}-{}.json",
+            scenario_key.replace('/', "_"),
+            path.label(),
+            if reference { "reference" } else { "optimized" }
+        );
+        std::fs::write(
+            directory.join(filename),
+            serde_json::to_vec_pretty(&report).test_value(),
+        )
+        .test_value();
+    }
+    if path == FrameProfilePath::Software {
+        eprintln!("scenario_frame_pixels scenario={scenario_key} seed={} measured_rgba_fnv64={digest:016x}", app.engine.random_seed());
+    }
 }
 
 fn profile_one_scenario(scenario_key: &str) {
     let prepared = PreparedRealInstalledScenario::new(scenario_key);
     for path in [FrameProfilePath::Software, FrameProfilePath::Retained] {
-        profile_one_pass(&prepared, scenario_key, path);
+        if std::env::var("CLONK_FRAME_PROFILE_PATH")
+            .map_or(true, |selected| selected == path.label())
+        {
+            profile_one_pass(&prepared, scenario_key, path);
+        }
     }
 }
 
 #[test]
 #[ignore = "manual production-path frame profiling probe; reports per-stage timings"]
 fn scenario_frame_profile() {
+    let reference = std::env::var_os("CLONK_FRAME_PROFILE_SPRITE_REFERENCE").is_some();
+    clonk_frontend::set_software_sprite_span_reference(reference);
+    eprintln!(
+        "scenario_frame_mode sprite_reference={reference} load_average={}",
+        std::fs::read_to_string("/proc/loadavg")
+            .unwrap_or_default()
+            .trim()
+    );
+    let selected = std::env::var("CLONK_FRAME_PROFILE_SCENARIO").ok();
+    assert!(
+        std::env::var("CLONK_FRAME_PROFILE_PATH").map_or(true, |selected| ["software", "retained"]
+            .contains(&selected.as_str())),
+        "unknown profile path"
+    );
+    assert!(
+        selected
+            .as_ref()
+            .is_none_or(|selected| FRAME_PROFILE_SCENARIOS.contains(&selected.as_str())),
+        "unknown profile scenario"
+    );
     for scenario_key in FRAME_PROFILE_SCENARIOS {
-        profile_one_scenario(scenario_key);
+        if selected
+            .as_ref()
+            .is_none_or(|selected| selected == scenario_key)
+        {
+            profile_one_scenario(scenario_key);
+        }
     }
 }

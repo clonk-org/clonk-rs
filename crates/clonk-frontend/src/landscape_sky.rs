@@ -807,6 +807,7 @@ impl LandscapeRowRenderContext<'_> {
 /// alpha compositing cannot drift between paths.
 fn draw_ground_textured_row(
     context: &LandscapeRowRenderContext<'_>,
+    shader: Option<&sprite_spans::SpanRowShader>,
     screen_y: u32,
     row: &mut [u8],
 ) {
@@ -859,6 +860,33 @@ fn draw_ground_textured_row(
             context.cache_pixels[source_offset + 2],
             context.cache_pixels[source_offset + 3],
         );
+        let liquid = context.liquid_animation.filter(|_| {
+            context
+                .grid
+                .density_at(world_x, world_y)
+                .is_some_and(|density| (25..50).contains(&density))
+        });
+        if let (None, Some(shader), Some((x_axes, y_axes))) = (liquid, shader, context.fog_axes) {
+            let offset = screen_x * 4;
+            if color.a == 255 {
+                if let Some(fill) = shader.opaque_fill(x_axes[screen_x], y_axes[screen_y as usize])
+                {
+                    row[offset..offset + 4].copy_from_slice(&fill);
+                    continue;
+                }
+            }
+            let pixel = (&mut row[offset..offset + 4])
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("pixel has four channels"));
+            let alpha = shader.shade(color, pixel, x_axes[screen_x], y_axes[screen_y as usize]);
+            #[cfg(test)]
+            if context.gamma.is_some() && alpha != 0 && alpha != 255 {
+                context.destination_samples.fetch_add(1, Ordering::Relaxed);
+            }
+            #[cfg(not(test))]
+            let _ = alpha;
+            continue;
+        }
         let pixel_blit = match (context.fog_sampler, context.fog_axes) {
             (Some(sampler), Some((x_samples, y_samples))) => sampler.blit_at_axes(
                 context.blit,
@@ -875,22 +903,13 @@ fn draw_ground_textured_row(
                 screen_y as i32,
             ),
         };
-        let source = context
-            .liquid_animation
-            .filter(|_| {
-                context
-                    .grid
-                    .density_at(world_x, world_y)
-                    .is_some_and(|density| (25..50).contains(&density))
-            })
-            .map_or_else(
-                || prepare_sprite_fragment(color, None, None, pixel_blit),
-                |(image, modulation)| {
-                    let delta =
-                        LiquidAnimationCycle::delta_at(image, liquid_x, liquid_y, modulation);
-                    prepare_liquid_animation_fragment(color, delta, pixel_blit)
-                },
-            );
+        let source = liquid.map_or_else(
+            || prepare_sprite_fragment(color, None, None, pixel_blit),
+            |(image, modulation)| {
+                let delta = LiquidAnimationCycle::delta_at(image, liquid_x, liquid_y, modulation);
+                prepare_liquid_animation_fragment(color, delta, pixel_blit)
+            },
+        );
         if source.alpha() == 0.0 {
             continue;
         }
@@ -927,13 +946,20 @@ pub(crate) fn draw_ground_textured_rows(
     }
     let row_count = (pixels.len() / row_bytes).min(context.screen_height as usize);
     let rows = &mut pixels[..row_count * row_bytes];
+    let shader = context
+        .fog_sampler
+        .filter(|_| context.fog_axes.is_some())
+        .and_then(|sampler| sprite_spans::SpanRowShader::new(context.blit, context.gamma, sampler))
+        .map(sprite_spans::SpanRowShader::with_opaque_destination);
     if parallel && row_count > 1 {
         rows.par_chunks_mut(row_bytes)
             .enumerate()
-            .for_each(|(screen_y, row)| draw_ground_textured_row(context, screen_y as u32, row));
+            .for_each(|(screen_y, row)| {
+                draw_ground_textured_row(context, shader.as_ref(), screen_y as u32, row)
+            });
     } else {
         for (screen_y, row) in rows.chunks_mut(row_bytes).enumerate() {
-            draw_ground_textured_row(context, screen_y as u32, row);
+            draw_ground_textured_row(context, shader.as_ref(), screen_y as u32, row);
         }
     }
 }
@@ -1043,6 +1069,7 @@ impl SkyTileRegion {
 
 pub(crate) struct SkyTileRowRenderContext<'a> {
     pub(crate) lit_texels: &'a [Color],
+    pub(crate) opaque: bool,
     pub(crate) image_width: usize,
     pub(crate) surface_width: u32,
     pub(crate) regions: &'a [SkyTileRegion],
@@ -1095,6 +1122,7 @@ pub(crate) struct LitSkyTexels {
     pub(crate) source: GpuTextureId,
     pub(crate) lighting: u32,
     pub(crate) texels: Arc<[Color]>,
+    pub(crate) opaque: bool,
 }
 
 pub(crate) struct RetainedLitSkyTexture {
@@ -1105,7 +1133,12 @@ pub(crate) struct RetainedLitSkyTexture {
     pub(crate) revision: u64,
 }
 
-fn draw_sky_tile_row(context: &SkyTileRowRenderContext<'_>, screen_y: u32, row: &mut [u8]) {
+fn draw_sky_tile_row(
+    context: &SkyTileRowRenderContext<'_>,
+    shaders: &[Option<sprite_spans::SpanRowShader>],
+    screen_y: u32,
+    row: &mut [u8],
+) {
     let row_bytes = context.surface_width as usize * 4;
     if row.len() < row_bytes {
         return;
@@ -1129,13 +1162,70 @@ fn draw_sky_tile_row(context: &SkyTileRowRenderContext<'_>, screen_y: u32, row: 
         let target_right = (bounds.dest_x + bounds.source_right) as usize;
         let draw_left = target_left.max(clip_left);
         let draw_right = target_right.min(clip_right);
-        for target_x in draw_left..draw_right {
+        let mut column = draw_left;
+        while column < draw_right {
+            let target_x = column;
+            column += 1;
+            if context.opaque
+                && source_y as usize * context.image_width + bounds.source_right as usize
+                    <= context.lit_texels.len()
+            {
+                if let (Some(shader), Some((x_axes, y_axes))) =
+                    (shaders[region_index].as_ref(), region.fog_axes.as_ref())
+                {
+                    let axis = x_axes[target_x - target_left];
+                    let y_axis = y_axes[(source_y - bounds.source_top) as usize];
+                    let fill = shader.opaque_fill(axis, y_axis);
+                    let opacity = fill
+                        .is_none()
+                        .then(|| shader.black_opacity(axis, y_axis))
+                        .flatten();
+                    if fill.is_some() || opacity.is_some() {
+                        while column < draw_right
+                            && x_axes[column - target_left].chunk() == axis.chunk()
+                        {
+                            column += 1;
+                        }
+                        let pixels = row[target_x * 4..column * 4].as_chunks_mut::<4>().0;
+                        if let Some(fill) = fill {
+                            pixels.fill(fill);
+                        } else if let Some(opacity) = opacity.filter(|opacity| *opacity != 0) {
+                            let (pairs, tail) = pixels.as_chunks_mut::<2>();
+                            for pair in pairs {
+                                *pair = sprite_spans::blend_black_shader_pair([opacity; 2], *pair);
+                            }
+                            if let Some(pixel) = tail.first_mut() {
+                                *pixel = sprite_spans::blend_black_shader_pair(
+                                    [opacity; 2],
+                                    [*pixel; 2],
+                                )[0];
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
             let source_x = target_x as i32 - bounds.dest_x;
             let source_index = source_y as usize * context.image_width + source_x as usize;
             let Some(&color) = context.lit_texels.get(source_index) else {
                 continue;
             };
             if color.a == 0 {
+                continue;
+            }
+            if let (Some(shader), Some((x_axes, y_axes))) =
+                (shaders[region_index].as_ref(), region.fog_axes.as_ref())
+            {
+                let offset = target_x * 4;
+                let pixel = (&mut row[offset..offset + 4])
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("pixel has four channels"));
+                shader.shade(
+                    color,
+                    pixel,
+                    x_axes[(source_x - bounds.source_left) as usize],
+                    y_axes[(source_y - bounds.source_top) as usize],
+                );
                 continue;
             }
             let pixel_blit = if context.uses_blit_modulation {
@@ -1192,13 +1282,27 @@ pub(crate) fn draw_sky_tile_rows(
     }
     let row_count = (pixels.len() / row_bytes).min(surface_height as usize);
     let rows = &mut pixels[..row_count * row_bytes];
+    let shaders = context
+        .regions
+        .iter()
+        .map(|region| {
+            region
+                .fog_sampler
+                .as_ref()
+                .filter(|_| context.uses_blit_modulation && region.fog_axes.is_some())
+                .and_then(|sampler| {
+                    sprite_spans::SpanRowShader::new(context.base_blit, context.gamma, sampler)
+                })
+                .map(sprite_spans::SpanRowShader::with_opaque_destination)
+        })
+        .collect::<Vec<_>>();
     if parallel && row_count > 1 {
         rows.par_chunks_mut(row_bytes)
             .enumerate()
-            .for_each(|(screen_y, row)| draw_sky_tile_row(context, screen_y as u32, row));
+            .for_each(|(screen_y, row)| draw_sky_tile_row(context, &shaders, screen_y as u32, row));
     } else {
         for (screen_y, row) in rows.chunks_mut(row_bytes).enumerate() {
-            draw_sky_tile_row(context, screen_y as u32, row);
+            draw_sky_tile_row(context, &shaders, screen_y as u32, row);
         }
     }
 }
