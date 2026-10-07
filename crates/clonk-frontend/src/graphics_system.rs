@@ -5679,7 +5679,7 @@ impl GraphicsSystem {
         // BlitSurfaceTile2 trims each edge tile before handing it to Blit.
         // Build one sampler per cropped tile so those new crop edges remain
         // the ClrModMap vertices even though all tiles now share one row pass.
-        let regions = positions
+        let mut regions = positions
             .iter()
             .filter_map(|&(dest_x, dest_y)| {
                 SkyTileBounds::visible(surface_width, surface_height, width, height, dest_x, dest_y)
@@ -5737,6 +5737,9 @@ impl GraphicsSystem {
                 );
             }
             return;
+        }
+        for region in &mut regions {
+            region.prepare_for_blit(base_blit);
         }
         let mut region_indices_by_row = vec![Vec::new(); surface_height as usize];
         for (region_index, region) in regions.iter().enumerate() {
@@ -6997,6 +7000,7 @@ impl GraphicsSystem {
             // never precompose the row renderer against stale CPU bytes.
             return false;
         }
+        let fog_sampler = fog_sampler.map(|sampler| sampler.prepare_for_blit(blit, None));
         let cache_width = cache.width as i32;
         let cache_height = cache.height as i32;
         let cache_pixels = &cache.pixels;

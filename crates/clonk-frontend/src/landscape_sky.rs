@@ -1030,6 +1030,13 @@ pub(crate) struct SkyTileRegion {
 }
 
 impl SkyTileRegion {
+    pub(crate) fn prepare_for_blit(&mut self, blit: SpriteBlitState) {
+        self.fog_sampler = self
+            .fog_sampler
+            .take()
+            .map(|sampler| sampler.prepare_for_blit(blit, None));
+    }
+
     pub(crate) fn new(
         bounds: SkyTileBounds,
         fog: Option<&FogDrawContext>,

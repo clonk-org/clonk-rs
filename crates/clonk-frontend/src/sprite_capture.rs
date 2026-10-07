@@ -945,7 +945,7 @@ fn capture_gpu_sprite_impl(
         vec![(
             (0.0, source.width),
             (0.0, source.height),
-            blit.fog_modulation.map(|sample| sample.modulation),
+            blit.fog_modulation.map(|sample| sample.vertex_modulation()),
         )]
     };
 
@@ -1350,16 +1350,18 @@ pub(crate) fn draw_image_region_transformed_float_source(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            dest,
-            (source.x, source.y, source.width, source.height),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| transform.transform_point(x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                dest,
+                (source.x, source.y, source.width, source.height),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| transform.transform_point(x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
     let prepared_fog = fog_sampler
         .as_ref()
         .filter(|_| mask.is_none() || owner_color.is_none())
@@ -1413,21 +1415,7 @@ pub(crate) fn draw_image_region_transformed_float_source(
 
             let (source_edge_x, source_edge_y) =
                 source.source_edge(normalized_x, normalized_y, flip_x);
-            let pixel_blit = prepared_fog.as_ref().zip(fog_sampler.as_ref()).map_or_else(
-                || {
-                    fog_sprite_blit_at(
-                        fog_sampler.as_ref(),
-                        fog,
-                        blit,
-                        normalized_x,
-                        normalized_y,
-                        target_x,
-                        target_y,
-                    )
-                },
-                |(prepared, sampler)| prepared.at(sampler, normalized_x, normalized_y),
-            );
-            let Some(source) = prepare_runtime_sprite_sample(
+            prepare_runtime_sprite_sample_with_blit(
                 image,
                 mask,
                 source,
@@ -1436,11 +1424,29 @@ pub(crate) fn draw_image_region_transformed_float_source(
                 source_edge_y,
                 sampling,
                 owner_color,
-                pixel_blit,
-            ) else {
-                return None;
-            };
-            Some((source, pixel_blit))
+                blit,
+                None,
+                |passes| {
+                    if !passes[0] && !passes[1] {
+                        return blit;
+                    }
+                    prepared_fog.as_ref().zip(fog_sampler.as_ref()).map_or_else(
+                        || {
+                            fog_sprite_blit_at_for_passes(
+                                fog_sampler.as_ref(),
+                                fog,
+                                blit,
+                                normalized_x,
+                                normalized_y,
+                                target_x,
+                                target_y,
+                                passes,
+                            )
+                        },
+                        |(prepared, sampler)| prepared.at(sampler, normalized_x, normalized_y),
+                    )
+                },
+            )
         },
     );
 }
@@ -1518,21 +1524,23 @@ pub(crate) fn draw_image_region_float_source(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            (
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-            ),
-            (source.x, source.y, source.width, source.height),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| (x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                (
+                    rect.origin.x,
+                    rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                ),
+                (source.x, source.y, source.width, source.height),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| (x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
 
     if sampling == BlitSampling::Nearest
         && (mask.is_none() || owner_color.is_none())
@@ -1562,16 +1570,7 @@ pub(crate) fn draw_image_region_float_source(
             let normalized_x = (dx as f32 + 0.5) / dest_width as f32;
             let (source_edge_x, source_edge_y) =
                 source.source_edge(normalized_x, normalized_y, flip_x);
-            let pixel_blit = fog_sprite_blit_at(
-                fog_sampler.as_ref(),
-                fog,
-                blit,
-                (target_x as f32 + 0.5 - rect.origin.x) / rect.size.width,
-                (target_y as f32 + 0.5 - rect.origin.y) / rect.size.height,
-                target_x,
-                target_y,
-            );
-            let Some(source) = prepare_runtime_sprite_sample(
+            prepare_runtime_sprite_sample_with_blit(
                 image,
                 mask,
                 source,
@@ -1580,11 +1579,21 @@ pub(crate) fn draw_image_region_float_source(
                 source_edge_y,
                 sampling,
                 owner_color,
-                pixel_blit,
-            ) else {
-                return None;
-            };
-            Some((source, pixel_blit))
+                blit,
+                None,
+                |passes| {
+                    fog_sprite_blit_at_for_passes(
+                        fog_sampler.as_ref(),
+                        fog,
+                        blit,
+                        (target_x as f32 + 0.5 - rect.origin.x) / rect.size.width,
+                        (target_y as f32 + 0.5 - rect.origin.y) / rect.size.height,
+                        target_x,
+                        target_y,
+                        passes,
+                    )
+                },
+            )
         },
     );
 }
@@ -1720,16 +1729,18 @@ fn draw_image_region_float_source_adjusted(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            dest,
-            (source.x, source.y, source.width, source.height),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| (x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                dest,
+                (source.x, source.y, source.width, source.height),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| (x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
     let bounds = surface.bounds();
     let min_x = ((dest.0 - 0.5).ceil() as i32).max(bounds.x);
     let min_y = ((dest.1 - 0.5).ceil() as i32).max(bounds.y);
@@ -1759,16 +1770,7 @@ fn draw_image_region_float_source_adjusted(
             }
             let (source_edge_x, source_edge_y) =
                 source.source_edge(normalized_x, normalized_y, flip_x);
-            let pixel_blit = fog_sprite_blit_at(
-                fog_sampler.as_ref(),
-                fog,
-                blit,
-                normalized_x,
-                normalized_y,
-                target_x,
-                target_y,
-            );
-            let Some(source) = prepare_runtime_sprite_sample(
+            prepare_runtime_sprite_sample_with_blit(
                 image,
                 mask,
                 source,
@@ -1777,11 +1779,21 @@ fn draw_image_region_float_source_adjusted(
                 source_edge_y,
                 sampling,
                 owner_color,
-                pixel_blit,
-            ) else {
-                return None;
-            };
-            Some((source, pixel_blit))
+                blit,
+                None,
+                |passes| {
+                    fog_sprite_blit_at_for_passes(
+                        fog_sampler.as_ref(),
+                        fog,
+                        blit,
+                        normalized_x,
+                        normalized_y,
+                        target_x,
+                        target_y,
+                        passes,
+                    )
+                },
+            )
         },
     );
 }
@@ -1863,26 +1875,28 @@ pub(crate) fn draw_image_region(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            (
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-            ),
-            (
-                source.x as f32,
-                source.y as f32,
-                source.width as f32,
-                source.height as f32,
-            ),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| (x, y),
-        )
-    });
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                (
+                    rect.origin.x,
+                    rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                ),
+                (
+                    source.x as f32,
+                    source.y as f32,
+                    source.width as f32,
+                    source.height as f32,
+                ),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| (x, y),
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
 
     let bounds = surface.bounds();
     let image_width = image.width() as i32;
@@ -1935,7 +1949,12 @@ pub(crate) fn draw_image_region(
                 pixels[idx + 3],
             );
             let owner_mask = mask.map(|mask_map| mask_map.value_at(src_x as u32, src_y as u32));
-            let pixel_blit = fog_sprite_blit_at(
+            let passes = runtime_sprite_passes(
+                f32::from(color.a),
+                owner_mask.map(filtered_owner_sample),
+                owner_color,
+            );
+            let pixel_blit = fog_sprite_blit_at_for_passes(
                 fog_sampler.as_ref(),
                 fog,
                 blit,
@@ -1943,6 +1962,7 @@ pub(crate) fn draw_image_region(
                 (target_y as f32 + 0.5 - rect.origin.y) / rect.size.height,
                 target_x,
                 target_y,
+                passes,
             );
             let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
             if source.alpha() == 0.0 {
@@ -2083,33 +2103,35 @@ pub(crate) fn draw_image_region_rotated(
     ) {
         return;
     }
-    let fog_sampler = fog.and_then(|fog| {
-        FogSpriteSampler::new(
-            fog,
-            (
-                center_x - half_w,
-                center_y - half_h,
-                dest_width,
-                dest_height,
-            ),
-            (
-                source.x as f32,
-                source.y as f32,
-                source.width as f32,
-                source.height as f32,
-            ),
-            (image.width(), image.height()),
-            flip_x,
-            |x, y| {
-                let dx = x - center_x;
-                let dy = y - center_y;
+    let fog_sampler = fog
+        .and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
                 (
-                    center_x + dx * cos_theta - dy * sin_theta,
-                    center_y + dx * sin_theta + dy * cos_theta,
-                )
-            },
-        )
-    });
+                    center_x - half_w,
+                    center_y - half_h,
+                    dest_width,
+                    dest_height,
+                ),
+                (
+                    source.x as f32,
+                    source.y as f32,
+                    source.width as f32,
+                    source.height as f32,
+                ),
+                (image.width(), image.height()),
+                flip_x,
+                |x, y| {
+                    let dx = x - center_x;
+                    let dy = y - center_y;
+                    (
+                        center_x + dx * cos_theta - dy * sin_theta,
+                        center_y + dx * sin_theta + dy * cos_theta,
+                    )
+                },
+            )
+        })
+        .map(|sampler| sampler.prepare_for_blit(blit, owner_color.filter(|_| mask.is_some())));
 
     let corners = [
         (-half_w, -half_h),
@@ -2207,7 +2229,12 @@ pub(crate) fn draw_image_region_rotated(
             let fog_dy = y as f32 + 0.5 - center_y;
             let fog_local_x = fog_dx * cos_theta + fog_dy * sin_theta;
             let fog_local_y = -fog_dx * sin_theta + fog_dy * cos_theta;
-            let pixel_blit = fog_sprite_blit_at(
+            let passes = runtime_sprite_passes(
+                f32::from(color.a),
+                owner_mask.map(filtered_owner_sample),
+                owner_color,
+            );
+            let pixel_blit = fog_sprite_blit_at_for_passes(
                 fog_sampler.as_ref(),
                 fog,
                 blit,
@@ -2215,6 +2242,7 @@ pub(crate) fn draw_image_region_rotated(
                 (fog_local_y + half_h) / dest_height,
                 x,
                 y,
+                passes,
             );
             let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
             if source.alpha() == 0.0 {
@@ -2843,6 +2871,64 @@ pub(crate) fn prepare_runtime_sprite_sample_with_texture_size(
     blit: SpriteBlitState,
     physical_texture_size: Option<i32>,
 ) -> Option<PreparedSpriteFragment> {
+    prepare_runtime_sprite_sample_with_blit(
+        image,
+        mask,
+        source,
+        fog_chunked,
+        source_edge_x,
+        source_edge_y,
+        sampling,
+        owner_color,
+        blit,
+        physical_texture_size,
+        |_| blit,
+    )
+    .map(|(fragment, _)| fragment)
+}
+
+pub(crate) fn runtime_sprite_passes(
+    source_alpha: f32,
+    owner_mask: Option<FilteredColorByOwnerSample>,
+    owner_color: Option<u32>,
+) -> [bool; 2] {
+    match (owner_mask, owner_color) {
+        (Some(FilteredColorByOwnerSample::Overlay(overlay)), Some(_)) if overlay[3] > 0.0 => {
+            [source_alpha > 0.0, true]
+        }
+        (Some(FilteredColorByOwnerSample::Scalar(mask)), Some(_)) if mask > 0.0 => {
+            [false, source_alpha > 0.0]
+        }
+        _ => [source_alpha > 0.0, false],
+    }
+}
+
+pub(crate) fn filtered_owner_sample(sample: ColorByOwnerSample) -> FilteredColorByOwnerSample {
+    match sample {
+        ColorByOwnerSample::Scalar(mask) => FilteredColorByOwnerSample::Scalar(f32::from(mask)),
+        ColorByOwnerSample::Overlay(color) => FilteredColorByOwnerSample::Overlay([
+            f32::from(color.r),
+            f32::from(color.g),
+            f32::from(color.b),
+            f32::from(color.a),
+        ]),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_runtime_sprite_sample_with_blit(
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: &FloatSourceRect,
+    fog_chunked: bool,
+    source_edge_x: f32,
+    source_edge_y: f32,
+    sampling: BlitSampling,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    physical_texture_size: Option<i32>,
+    prepare_blit: impl FnOnce([bool; 2]) -> SpriteBlitState,
+) -> Option<(PreparedSpriteFragment, SpriteBlitState)> {
     let (tile_x, tile_y, tile_size) = if let Some(tile_size) = physical_texture_size {
         if tile_size <= 0 || !source_edge_x.is_finite() || !source_edge_y.is_finite() {
             return None;
@@ -2908,10 +2994,13 @@ pub(crate) fn prepare_runtime_sprite_sample_with_texture_size(
                     && source_y < mask.height as i32)
                     .then(|| mask.value_at(source_x as u32, source_y as u32))
             });
-            Some(prepare_sprite_fragment(
-                color,
-                owner_mask,
+            let blit = prepare_blit(runtime_sprite_passes(
+                f32::from(color.a),
+                owner_mask.map(filtered_owner_sample),
                 owner_color,
+            ));
+            Some((
+                prepare_sprite_fragment(color, owner_mask, owner_color, blit),
                 blit,
             ))
         }
@@ -2923,10 +3012,9 @@ pub(crate) fn prepare_runtime_sprite_sample_with_texture_size(
             let owner_mask = mask.map(|mask| {
                 bilinear_sample_owner_tile(mask, tile_x, tile_y, tile_size, u_rel, v_rel)
             });
-            Some(prepare_filtered_sprite_fragment(
-                source,
-                owner_mask,
-                owner_color,
+            let blit = prepare_blit(runtime_sprite_passes(source[3], owner_mask, owner_color));
+            Some((
+                prepare_filtered_sprite_fragment(source, owner_mask, owner_color, blit),
                 blit,
             ))
         }
