@@ -5493,6 +5493,7 @@ impl GraphicsSystem {
             source,
             lighting: lighting_bits,
             texels: Arc::clone(&texels),
+            opaque: texels.iter().all(|color| color.a == 255),
         });
         texels
     }
@@ -5755,6 +5756,10 @@ impl GraphicsSystem {
         let uses_blit_modulation = fog.is_some() || modulation.is_some();
         let row_context = SkyTileRowRenderContext {
             lit_texels: lit_texels.as_ref(),
+            opaque: self
+                .lit_sky_texels
+                .as_ref()
+                .is_some_and(|cached| cached.opaque),
             image_width: width as usize,
             surface_width,
             regions: &regions,

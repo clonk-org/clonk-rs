@@ -17,6 +17,7 @@ test = false
 
 [features]
 default = []
+presentation-profile = []
 bench = ["dep:criterion"]
 # The deterministic render probe is an explicitly invoked developer tool. Its
 # only test is ignored, so compiling and linking it in every workspace gate is
