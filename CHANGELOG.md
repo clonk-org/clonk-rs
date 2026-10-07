@@ -4,6 +4,34 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-10-07
+
+### Bug fixes
+
+- Let a host route read queued input before reporting its send failure (#1920)
+- Notify players when background saves finish (#1897)
+- Advertise host interface addresses in network references (#1900)
+- Enumerate Windows interface addresses for link-local join routes (#1884)
+- Close only the peer a Windows connection reset names (#1882)
+- Bound the client netpuncher lookup so an offline resolver cannot stall the join (#1881)
+- Name the players in lobby chat instead of their computer (#1874)
+
+### Continuous integration
+
+- Reuse verified inputs across CI and release qualification (#1896)
+
+### Performance
+
+- Execute retained scenes in the software presenter (#1918)
+- Cache sprite fog modulation once per chunk (#1915)
+- Specialize software sprite and fog span compositing (#1902)
+- Avoid child object clones in contents queries (#1898)
+
+### Testing
+
+- Cover player resource downloads through host relay (#1899)
+- Serve the 24-player benchmark's bootstrap resources from the host (#1883)
+
 ## [1.5.0] - 2026-10-05
 
 ### Bug fixes
