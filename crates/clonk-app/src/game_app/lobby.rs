@@ -7575,6 +7575,9 @@ impl GameApp {
         }
         self.sync_network_lobby_game_option_state();
         self.status_text.clear();
+        // Advertising starts before the lobby model is installed. Present its
+        // retained diagnostic only once that model can display the log line.
+        self.sync_host_lan_discovery_warning();
         self.acknowledge_initial_lobby_status_if_ready();
     }
 

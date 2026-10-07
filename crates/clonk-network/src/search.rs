@@ -751,10 +751,10 @@ pub enum StartupGameSearchEvent {
     },
 }
 
-/// Which half of the discovery path a refresh has to report.
+/// Which half of the discovery path a browser has to report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LanProbeFailure {
-    /// The socket could not be built, so no datagram was ever attempted.
+    /// The socket or interface inventory cannot support LAN discovery.
     Unavailable,
     /// `sendto` itself failed — the only failure C++ carries into its refresh
     /// modal (pinned oracle src/C4NetIO.cpp:1784).
@@ -766,13 +766,35 @@ fn lan_probe_error_event(
     failure: LanProbeFailure,
     error: io::Error,
 ) -> Option<StartupGameSearchEvent> {
-    (trigger == LanProbeTrigger::ExplicitRefresh).then(|| StartupGameSearchEvent::SearchError {
-        source: Some(ReferenceQuerySource::GameDiscovery),
-        message: match failure {
-            LanProbeFailure::Unavailable => format!("LAN discovery is unavailable: {error}"),
-            LanProbeFailure::Send => format!("unable to send LAN discovery probe: {error}"),
-        },
-    })
+    (trigger == LanProbeTrigger::ExplicitRefresh
+        || (trigger == LanProbeTrigger::Initial && failure == LanProbeFailure::Unavailable))
+        .then(|| StartupGameSearchEvent::SearchError {
+            source: Some(ReferenceQuerySource::GameDiscovery),
+            message: match failure {
+                LanProbeFailure::Unavailable => lan_discovery_unavailable_message(error),
+                LanProbeFailure::Send => format!("unable to send LAN discovery probe: {error}"),
+            },
+        })
+}
+
+pub(crate) fn lan_discovery_unavailable_message(reason: impl std::fmt::Display) -> String {
+    format!("LAN discovery is unavailable: {reason}. Join by IP address.")
+}
+
+pub(crate) fn lan_discovery_unavailable_reason(
+    interface_endpoints: &[SocketAddr],
+    multicast_interfaces: &[u32],
+) -> Option<&'static str> {
+    // A default group join can succeed with only IPv6 loopback remaining.
+    // Link-local multicast still needs an IPv6 address on a LAN interface.
+    if !interface_endpoints.iter().any(|endpoint| {
+        matches!(endpoint, SocketAddr::V6(endpoint) if endpoint.ip().is_unicast_link_local())
+    }) {
+        return Some("no IPv6 link-local address on any interface");
+    }
+    multicast_interfaces
+        .is_empty()
+        .then_some("no IPv6 multicast interface")
 }
 
 fn masterserver_failure_allows_fast_retry(failures: &mut u8) -> bool {
@@ -899,6 +921,7 @@ struct QueryResult {
 struct DiscoverySocket {
     socket: UdpSocket,
     multicast_interfaces: Vec<u32>,
+    unavailable_reason: Option<&'static str>,
 }
 
 impl DiscoverySocket {
@@ -945,7 +968,7 @@ pub(crate) async fn send_discovery_datagram(
 fn discovery_needs_rebuild(discovery: &io::Result<DiscoverySocket>) -> bool {
     discovery
         .as_ref()
-        .is_ok_and(|socket| !socket.multicast_interfaces.is_empty())
+        .is_ok_and(|socket| socket.unavailable_reason.is_none())
         .not()
 }
 
@@ -1380,11 +1403,17 @@ async fn execute_search_command(
             trigger,
         } => {
             let failure = match discovery {
-                Ok(socket) => socket
-                    .send_probe(&payload, target)
-                    .await
-                    .err()
-                    .map(|error| (LanProbeFailure::Send, error)),
+                Ok(socket) => match socket.unavailable_reason {
+                    Some(reason) => Some((
+                        LanProbeFailure::Unavailable,
+                        io::Error::new(io::ErrorKind::AddrNotAvailable, reason),
+                    )),
+                    None => socket
+                        .send_probe(&payload, target)
+                        .await
+                        .err()
+                        .map(|error| (LanProbeFailure::Send, error)),
+                },
                 Err(error) => Some((
                     LanProbeFailure::Unavailable,
                     io::Error::new(error.kind(), error.to_string()),
@@ -1459,9 +1488,14 @@ fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
         Vec::new()
     };
     socket.set_nonblocking(true)?;
+    let unavailable_reason = lan_discovery_unavailable_reason(
+        &crate::client_mesh::client_mesh_os_interface_endpoints(),
+        &multicast_interfaces,
+    );
     Ok(DiscoverySocket {
         socket: UdpSocket::from_std(socket.into())?,
         multicast_interfaces,
+        unavailable_reason,
     })
 }
 
@@ -2870,23 +2904,13 @@ Title=Empty\n",
         // socket that joined a group keeps its buffered replies across a
         // refresh exactly as C++ does.
         let unbuilt = Err::<DiscoverySocket, _>(io::Error::from(io::ErrorKind::AddrNotAvailable));
-        let joined = discovery_socket(0).expect("an ephemeral discovery socket binds");
+        let mut joined = discovery_socket(0).expect("an ephemeral discovery socket binds");
 
         assert!(discovery_needs_rebuild(&unbuilt));
-        assert_eq!(
-            discovery_needs_rebuild(&Ok(joined)),
-            joined_nothing_on_this_host(),
-        );
-    }
-
-    /// Whether this host refused every multicast join, which decides what
-    /// `only_an_unusable_discovery_socket_is_rebuilt_on_refresh` may expect
-    /// without baking one kernel's answer into the assertion.
-    fn joined_nothing_on_this_host() -> bool {
-        discovery_socket(0)
-            .expect("an ephemeral discovery socket binds")
-            .multicast_interfaces
-            .is_empty()
+        // Inject a healthy inventory instead of depending on whether the test
+        // machine has IPv6 enabled on a LAN interface.
+        joined.unavailable_reason = None;
+        assert!(!discovery_needs_rebuild(&Ok(joined)));
     }
 
     #[test]
@@ -3117,6 +3141,86 @@ Title=Empty\n",
     }
 
     #[test]
+    fn a_default_multicast_join_cannot_hide_missing_lan_ipv6() {
+        // Windows can keep IPv6 loopback and accept the default group join
+        // after the user disables IPv6 on the LAN adapter.
+        let endpoints = ["192.168.1.2:0".parse().unwrap(), "[::1]:0".parse().unwrap()];
+        assert_eq!(
+            lan_discovery_unavailable_reason(&endpoints, &[DEFAULT_MULTICAST_INTERFACE]),
+            Some("no IPv6 link-local address on any interface"),
+        );
+        let endpoints = ["[fe80::1234%3]:0".parse().unwrap()];
+        assert_eq!(lan_discovery_unavailable_reason(&endpoints, &[3]), None);
+        assert_eq!(
+            lan_discovery_unavailable_reason(&endpoints, &[DEFAULT_MULTICAST_INTERFACE]),
+            None,
+        );
+        assert_eq!(
+            lan_discovery_unavailable_reason(&endpoints, &[]),
+            Some("no IPv6 multicast interface"),
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_bound_socket_without_lan_ipv6_reports_on_open_and_needs_rebuild() {
+        let mut discovery = DiscoverySocket {
+            socket: UdpSocket::bind("[::1]:0").await.unwrap(),
+            multicast_interfaces: vec![DEFAULT_MULTICAST_INTERFACE],
+            unavailable_reason: lan_discovery_unavailable_reason(
+                &[],
+                &[DEFAULT_MULTICAST_INTERFACE],
+            ),
+        };
+        let (query_tx, _query_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let mut masterserver_query = None;
+        execute_search_command(
+            SearchCommand::lan_probe(DEFAULT_DISCOVERY_PORT, LanProbeTrigger::Initial),
+            (0, 0),
+            None,
+            &mut masterserver_query,
+            Ok(&discovery),
+            &query_tx,
+            &event_tx,
+            &ReferenceQueryConfig::default(),
+        )
+        .await;
+        assert_discovery_error(
+            event_rx.try_recv().expect("initial notice without a failing send"),
+            "LAN discovery is unavailable: no IPv6 link-local address on any interface. Join by IP address.",
+        );
+        assert!(discovery_needs_rebuild(&Ok(discovery)));
+        discovery = DiscoverySocket {
+            socket: UdpSocket::bind("[::1]:0").await.unwrap(),
+            multicast_interfaces: vec![3],
+            unavailable_reason: lan_discovery_unavailable_reason(
+                &["[fe80::1234%3]:0".parse().unwrap()],
+                &[3],
+            ),
+        };
+        assert!(!discovery_needs_rebuild(&Ok(discovery)));
+    }
+
+    #[test]
+    fn initial_discovery_unavailability_explains_how_to_join() {
+        // Deliberate presentation extension: C++ ignores initial discovery
+        // failure (pinned oracle src/C4StartupNetDlg.cpp:736-739).
+        let event = lan_probe_error_event(
+            LanProbeTrigger::Initial,
+            LanProbeFailure::Unavailable,
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no IPv6 link-local address on any interface",
+            ),
+        )
+        .expect("opening the browser explains why LAN discovery cannot work");
+        assert_discovery_error(
+            event,
+            "LAN discovery is unavailable: no IPv6 link-local address on any interface. Join by IP address.",
+        );
+    }
+
+    #[test]
     fn lan_probe_send_failure_reporting_matches_cpp_call_sites() {
         // C4StartupNetDlg ignores the initial and timer StartDiscovery results,
         // but checks the explicit refresh result before continuing with the
@@ -3150,7 +3254,7 @@ Title=Empty\n",
         .expect("explicit refresh reports the unusable socket");
         assert_discovery_error(
             event,
-            "LAN discovery is unavailable: no multicast interface",
+            "LAN discovery is unavailable: no multicast interface. Join by IP address.",
         );
     }
 
@@ -3376,9 +3480,9 @@ Build=362\n";
 
     #[tokio::test(flavor = "current_thread")]
     async fn discovery_initialization_failure_waits_for_explicit_refresh() {
-        // C4StartupNetDlg ignores discovery initialization and its first send,
-        // then reports StartDiscovery failure only from DoRefresh (pristine
-        // 9ffa0a5d src/C4StartupNetDlg.cpp:736-739, 1093-1105).
+        // After the initial notice, timer probes stay silent until an explicit
+        // refresh, as in C++ (pinned oracle src/C4StartupNetDlg.cpp:1093-1105,
+        // 1122-1128).
         let discovery = Err::<DiscoverySocket, _>(io::Error::new(
             io::ErrorKind::AddrNotAvailable,
             "no multicast interface",
@@ -3388,7 +3492,7 @@ Build=362\n";
         let mut masterserver_query = None;
         let command = |trigger| SearchCommand::lan_probe(DEFAULT_DISCOVERY_PORT, trigger);
 
-        for trigger in [LanProbeTrigger::Initial, LanProbeTrigger::Periodic] {
+        for trigger in [LanProbeTrigger::Periodic, LanProbeTrigger::ExplicitRefresh] {
             execute_search_command(
                 command(trigger),
                 (0, 0),
@@ -3400,28 +3504,17 @@ Build=362\n";
                 &ReferenceQueryConfig::default(),
             )
             .await;
-            assert!(matches!(
-                event_rx.try_recv(),
-                Err(mpsc::TryRecvError::Empty)
-            ));
+            if trigger == LanProbeTrigger::Periodic {
+                assert!(matches!(
+                    event_rx.try_recv(),
+                    Err(mpsc::TryRecvError::Empty)
+                ));
+            } else {
+                assert_discovery_error(
+                    event_rx.try_recv().expect("browser reports failure"),
+                    "LAN discovery is unavailable: no multicast interface. Join by IP address.",
+                );
+            }
         }
-
-        execute_search_command(
-            command(LanProbeTrigger::ExplicitRefresh),
-            (0, 0),
-            None,
-            &mut masterserver_query,
-            discovery.as_ref(),
-            &query_tx,
-            &event_tx,
-            &ReferenceQueryConfig::default(),
-        )
-        .await;
-        assert_discovery_error(
-            event_rx
-                .try_recv()
-                .expect("explicit refresh reports failure"),
-            "LAN discovery is unavailable: no multicast interface",
-        );
     }
 }
