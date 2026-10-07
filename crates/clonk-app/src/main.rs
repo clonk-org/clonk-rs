@@ -135,6 +135,7 @@ mod console_viewport_windows;
 mod console_window_position;
 mod control_options;
 mod cpu_target;
+mod graphics_pipeline;
 use clonk_app_core::deferred_config;
 mod desktop_notification;
 mod developer_component_editor;
@@ -498,7 +499,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode as VirtualKeyCode, ModifiersState};
 use winit::window::{Fullscreen, UserAttentionType, Window, WindowId};
 
-type RuntimeEventHandler = Box<dyn FnMut(Event<NetworkEventWake>, &ActiveEventLoop)>;
+#[derive(Clone, Debug)]
+enum RuntimeEvent {
+    Network(NetworkEventWake),
+    GraphicsReady,
+}
+
+type RuntimeEventHandler = Box<dyn FnMut(Event<RuntimeEvent>, &ActiveEventLoop)>;
 type RuntimeInitializer = Box<dyn FnOnce(&ActiveEventLoop) -> Result<RuntimeEventHandler>>;
 
 /// Bridges the legacy single-event callback onto winit's lifecycle API.
@@ -534,7 +541,7 @@ impl RuntimeApplication {
         }
     }
 
-    fn dispatch(&mut self, event: Event<NetworkEventWake>, event_loop: &ActiveEventLoop) {
+    fn dispatch(&mut self, event: Event<RuntimeEvent>, event_loop: &ActiveEventLoop) {
         if let Some(handler) = self.handler.as_mut() {
             handler(event, event_loop);
         }
@@ -545,7 +552,7 @@ impl RuntimeApplication {
     }
 }
 
-impl ApplicationHandler<NetworkEventWake> for RuntimeApplication {
+impl ApplicationHandler<RuntimeEvent> for RuntimeApplication {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         self.dispatch(Event::NewEvents(cause), event_loop);
     }
@@ -555,7 +562,7 @@ impl ApplicationHandler<NetworkEventWake> for RuntimeApplication {
         self.dispatch(Event::Resumed, event_loop);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: NetworkEventWake) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {
         self.dispatch(Event::UserEvent(event), event_loop);
     }
 
@@ -937,7 +944,7 @@ fn run() -> Result<()> {
         })?;
     }
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
-    let mut event_loop_builder = EventLoop::<NetworkEventWake>::with_user_event();
+    let mut event_loop_builder = EventLoop::<RuntimeEvent>::with_user_event();
     display_backend::apply_display_backend(
         &mut event_loop_builder,
         display_backend::select_display_backend(
@@ -1178,9 +1185,10 @@ fn run() -> Result<()> {
             .context("failed to start command-line network join")?;
         app.launch_classic_command_line_scenario()
             .context("failed to start command-line scenario")?;
+        let graphics_event_proxy = Arc::clone(&network_event_proxy);
         app.install_network_event_waker(Arc::new(move |wake| {
             if let Ok(proxy) = network_event_proxy.lock() {
-                let _ = proxy.send_event(wake);
+                let _ = proxy.send_event(RuntimeEvent::Network(wake));
             }
         }));
         let mut console_commands = classic
@@ -1269,6 +1277,17 @@ fn run() -> Result<()> {
         // Set when the shell takes a graphics pass; consumed on the next event
         // loop entry, before the shell record is borrowed.
         let mut viewport_redraw_pending = false;
+        let mut graphics_worker =
+            graphics_pipeline::FrameWorker::<graphics_pipeline::GraphicsOutput>::new(move || {
+                if let Ok(proxy) = graphics_event_proxy.lock() {
+                    let _ = proxy.send_event(RuntimeEvent::GraphicsReady);
+                }
+            })
+            .context("failed to start graphics worker")?;
+        let mut pending_graphics: Option<graphics_pipeline::PendingGraphicsPass> = None;
+        let mut completed_graphics: Option<graphics_pipeline::CompletedGraphicsPass> = None;
+        let mut cpu_frame_state: Option<graphics_pipeline::CpuFrameState> = None;
+
         // The component editor's own modifier state. Each developer window
         // sees only its own `ModifiersChanged`, so a shared field would hold
         // whatever the last *other* window left there.
@@ -1427,7 +1446,16 @@ fn run() -> Result<()> {
             // An event naming a viewport window is that window's alone. Resolving
             // it before the shell destructure keeps the shell arms — all of which
             // already guard on `window.id()` — exactly as they were.
-            if let Some(os_window) = console_viewport_windows::event_window_id(&event) {
+            if let Event::WindowEvent {
+                window_id: os_window,
+                ..
+            } = &event
+            {
+                let os_window = *os_window;
+                let event = event
+                    .clone()
+                    .map_nonuser_event::<NetworkEventWake>()
+                    .expect("a window event has no user payload");
                 if let Some(key) = developer_windows
                     .find_key(|host| host.window().id() == os_window)
                     .filter(|key| *key != developer_windows::SHELL_WINDOW)
@@ -1498,6 +1526,89 @@ fn run() -> Result<()> {
                     return;
                 }
             }
+
+            // Input never waits for graphics. Resize, mode transitions and
+            // shutdown do need exclusive ownership of the presentation device.
+            let drain_graphics = app.mode != AppMode::Running
+                || app.console_session.enabled
+                || matches!(
+                    &event,
+                    Event::LoopExiting
+                        | Event::WindowEvent {
+                            event: WindowEvent::Resized(_),
+                            ..
+                        }
+                )
+                || presentation_benchmark
+                    .as_ref()
+                    .and_then(PresentationBenchmark::measurement_window)
+                    .is_some_and(|(_, deadline)| Instant::now() >= deadline);
+            let completed = if drain_graphics {
+                graphics_worker.finish()
+            } else {
+                graphics_worker.try_finish()
+            };
+            match completed {
+                Ok(Some(output)) => {
+                    let (result, execution) = match output {
+                        graphics_pipeline::GraphicsOutput::Gpu {
+                            surface,
+                            renderer,
+                            result,
+                            execution,
+                        } => {
+                            let shell = developer_windows
+                                .shell_mut()
+                                .expect("shell survives the graphics worker")
+                                .as_shell_mut()
+                                .expect("shell key holds the shell host");
+                            shell.pixels = Some(surface);
+                            shell.renderer = Some(renderer);
+                            (graphics_pipeline::GraphicsResult::Gpu(result), execution)
+                        }
+                        graphics_pipeline::GraphicsOutput::Cpu {
+                            state,
+                            renderers,
+                            result,
+                            execution,
+                        } => {
+                            cpu_frame_state = Some(state);
+                            app.presentation.cpu_scene_renderers = renderers;
+                            (graphics_pipeline::GraphicsResult::Cpu(result), execution)
+                        }
+                    };
+                    let mut pass = pending_graphics.take().expect("worker has a captured pass");
+                    if matches!(
+                        &result,
+                        graphics_pipeline::GraphicsResult::Gpu(Ok(
+                            RetainedGpuProfiledOutcome::Presented(_)
+                        ))
+                    ) {
+                        // Publish a completed GPU draw before the next input or
+                        // sound step, using its captured object/view positions.
+                        if let Some(feedback) = pass.feedback.take() {
+                            feedback.apply(&mut app);
+                        }
+                    }
+                    completed_graphics = Some(graphics_pipeline::CompletedGraphicsPass {
+                        result,
+                        duration: pass.preparation + execution,
+                        pass,
+                    });
+                    if let Some(shell) = developer_windows
+                        .shell_mut()
+                        .and_then(developer_host::DeveloperHost::as_shell_mut)
+                    {
+                        shell.window.request_redraw();
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%error, "graphics worker failed");
+                    event_target.exit();
+                    return;
+                }
+            }
             // Read before the match, which moves out of `event`, and acted on
             // after the shell borrow below has ended.
             let loop_is_exiting = matches!(event, Event::LoopExiting);
@@ -1551,6 +1662,18 @@ fn run() -> Result<()> {
                                 .map(crate::cpu_target::CpuTarget::Software)
                         })
                     else {
+                        if let Err(error) = handle_game_window_event(
+                            window,
+                            &mut app,
+                            None,
+                            presenter,
+                            &mut display_options,
+                            event,
+                            event_target,
+                        ) {
+                            tracing::error!(%error, "window input failed");
+                            event_target.exit();
+                        }
                         return;
                     };
                     if let Err(err) = handle_window_event(
@@ -1566,7 +1689,8 @@ fn run() -> Result<()> {
                         event_target.exit();
                     }
                 }
-                Event::UserEvent(wake) => app.note_network_event_wake(wake),
+                Event::UserEvent(RuntimeEvent::Network(wake)) => app.note_network_event_wake(wake),
+                Event::UserEvent(RuntimeEvent::GraphicsReady) => window.request_redraw(),
                 Event::AboutToWait => {
                     // Network managers may be replaced by asynchronous menu/lobby
                     // transitions. Carry the process event-loop wake handle onto
@@ -1896,6 +2020,7 @@ fn run() -> Result<()> {
                     window_id,
                     event: WindowEvent::RedrawRequested,
                 } if window_id == window.id()
+                    && completed_graphics.is_none()
                     && !render_inactive_allows_drawing(
                         render_inactive_mask,
                         app.window_active,
@@ -1913,6 +2038,7 @@ fn run() -> Result<()> {
                     window_id,
                     event: WindowEvent::RedrawRequested,
                 } if window_id == window.id()
+                    && completed_graphics.is_none()
                     && automatic_frame_skip.begin_graphics_pass(
                         app.mode == AppMode::Running && app.auto_frame_skip,
                     ) =>
@@ -1929,7 +2055,23 @@ fn run() -> Result<()> {
                     window_id,
                     event: WindowEvent::RedrawRequested,
                 } if window_id == window.id() => {
-                    let graphics_started = Instant::now();
+                    if graphics_worker.pending() {
+                        return;
+                    }
+                    let graphics_started = completed_graphics
+                        .as_ref()
+                        .map_or_else(Instant::now, |completed| completed.pass.started);
+                    let completed_duration = completed_graphics
+                        .as_ref()
+                        .map(|completed| completed.duration);
+                    let mut draw_feedback = None;
+                    let pipeline_eligible = app.mode == AppMode::Running
+                        && !app.console_session.enabled
+                        && !app.loader_presentation_active()
+                        && app.pending_screenshots.is_empty()
+                        && app.saves.pending_native_thumbnails.is_empty()
+                        && app.saves.pending_gpu_thumbnail_paths.is_empty()
+                        && device_loss_probe.is_none();
                     // SaveSlot refers to the last CPU frame the player saw.
                     // Freeze it before a GPU retry can replace its buffer with
                     // a 1x1 scratch target or a CPU redraw can overwrite it.
@@ -1953,7 +2095,9 @@ fn run() -> Result<()> {
                     if matches!(
                         app.mode,
                         AppMode::Menu | AppMode::Loading | AppMode::Running
-                    ) && retained_gpu_renderer.as_ref().is_some_and(|renderer| {
+                    ) && !completed_graphics.as_ref().is_some_and(|completed| {
+                        matches!(completed.result, graphics_pipeline::GraphicsResult::Cpu(_))
+                    }) && retained_gpu_renderer.as_ref().is_some_and(|renderer| {
                         should_attempt_retained_gpu_presentation(
                             renderer.requires_cpu_presentation(),
                         )
@@ -1965,7 +2109,7 @@ fn run() -> Result<()> {
                         };
                         // Guarded by the condition above, which only enters
                         // this branch when a renderer exists.
-                        let Some(retained_gpu_renderer) = retained_gpu_renderer.as_mut() else {
+                        let Some(renderer) = retained_gpu_renderer.as_mut() else {
                             return;
                         };
                         if pixels.buffer_extent().0 != 1 || pixels.buffer_extent().1 != 1 {
@@ -1979,27 +2123,96 @@ fn run() -> Result<()> {
                         // pass: the pass covers composition *and* the platform
                         // copy/present, and only the split says which one a
                         // slow frame spent its time in.
+                        let mut preparation_error = None;
+                        if pipeline_eligible && completed_graphics.is_none() {
+                            let geometry = presenter.presentation_geometry();
+                            let (width, height) = geometry.physical_size();
+                            let presentation = GpuPresentation {
+                                physical_extent: [width, height],
+                                scale: geometry.scale(),
+                                crop_top: geometry.crop_top(),
+                                world_zoom: app.rendering.graphics.viewport_zoom(),
+                            };
+                            let context = RetainedGpuFrameContext::capture(
+                                pixels,
+                                renderer,
+                                app.rendering.graphics.advanced_renderer_config(),
+                                &geometry,
+                            );
+                            let prepared = renderer
+                                .check_health()
+                                .context("retained GPU device unavailable")
+                                .and_then(|()| app.render_retained_gpu_frame(presentation));
+                            match prepared {
+                                Ok(retained) => {
+                                    let shader_landscape =
+                                        app.rendering.graphics.take_shader_landscape_plan();
+                                    let feedback = graphics_pipeline::DrawFeedback::capture(&app);
+                                    let preparation = graphics_started.elapsed();
+                                    let surface =
+                                        pixels_slot.take().expect("drawable was checked above");
+                                    let renderer = retained_gpu_renderer
+                                        .take()
+                                        .expect("renderer was checked above");
+                                    if let Err(error) = graphics_worker.submit(move || {
+                                        graphics_pipeline::execute_gpu_frame(
+                                            surface,
+                                            renderer,
+                                            retained,
+                                            shader_landscape,
+                                            context,
+                                            preparation,
+                                        )
+                                    }) {
+                                        tracing::error!(%error, "failed to submit graphics job");
+                                        event_target.exit();
+                                        return;
+                                    }
+                                    pending_graphics =
+                                        Some(graphics_pipeline::PendingGraphicsPass {
+                                            started: graphics_started,
+                                            preparation,
+                                            feedback: Some(feedback),
+                                        });
+                                    window.set_cursor_visible(app.platform_cursor_visible());
+                                    return;
+                                }
+                                Err(error) => preparation_error = Some(error),
+                            }
+                        }
                         let present_started = Instant::now();
-                        let present_result = present_retained_gpu_frame_profiled(
-                            &mut app,
-                            pixels,
-                            presenter,
-                            retained_gpu_renderer,
-                        );
-                        let present_duration = present_started.elapsed();
+                        let present_result = match preparation_error {
+                            Some(error) => Err(error),
+                            None => match completed_graphics.take() {
+                                Some(completed) => {
+                                    draw_feedback = completed.pass.feedback;
+                                    match completed.result {
+                                        graphics_pipeline::GraphicsResult::Gpu(result) => result,
+                                        graphics_pipeline::GraphicsResult::Cpu(_) => {
+                                            unreachable!("GPU pass completes on GPU path")
+                                        }
+                                    }
+                                }
+                                None => present_retained_gpu_frame_profiled(
+                                    &mut app, pixels, presenter, renderer,
+                                ),
+                            },
+                        };
+                        let present_duration =
+                            completed_duration.unwrap_or_else(|| present_started.elapsed());
                         let fallback_to_cpu = match present_result {
                             Ok(RetainedGpuProfiledOutcome::Presented(profile)) => {
                                 surface_rebuild.note_presented();
                                 if let Some(probe) = device_loss_probe.as_mut() {
                                     match probe.observe_retained_presentation(
-                                        retained_gpu_renderer,
+                                        renderer,
                                         pixels,
                                         Instant::now(),
                                     ) {
                                         Some(device_loss_probe::ProbeStep::Inject) => {
                                             probe.record_adapter(&pixels.device().adapter_info());
                                             tracing::warn!(
-                                                generation = retained_gpu_renderer.generation(),
+                                                generation = renderer.generation(),
                                                 "device-loss probe: destroying the live GPU device"
                                             );
                                             pixels.device().destroy();
@@ -2012,15 +2225,20 @@ fn run() -> Result<()> {
                                         None => {}
                                     }
                                 }
-                                let presented_terminal_loader =
-                                    app.loader.finish_terminal_loader_frame_presentation();
+                                let presented_terminal_loader = completed_duration.is_none()
+                                    && app.loader.finish_terminal_loader_frame_presentation();
                                 if app.mode == AppMode::Running
                                     && !presented_terminal_loader
                                     && !app.console_session.enabled
                                 {
-                                    app.finish_rendered_object_audibility_pass();
+                                    if let Some(feedback) = draw_feedback.take() {
+                                        feedback.apply(&mut app);
+                                    } else if completed_duration.is_none() {
+                                        app.finish_rendered_object_audibility_pass();
+                                    }
                                 }
-                                let graphics_duration = graphics_started.elapsed();
+                                let graphics_duration = completed_duration
+                                    .unwrap_or_else(|| graphics_started.elapsed());
                                 automatic_frame_skip.finish_graphics_pass(
                                     app.auto_frame_skip,
                                     graphics_duration,
@@ -2047,8 +2265,8 @@ fn run() -> Result<()> {
                                         profile,
                                     );
                                 }
-                                let timestamp_frames = retained_gpu_renderer
-                                    .take_completed_timestamp_frames(pixels.device());
+                                let timestamp_frames =
+                                    renderer.take_completed_timestamp_frames(pixels.device());
                                 if let Some(benchmark) = presentation_benchmark.as_mut() {
                                     benchmark.record_gpu_timestamp_frames(timestamp_frames);
                                 }
@@ -2076,7 +2294,7 @@ fn run() -> Result<()> {
                                         match rebuild_retained_gpu_device(
                                             window,
                                             pixels_slot,
-                                            retained_gpu_renderer,
+                                            renderer,
                                             device_loss_probe.as_mut(),
                                         ) {
                                             Ok(()) => {
@@ -2181,15 +2399,70 @@ fn run() -> Result<()> {
                             return;
                         }
                     }
-                    let refreshed =
-                        match app.render_retained_cpu_presentation(presenter, pixels.frame_mut()) {
-                            Ok(refreshed) => refreshed,
-                            Err(err) => {
-                                tracing::error!(error = ?err, "retained CPU render failed");
+                    if pipeline_eligible && completed_graphics.is_none() {
+                        let retained = match app.prepare_retained_cpu_presentation(presenter) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                tracing::error!(%error, "frame preparation failed");
                                 event_target.exit();
                                 return;
                             }
                         };
+                        let feedback = graphics_pipeline::DrawFeedback::capture(&app);
+                        let preparation = graphics_started.elapsed();
+                        let state = graphics_pipeline::CpuFrameState::for_presenter(
+                            cpu_frame_state.take(),
+                            presenter,
+                        );
+                        let renderers = std::mem::take(&mut app.presentation.cpu_scene_renderers);
+                        if let Err(error) = graphics_worker.submit(move || {
+                            graphics_pipeline::execute_cpu_frame(retained, state, renderers)
+                        }) {
+                            tracing::error!(%error, "failed to submit graphics job");
+                            event_target.exit();
+                            return;
+                        }
+                        pending_graphics = Some(graphics_pipeline::PendingGraphicsPass {
+                            started: graphics_started,
+                            preparation,
+                            feedback: Some(feedback),
+                        });
+                        window.set_cursor_visible(app.platform_cursor_visible());
+                        return;
+                    }
+                    let cpu_finalize_started = Instant::now();
+                    let cpu_result = match completed_graphics.take() {
+                        Some(completed) => {
+                            draw_feedback = completed.pass.feedback;
+                            let state = cpu_frame_state
+                                .as_ref()
+                                .expect("CPU pass returned its frame");
+                            if state.presenter.physical_size() != presenter.physical_size()
+                                || state.presenter.scale() != presenter.scale()
+                            {
+                                // Resize invalidates the old physical frame. The next
+                                // redraw captures the newly laid-out projection.
+                                window.request_redraw();
+                                return;
+                            }
+                            pixels.frame_mut().copy_from_slice(&state.rgba);
+                            match completed.result {
+                                graphics_pipeline::GraphicsResult::Cpu(result) => result,
+                                graphics_pipeline::GraphicsResult::Gpu(_) => {
+                                    unreachable!("CPU pass completes on CPU path")
+                                }
+                            }
+                        }
+                        None => app.render_retained_cpu_presentation(presenter, pixels.frame_mut()),
+                    };
+                    let refreshed = match cpu_result {
+                        Ok(refreshed) => refreshed,
+                        Err(err) => {
+                            tracing::error!(error = ?err, "retained CPU render failed");
+                            event_target.exit();
+                            return;
+                        }
+                    };
                     // The software presenter copies the whole CPU frame into
                     // the window buffer here, so this is the destination cost
                     // the graphics pass would otherwise hide.
@@ -2211,8 +2484,8 @@ fn run() -> Result<()> {
                                     return;
                                 }
                             }
-                            let presented_terminal_loader =
-                                app.loader.finish_terminal_loader_frame_presentation();
+                            let presented_terminal_loader = completed_duration.is_none()
+                                && app.loader.finish_terminal_loader_frame_presentation();
                             while !app.pending_screenshots.is_empty() {
                                 let (width, height) = presenter.physical_size();
                                 let result = app.save_next_screenshot(
@@ -2230,9 +2503,16 @@ fn run() -> Result<()> {
                                 && !presented_terminal_loader
                                 && !app.console_session.enabled
                             {
-                                app.finish_rendered_object_audibility_pass();
+                                if let Some(feedback) = draw_feedback.take() {
+                                    feedback.apply(&mut app);
+                                } else {
+                                    app.finish_rendered_object_audibility_pass();
+                                }
                             }
-                            let graphics_duration = graphics_started.elapsed();
+                            let graphics_duration = completed_duration.map_or_else(
+                                || graphics_started.elapsed(),
+                                |duration| duration + cpu_finalize_started.elapsed(),
+                            );
                             automatic_frame_skip.finish_graphics_pass(
                                 app.mode == AppMode::Running && app.auto_frame_skip,
                                 graphics_duration,

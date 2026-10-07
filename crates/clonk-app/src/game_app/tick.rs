@@ -12,11 +12,10 @@ fn advance_after_releasing_snapshot_landscape<T, E>(
     snapshot: &mut SimulationSnapshot,
     advance: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
-    // Rendering is complete before the next fixed simulation step. Release
-    // the previous presentation landscape before invoking `advance`, even if
-    // that advance later fails, so its Surface8 Arc cannot force the first
-    // terrain write to copy the complete multi-megabyte plane. The renderer
-    // retains a lightweight dirty-lineage anchor of its own.
+    // The previous frame has been lowered into an owned graphics scene before
+    // the next fixed step. Release its presentation landscape even if advance
+    // later fails. The graphics worker holds textures, not the Surface8 plane;
+    // the frontend keeps only a lightweight dirty-lineage anchor across ticks.
     snapshot.landscape = None;
     advance()
 }
