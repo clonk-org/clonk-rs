@@ -25,7 +25,7 @@ import tempfile
 import tomllib
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LEDGER = ".ci-workspace-inputs.json"
 FINGERPRINT = re.compile(r"(?P<package>.+)-(?P<metadata>[0-9a-f]{16})")
 BUILD_ENVIRONMENT = (
@@ -112,6 +112,18 @@ def packages(root: Path) -> dict[str, str]:
     return result
 
 
+def build_global(name: str, mode: str) -> bool:
+    """Whether Cargo reads a non-package file for the whole workspace build.
+
+    Other non-package files (documentation, scripts, workflows, data) reach a
+    compiled unit only through rustc dep-info, which compiler_inputs records
+    as that package's external inputs. Content gitlinks stay global.
+    """
+    path = Path(name)
+    return (mode == "160000" or ".cargo" in path.parts[:-1] or name == ".gitmodules"
+            or path.name in ("Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml"))
+
+
 def tracked_inputs(root: Path, target: Path, members: dict[str, str]) -> tuple[dict, dict]:
     global_inputs = {}
     inputs = {name: {"directory": directory, "files": {}} for name, directory in members.items()}
@@ -133,7 +145,7 @@ def tracked_inputs(root: Path, target: Path, members: dict[str, str]) -> tuple[d
             # Nested members belong to their deepest package.
             owner = max(owners, key=lambda package: len(Path(members[package]).parts))
             inputs[owner]["files"][name] = value
-        else:
+        elif build_global(name, mode):
             global_inputs[name] = value
     return global_inputs, inputs
 
@@ -454,8 +466,32 @@ def discard_results(target: Path) -> list[str]:
     return sorted(removed)
 
 
+def changed_names(previous: dict, current: dict) -> list[str]:
+    return sorted(name for name in previous.keys() | current.keys() if previous.get(name) != current.get(name))
+
+
+def changed_recipe(previous: dict, current: dict) -> list[str]:
+    """Name the differing recipe fields; their values may be machine paths."""
+    names = []
+    for key in sorted(previous.keys() | current.keys()):
+        before, after = previous.get(key), current.get(key)
+        if before == after:
+            continue
+        if isinstance(before, dict) and isinstance(after, dict):
+            names.extend(f"{key}.{name}" for name in changed_names(before, after))
+        else:
+            names.append(key)
+    return names
+
+
+def listing(names: list[str], limit: int = 10) -> str:
+    shown = ", ".join(names[:limit])
+    return shown + (f" (+{len(names) - limit} more)" if len(names) > limit else "")
+
+
 def prepare(root: Path, target: Path, members: dict[str, str], current: dict, ledger: Path | None = None) -> dict:
     reason = "verified"
+    changed = {"recipe": [], "global": [], "packages": {}}
     try:
         path = ledger if ledger is not None else target / LEDGER
         if path.parent.resolve() != path.parent or path.is_symlink():
@@ -466,16 +502,29 @@ def prepare(root: Path, target: Path, members: dict[str, str], current: dict, le
         if not isinstance(previous.get("packages"), dict) or not isinstance(previous.get("units"), dict):
             raise CacheError("incomplete ledger")
         if previous.get("recipe") != current["recipe"]:
-            raise CacheError("build recipe, toolchain, environment or checkout root changed")
+            changed["recipe"] = changed_recipe(previous.get("recipe") or {}, current["recipe"])
+            raise CacheError(f"build recipe changed: {listing(changed['recipe'])}")
         if previous.get("global_inputs") != current["global_inputs"]:
-            raise CacheError("global inputs or content gitlink changed")
-    except (CacheError, OSError, ValueError) as error:
+            changed["global"] = changed_names(previous.get("global_inputs") or {}, current["global_inputs"])
+            raise CacheError(f"global build inputs changed: {listing(changed['global'])}")
+    except (CacheError, OSError, ValueError, AttributeError) as error:
         previous = {"packages": {}, "units": {}}
         reason = str(error)
     reusable = {
         name for name, inputs in current["packages"].items()
         if inputs["compiler_inputs_verified"] and previous["packages"].get(name) == inputs
     }
+    for name, inputs in sorted(current["packages"].items()):
+        before = previous["packages"].get(name)
+        if name in reusable or before is None:
+            continue
+        if not inputs["compiler_inputs_verified"]:
+            changed["packages"][name] = ["unverified compiler inputs"]
+        elif isinstance(before, dict):
+            changed["packages"][name] = sorted(
+                set(changed_names(before.get("files") or {}, inputs["files"]))
+                | set(changed_names(before.get("external_inputs") or {}, inputs["external_inputs"]))
+            ) or ["package identity"]
     invalidated = []
     reused = []
     for name, (unit, package) in units(target, members).items():
@@ -494,7 +543,7 @@ def prepare(root: Path, target: Path, members: dict[str, str], current: dict, le
     stamp(root, verified)
     return {
         "operation": "prepare", "cache_verified": reason == "verified", "reason": reason,
-        "invalidated_units": invalidated, "reused_units": reused,
+        "changed_inputs": changed, "invalidated_units": invalidated, "reused_units": reused,
     }
 
 
