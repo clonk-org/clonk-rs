@@ -379,21 +379,25 @@ async fn player_info_update_request_reaches_host_with_transport_origin() {
         .await
         .expect("submit PlayerInfo update request");
 
-    match timeout(EVENT_WAIT, host_events.recv()).await {
-        Ok(Some(HostEvent::PlayerInfoUpdate {
-            client_id: actual_origin,
-            request: actual_request,
-        })) => {
-            assert_eq!(actual_origin, client_id);
-            let mut expected = request;
-            // C4PlayerInfo's binary reader applies VAL_NameNoEmpty even when
-            // the sender encoded an empty default Name.
-            expected.players[0].name = crate::c4(b"empty");
-            assert_eq!(actual_request, expected);
+    loop {
+        match timeout(EVENT_WAIT, host_events.recv()).await {
+            Ok(Some(HostEvent::ClientRelease(_))) => continue,
+            Ok(Some(HostEvent::PlayerInfoUpdate {
+                client_id: actual_origin,
+                request: actual_request,
+            })) => {
+                assert_eq!(actual_origin, client_id);
+                let mut expected = request;
+                // C4PlayerInfo's binary reader applies VAL_NameNoEmpty even when
+                // the sender encoded an empty default Name.
+                expected.players[0].name = crate::c4(b"empty");
+                assert_eq!(actual_request, expected);
+                break;
+            }
+            Ok(Some(event)) => panic!("unexpected host event: {event:?}"),
+            Ok(None) => panic!("host event stream ended before PlayerInfo update"),
+            Err(_) => panic!("timed out waiting for PlayerInfo update"),
         }
-        Ok(Some(event)) => panic!("unexpected host event: {event:?}"),
-        Ok(None) => panic!("host event stream ended before PlayerInfo update"),
-        Err(_) => panic!("timed out waiting for PlayerInfo update"),
     }
 
     client.shutdown().await.expect("shut down client session");

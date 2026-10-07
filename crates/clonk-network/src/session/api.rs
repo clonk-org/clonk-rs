@@ -717,6 +717,7 @@ pub(crate) fn synthetic_join_snapshot(
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    ClientRelease(crate::ClientRelease),
     /// The retained host session has committed a replacement round and all
     /// earlier round-scoped events have been emitted. Consumers use this as a
     /// queue fence before applying the fresh lobby bootstrap.
@@ -1722,6 +1723,7 @@ impl From<ClientError> for ClientAttemptError {
 /// Events observed by a connected client.
 #[derive(Debug)]
 pub enum ClientEvent {
+    ClientRelease(crate::ClientRelease),
     /// Complete current address list for the local logical client after an
     /// AddAddrFromPuncher update.
     LocalAddressesChanged {

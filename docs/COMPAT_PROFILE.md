@@ -377,6 +377,7 @@ lockstep would be a divergence in the table above, not a feature here.
 
 | Id | What it is |
 | --- | --- |
+| `local-release-diagnostics` | Negotiated port release reports label lobby clients and name known differences from the host on synchronization loss. Mixed releases remain admitted, and older peers receive no new packet type. Owned by clonk-org/clonk-rs#1869; wire and screenshot evidence is in [the release diagnostics notes](evidence/lobby-releases/README.md). |
 | `local-voice-chat` | Proximity voice chat: microphone input, the push-to-talk rebind dialog, the `Voice.*` config rows, and the "Audio" options group placed in the slack below C++'s own grid. Owned by clonk-org/clonk-rs#452. |
 | `local-stats-overlay` | The `Graphics.ShowStats` diagnostics overlay and its default-unbound toggle key. C++ draws exactly one frame rate on the upper board and has no overlay. Owned by clonk-org/clonk-rs#158. |
 | `local-dock-icon` | The per-platform dock/taskbar icon; `C4FullScreen` has no reconciliation step to match. |

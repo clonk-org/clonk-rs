@@ -108,13 +108,18 @@ impl PortCapabilities {
     /// entry order decides material slots.
     pub const DEFERRED_RESOURCE_CORES: u32 = 1 << 9;
 
+    /// Display-only release reports, relayed by the host to other participants.
+    /// Older port builds and stock peers must never receive these packets.
+    pub const RELEASE_DIAGNOSTICS: u32 = 1 << 11;
+
     /// Everything this build knows how to do.
     pub fn supported() -> Self {
         Self::from_bits(
             Self::ROUND_RESTART_V2
                 | Self::VOICE_CHAT
                 | Self::CONTROL_WAIT_ATTRIBUTION
-                | Self::DEFERRED_RESOURCE_CORES,
+                | Self::DEFERRED_RESOURCE_CORES
+                | Self::RELEASE_DIAGNOSTICS,
         )
     }
 
@@ -297,6 +302,17 @@ impl PeerCapabilityRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_diagnostics_are_negotiated_without_changing_admission() {
+        let release_diagnostics = 1 << 11;
+        let local = PortCapabilities::supported();
+        assert!(local.has(release_diagnostics));
+        let old_port = PortCapabilities::from_bits(local.bits() & !release_diagnostics);
+        assert!(local.compat_profile_admits(old_port));
+        assert!(old_port.compat_profile_admits(local));
+        assert!(!local.agreed_with(old_port).has(release_diagnostics));
+    }
 
     /// A peer that announces no profile at all is the silent legacy case: a
     /// stock C++ engine, or a port built before profiles were negotiated.
@@ -488,10 +504,10 @@ mod tests {
                 0x01, 0x00,
                 // Bits, little-endian u32: ROUND_RESTART_V2 (1 << 6) |
                 // VOICE_CHAT (1 << 10) | CONTROL_WAIT_ATTRIBUTION (1 << 4) |
-                // DEFERRED_RESOURCE_CORES (1 << 9).
+                // DEFERRED_RESOURCE_CORES (1 << 9) | RELEASE_DIAGNOSTICS (1 << 11).
                 // Bit 3 is retired and stays clear — see the retired-capability
                 // test above.
-                0x50, 0x06, 0x00, 0x00,
+                0x50, 0x0e, 0x00, 0x00,
             ],
             "the bare announcement moved; an older peer reads these offsets",
         );
@@ -504,7 +520,7 @@ mod tests {
             .with_voice_cookie(crate::voice::VoiceRouteCookie::from_bytes(cookie))
             .with_voice_public_key(public_key);
 
-        let mut expected = vec![0x70, 0x01, 0x00, 0x50, 0x06, 0x00, 0x00];
+        let mut expected = vec![0x70, 0x01, 0x00, 0x50, 0x0e, 0x00, 0x00];
         expected.extend_from_slice(&cookie);
         expected.extend_from_slice(&public_key);
         assert_eq!(
@@ -519,7 +535,7 @@ mod tests {
             encode_port_capabilities(
                 PortCapabilities::supported().with_voice_public_key(public_key)
             ),
-            vec![0x70, 0x01, 0x00, 0x50, 0x06, 0x00, 0x00],
+            vec![0x70, 0x01, 0x00, 0x50, 0x0e, 0x00, 0x00],
             "a public key without its cookie must not reach the wire",
         );
     }
@@ -624,7 +640,8 @@ mod tests {
             PortCapabilities::VOICE_CHAT
                 | PortCapabilities::CONTROL_WAIT_ATTRIBUTION
                 | PortCapabilities::ROUND_RESTART_V2
-                | PortCapabilities::DEFERRED_RESOURCE_CORES,
+                | PortCapabilities::DEFERRED_RESOURCE_CORES
+                | PortCapabilities::RELEASE_DIAGNOSTICS,
             "the advertised mask must name exactly the implemented extensions"
         );
     }

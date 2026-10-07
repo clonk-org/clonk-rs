@@ -129,6 +129,7 @@ pub(crate) struct HostState {
     /// What each connected peer announced it can do beyond the C++ protocol.
     /// A peer that never announced is assumed to be stock C++.
     pub(crate) peer_capabilities: crate::PeerCapabilityRegistry,
+    pub(crate) client_releases: BTreeMap<ClientId, String>,
     pub(crate) async_control_wait: Option<AsyncControlWait>,
     pub(crate) admission: HostAdmission,
     pub(crate) client_cores: BTreeMap<i32, clonk_protocol::ClientCoreControlData>,

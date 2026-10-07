@@ -7721,6 +7721,7 @@ impl NetworkLobbyState {
             .iter()
             .map(|(client_id, participant)| {
                 LobbyRosterRow::Client(LobbyClientRow {
+                    release: None,
                     id: i32::try_from(*client_id).unwrap_or(i32::MAX),
                     name: participant.name.clone(),
                     nick: String::new(),

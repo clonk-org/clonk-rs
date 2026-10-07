@@ -1745,6 +1745,7 @@ pub struct NetworkManager {
     event_wake: NetworkEventWakeHandle,
     worker: Option<thread::JoinHandle<()>>,
     local_client_id: ClientId,
+    client_releases: HashMap<ClientId, String>,
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
     role: NetworkRole,
     client_status: ClientStatusState,
@@ -3222,6 +3223,7 @@ impl TestNetworkCommands {
 // envelope inline avoids a second allocation on the app-facing boundary.
 #[allow(clippy::large_enum_variant)]
 pub enum NetworkEvent {
+    ClientRelease(clonk_network::ClientRelease),
     HostPingMeasured {
         round_trip_ms: i32,
     },
@@ -4078,6 +4080,7 @@ impl NetworkManager {
             netpuncher_state,
             role,
             client_status: ClientStatusState::default(),
+            client_releases: HashMap::new(),
             runtime_connection_telemetry: Mutex::new(RuntimeConnectionTelemetryState::default()),
             league_start_response: ready.league_start_response,
             league_start_failure: ready.league_start_failure,
@@ -5899,6 +5902,9 @@ impl NetworkManager {
             .lock()
             .drain(..)
             .collect::<Vec<_>>();
+        for event in &events {
+            self.observe_release_event(event);
+        }
         loop {
             match self.event_rx.try_recv() {
                 Ok(NetworkEvent::RoundRestarted) => {
@@ -5906,6 +5912,7 @@ impl NetworkManager {
                     continue;
                 }
                 Ok(event) => {
+                    self.observe_release_event(&event);
                     self.observe_runtime_connection_event(&event);
                     if self.role == NetworkRole::Client {
                         match &event {
@@ -5949,6 +5956,28 @@ impl NetworkManager {
             }
         }
         events
+    }
+
+    fn observe_release_event(&mut self, event: &NetworkEvent) {
+        match event {
+            NetworkEvent::ClientRelease(report) => {
+                self.client_releases
+                    .insert(report.client_id, report.version.clone());
+            }
+            NetworkEvent::PeerDisconnected { client_id, .. } => {
+                self.client_releases.remove(client_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Release identity is optional presentation metadata, never an admission key.
+    pub fn client_release(&self, client_id: ClientId) -> Option<&str> {
+        if client_id == self.local_client_id {
+            Some(env!("CARGO_PKG_VERSION"))
+        } else {
+            self.client_releases.get(&client_id).map(String::as_str)
+        }
     }
 
     /// Whether at least one live UDP route positively negotiated the
@@ -6057,6 +6086,7 @@ impl NetworkManager {
                 netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
                 role: NetworkRole::Host,
                 client_status: ClientStatusState::default(),
+                client_releases: HashMap::new(),
                 runtime_connection_telemetry: Mutex::new(RuntimeConnectionTelemetryState::default()),
                 league_start_response: None,
                 league_start_failure: None,
@@ -6097,6 +6127,7 @@ impl NetworkManager {
                 netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
                 role: NetworkRole::Client,
                 client_status: ClientStatusState::default(),
+                client_releases: HashMap::new(),
                 runtime_connection_telemetry: Mutex::new(RuntimeConnectionTelemetryState::default()),
                 league_start_response: None,
                 league_start_failure: None,
@@ -6175,6 +6206,7 @@ impl NetworkManager {
                     NetworkRole::Client
                 },
                 client_status: ClientStatusState::default(),
+                client_releases: HashMap::new(),
                 runtime_connection_telemetry: Mutex::new(RuntimeConnectionTelemetryState::default()),
                 league_start_response: None,
                 league_start_failure: None,
@@ -8348,7 +8380,8 @@ fn network_event_survives_round_restart_fence(
     restarted_resource_cores: &HashMap<i32, clonk_engine::NetworkResourceCore>,
 ) -> bool {
     match event {
-        NetworkEvent::PeerConnected { .. }
+        NetworkEvent::ClientRelease(_)
+        | NetworkEvent::PeerConnected { .. }
         | NetworkEvent::PeerDisconnected { .. }
         | NetworkEvent::PeerConnectionFailed { .. }
         | NetworkEvent::NetpuncherStateChanged { .. }
@@ -8389,7 +8422,8 @@ fn network_event_survives_round_restart_fence(
 
 fn host_event_survives_round_restart_fence(event: &HostEvent) -> bool {
     match event {
-        HostEvent::LocalAddressesChanged { .. }
+        HostEvent::ClientRelease(_)
+        | HostEvent::LocalAddressesChanged { .. }
         | HostEvent::NetpuncherStateChanged { .. }
         | HostEvent::ClientJoined { .. }
         | HostEvent::ClientLeft { .. }
@@ -8526,6 +8560,9 @@ async fn handle_host_event(
     netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
     match event {
+        HostEvent::ClientRelease(report) => {
+            let _ = event_tx.send(NetworkEvent::ClientRelease(report));
+        }
         HostEvent::RoundRestarted => {
             let _ = event_tx.send(NetworkEvent::RoundRestarted);
         }
@@ -9893,6 +9930,9 @@ async fn handle_client_event(
     _telemetry_tx: &SyncSender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        ClientEvent::ClientRelease(report) => {
+            let _ = event_tx.send(NetworkEvent::ClientRelease(report));
+        }
         ClientEvent::JoinData { join_data } => {
             let _ = event_tx.send(NetworkEvent::JoinData(*join_data));
         }
@@ -13343,10 +13383,13 @@ Message=Server says Andr\xe9\r\n\
             })
             .await
             .test_value();
-        assert_eq!(
-            event_rx.recv_timeout(Duration::from_secs(2)).test_value(),
-            NetworkEvent::StatusRequested(latest)
-        );
+        let reprojected = loop {
+            let event = event_rx.recv_timeout(Duration::from_secs(2)).test_value();
+            if !matches!(event, NetworkEvent::ClientRelease(_)) {
+                break event;
+            }
+        };
+        assert_eq!(reprojected, NetworkEvent::StatusRequested(latest));
 
         command_tx.send(NetworkCommand::Shutdown).await.test_value();
         worker.await.expect("join client worker").test_value();
@@ -14216,6 +14259,24 @@ Message=Server says Andr\xe9\r\n\
                 .to_string(),
             "only the network host may change join admission"
         );
+    }
+
+    #[test]
+    fn retained_release_reports_update_diagnostics_after_a_round_restart() {
+        let (mut manager, _events) = NetworkManager::test_stub_for_client_id(7);
+        manager.round_restart_retained_events.lock().extend([
+            NetworkEvent::ClientRelease(clonk_network::ClientRelease {
+                client_id: 0,
+                version: "0.8.0".into(),
+            }),
+            NetworkEvent::ClientRelease(clonk_network::ClientRelease {
+                client_id: 9,
+                version: "0.9.0".into(),
+            }),
+        ]);
+        assert_eq!(manager.poll_events().len(), 2);
+        assert_eq!(manager.client_release(0), Some("0.8.0"));
+        assert_eq!(manager.client_release(9), Some("0.9.0"));
     }
 
     #[test]

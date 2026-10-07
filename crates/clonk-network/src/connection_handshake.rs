@@ -674,6 +674,9 @@ where
             // client's fresh JoinData has been installed.
             ControlMessage::RoundRestartAck { .. } => continue,
             ControlMessage::ControlWaitAttribution(_) => continue,
+            // The retained route re-announces capabilities after JoinData;
+            // release reports are replayed then with the assigned client ID.
+            ControlMessage::ClientRelease(_) => continue,
             // Remember the pending identities that the following JoinData may
             // leave unresolved. Final upgrades are handled by the client loop.
             ControlMessage::ResourceUpgrade(packet) => {
@@ -877,6 +880,7 @@ fn record_admitted_pong(
 fn packet_type(message: &ControlMessage) -> u8 {
     match message {
         ControlMessage::PortCapabilities(_) => crate::PID_PORT_CAPABILITIES,
+        ControlMessage::ClientRelease(_) => crate::PID_PORT_CLIENT_RELEASE,
         ControlMessage::HostRestarting { .. } => crate::PID_PORT_HOST_RESTARTING,
         ControlMessage::HostRestartLobby { .. } => crate::PID_PORT_HOST_RESTART_LOBBY,
         ControlMessage::RoundRestartAck { .. } => crate::PID_PORT_ROUND_RESTART_ACK,
@@ -1274,6 +1278,7 @@ fn handle_peer_reply(
 fn packet_name(message: &ControlMessage) -> &'static str {
     match message {
         ControlMessage::PortCapabilities(_) => "PID_PortCapabilities",
+        ControlMessage::ClientRelease(_) => "PID_PortClientRelease",
         ControlMessage::HostRestarting { .. } => "PID_PortHostRestarting",
         ControlMessage::HostRestartLobby { .. } => "PID_PortHostRestartLobby",
         ControlMessage::RoundRestartAck { .. } => "PID_PortRoundRestartAck",

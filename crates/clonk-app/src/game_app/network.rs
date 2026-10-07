@@ -3998,6 +3998,10 @@ impl GameApp {
             .unwrap_or_default();
         {
             for event in events {
+                if matches!(&event, NetworkEvent::ClientRelease(_)) {
+                    self.sync_classic_lobby_roster();
+                    continue;
+                }
                 // C4GameControlNetwork::HandleControlPkt executes synchronized
                 // controls immediately while Network::isFrozen: in the lobby,
                 // or after the current Pause barrier is acknowledged and
@@ -4189,7 +4193,7 @@ impl GameApp {
                         continue;
                     }
                     let boundary = match &event {
-                        NetworkEvent::HostPingMeasured { .. } => None,
+                        NetworkEvent::ClientRelease(_) | NetworkEvent::HostPingMeasured { .. } => None,
                         NetworkEvent::HostStatusChanged(_) => None,
                         NetworkEvent::JoinData(_) => Some("join data"),
                         NetworkEvent::LeagueRoundResults(_) => Some("league round results"),
@@ -4260,7 +4264,7 @@ impl GameApp {
                     // Route Ping/Pong remains available for presentation, but
                     // C++ CalcPerformance paces from the full preferred-route
                     // topology sampled at the consumed-control boundary.
-                    NetworkEvent::HostPingMeasured { .. } => {}
+                    NetworkEvent::ClientRelease(_) | NetworkEvent::HostPingMeasured { .. } => {}
                     NetworkEvent::HostStatusChanged(status) => {
                         if self
                             .scenario_lifecycle

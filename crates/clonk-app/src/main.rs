@@ -6002,6 +6002,34 @@ impl GameApp {
         })
     }
 
+    fn release_mismatch_diagnostic(&self) -> String {
+        let Some(network) = self.netplay.manager.as_ref() else {
+            return String::new();
+        };
+        let Some(host_version) = network.client_release(0) else {
+            return String::new();
+        };
+        let clients = self
+            .netplay
+            .control_clients
+            .snapshot()
+            .iter()
+            .filter_map(|client| {
+                let id = ClientId::try_from(client.client_id).ok()?;
+                let version = network
+                    .client_release(id)
+                    .filter(|version| *version != host_version)?;
+                let name = legacy_presentation_text(client.name.as_bytes());
+                Some(format!("{name} (clonk-rs {version})"))
+            })
+            .collect::<Vec<_>>();
+        if clients.is_empty() {
+            String::new()
+        } else {
+            format!(" Clients with a different release than host {host_version}: {}. Mixed releases may lose synchronization.", clients.join(", "))
+        }
+    }
+
     fn handle_desync(&mut self, local: SyncCheckPacket, remote: SyncCheckPacket) {
         tracing::error!(
             frame = local.frame,
@@ -6009,9 +6037,14 @@ impl GameApp {
             host = ?remote,
             "network desync detected"
         );
+        let release_note = self.release_mismatch_diagnostic();
+        let sync_message = format!("Network: Synchronization loss!{release_note}");
+        if !release_note.is_empty() {
+            self.append_control_message_log(sync_message.clone(), CONTROL_LOG_COLOR, None);
+        }
         self.netplay.sync_checks.clear();
         if matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
-            self.status_text = "Network desync detected".to_string();
+            self.status_text = format!("Network desync detected{release_note}");
             return;
         }
         self.play_global_sound_effect("SyncError");
@@ -6031,12 +6064,12 @@ impl GameApp {
             );
             self.engine.evaluate_network_round_results(
                 clonk_engine::RoundResultsNetworkResult::NetworkError,
-                Some(b"Network: Synchronization loss!".to_vec()),
+                Some(sync_message.into_bytes()),
             );
             self.snapshot.round_results = self.engine.snapshot().round_results;
             self.change_network_control_to_local(local_client_id);
         }
-        self.status_text = "Network desync detected; disconnected from host".to_string();
+        self.status_text = format!("Network desync detected; disconnected from host{release_note}");
     }
 
     fn ingame_moving_drag_active(&self) -> bool {

@@ -536,6 +536,63 @@ fn fresh_network_lobby_state_preserves_the_native_focused_chat_caret() {
 }
 
 #[test]
+fn lobby_marks_releases_that_differ_from_the_host() {
+    for (width, height) in [(1280, 720), (640, 480)] {
+        let (mut app, events) = joined_client_app_with_events(new_real_menu_app(width, height));
+        app.netplay.control_clients.replace_snapshot([
+            message_client(0, b"Host"),
+            message_client(7, b"Local"),
+            message_client(9, b"Ada"),
+            message_client(10, b"Older peer"),
+        ]);
+        for (client_id, version) in [(0, env!("CARGO_PKG_VERSION")), (9, "0.9.0-dev")] {
+            events
+                .send(NetworkEvent::ClientRelease(clonk_network::ClientRelease {
+                    client_id,
+                    version: version.into(),
+                }))
+                .test_value();
+        }
+        app.netplay.manager.as_mut().test_value().poll_events();
+        app.sync_classic_lobby_roster();
+        let clients = app_lobby(&app)
+            .roster_rows
+            .iter()
+            .filter_map(|row| {
+                if let LobbyRosterRow::Client(client) = row {
+                    Some((client.id, client.display_name()))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
+        main_assert!(clients[&0].contains(env!("CARGO_PKG_VERSION")));
+        main_assert!(clients[&7].contains(env!("CARGO_PKG_VERSION")));
+        main_assert!(clients[&9].starts_with("(!) "));
+        main_assert!(clients[&9].contains("0.9.0-dev"));
+        main_assert!(app_lobby(&app).roster_rows.iter().any(|row| matches!(row, LobbyRosterRow::Client(client) if client.id == 9 && client.release.as_ref().test_value().description().contains("host"))));
+        main_assert!(clients[&10].contains("[?]"));
+        main_assert!(app_lobby(&app).roster_rows.iter().any(|row| matches!(row, LobbyRosterRow::Client(client) if client.id == 10 && client.release.as_ref().test_value().description().contains("release unknown"))));
+        main_assert!(app.netplay.manager.is_some(), "a mismatch remains playable");
+        app.sync_network_lobby_game_option_state();
+        let mut frame = vec![0; (width * height * 4) as usize];
+        main_assert!(
+            app.render(&mut frame).test_value(),
+            "the live lobby renderer accepts release metadata"
+        );
+        if let Some(directory) = std::env::var_os("CLONK_RELEASE_LOBBY_CAPTURE_DIR") {
+            let directory = PathBuf::from(directory);
+            fs::create_dir_all(&directory).test_value();
+            fs::write(
+                directory.join(format!("{width}x{height}.png")),
+                encode_rgba_png(width, height, &frame).test_value(),
+            )
+            .test_value();
+        }
+    }
+}
+
+#[test]
 fn classic_command_line_lobby_timeout_starts_the_host_countdown() {
     main_assert_eq!(parse_classic_command_line(&[OsString::from("/network")]).lobby_timeout => None,);
     main_assert_eq!(parse_classic_command_line(&[OsString::from("/lobby")]).lobby_timeout => Some(None),);
@@ -5100,6 +5157,7 @@ fn classic_lobby_client_telemetry_refreshes_on_the_one_second_timer() {
     install_test_classic_host_lobby(&mut app);
     let client_row = |id, name: &str| {
         LobbyRosterRow::Client(LobbyClientRow {
+            release: None,
             id,
             name: name.to_string(),
             nick: String::new(),

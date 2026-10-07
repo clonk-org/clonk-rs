@@ -5,6 +5,7 @@ mod capabilities;
 mod client_bootstrap;
 mod client_mesh;
 mod client_player_resource;
+mod client_release;
 mod connection_handshake;
 mod connection_liveness;
 mod control;
@@ -80,6 +81,7 @@ pub use capabilities::{
     decode_port_capabilities, encode_port_capabilities, PeerCapabilityRegistry, PortCapabilities,
     PID_PORT_CAPABILITIES, PORT_CAPABILITY_VERSION,
 };
+pub use client_release::{ClientRelease, PID_PORT_CLIENT_RELEASE};
 pub use clonk_protocol::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 pub use control_latency::ControlLatencyEstimator;
 pub use control_wait::{

@@ -6671,6 +6671,7 @@ pub(crate) fn classic_lobby_roster_projection(
             })
             .unwrap_or(0x00ff_ffff);
         rows.push(LobbyRosterRow::Client(LobbyClientRow {
+            release: None,
             id: core.client_id,
             name: legacy_presentation_text(core.name.as_bytes()),
             nick: legacy_presentation_text(core.nick.as_bytes()),
