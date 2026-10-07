@@ -258,6 +258,7 @@ impl FogModulationSample {
         self.combine_for_pass(base, true)
     }
 
+    #[inline(always)]
     fn combine_for_pass(self, base: u32, owner: bool) -> u32 {
         match self {
             Self::Vertex {
@@ -271,6 +272,7 @@ impl FogModulationSample {
         }
     }
 
+    #[inline(always)]
     fn combined_quad_is_nonzero(self, base: u32, owner: bool) -> bool {
         match self {
             Self::Vertex { modulation, .. } => modulation
@@ -322,6 +324,7 @@ fn unpack_modulation(modulation: [u32; 4]) -> [[f32; 4]; 4] {
         .map(|corner| std::array::from_fn(|channel| ((corner >> (channel * 8)) & 0xff) as f32))
 }
 
+#[inline(always)]
 fn interpolate_modulation(modulation: &[[f32; 4]; 4], weights: [f32; 4]) -> u32 {
     #[cfg(test)]
     FOG_INTERPOLATION_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -775,6 +778,7 @@ impl FogSpriteSampler {
         )
     }
 
+    #[inline(always)]
     pub(crate) fn blit_at_axes(
         &self,
         blit: SpriteBlitState,
@@ -784,6 +788,9 @@ impl FogSpriteSampler {
         self.blit_at_axes_for_passes(blit, x, y, [true, true])
     }
 
+    // Keep the prepared fragment visible to the row loop and its consumer,
+    // so unused raw vertices and SpriteBlitState copies can be eliminated.
+    #[inline(always)]
     fn blit_at_axes_for_passes(
         &self,
         blit: SpriteBlitState,
@@ -804,28 +811,21 @@ impl FogSpriteSampler {
             // that error is far below a half-channel rounding boundary.
             // Keep interpolation for NaN offsets, whose conversion yields 0.
             let uniform_is_exact = x.offset.is_finite() && y.offset.is_finite();
-            let fragment = |pass| {
-                if uniform_is_exact {
-                    if let Some(color) = combined.uniform[pass] {
-                        return color;
-                    }
-                }
-                if combined.nonzero[pass] {
-                    interpolate_modulation(&combined.modulation[pass], weights)
-                } else {
-                    0
-                }
-            };
-            FogModulationSample::Prepared {
-                modulation: quad.modulation,
-                fragments: [
-                    if passes[0] { fragment(0) } else { 0 },
-                    if prepared.owner && passes[1] {
-                        fragment(1)
+            let mut fragments = [0; 2];
+            for pass in 0..2 {
+                if passes[pass] && (pass == 0 || prepared.owner) {
+                    fragments[pass] = if uniform_is_exact && combined.uniform[pass].is_some() {
+                        combined.uniform[pass].unwrap_or(0)
+                    } else if combined.nonzero[pass] {
+                        interpolate_modulation(&combined.modulation[pass], weights)
                     } else {
                         0
-                    },
-                ],
+                    };
+                }
+            }
+            FogModulationSample::Prepared {
+                modulation: quad.modulation,
+                fragments,
                 nonzero: combined.nonzero,
             }
         } else {
@@ -835,6 +835,7 @@ impl FogSpriteSampler {
     }
 }
 
+#[inline(always)]
 pub(crate) fn fog_sprite_blit_at(
     sampler: Option<&FogSpriteSampler>,
     fog: Option<&FogDrawContext>,
@@ -857,6 +858,7 @@ pub(crate) fn fog_sprite_blit_at(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 pub(crate) fn fog_sprite_blit_at_for_passes(
     sampler: Option<&FogSpriteSampler>,
     fog: Option<&FogDrawContext>,
@@ -1732,6 +1734,7 @@ pub(crate) fn normalize_quad_colors(colors: [Color; 4]) -> Color {
     c4_color_to_surface(lighten_c4_color(modulate_c4_colors(top_left, bottom_left)))
 }
 
+#[inline(always)]
 fn shader_modulate_sample(
     source: [f32; 4],
     modulation: u32,
@@ -1777,6 +1780,7 @@ fn shader_modulate_sample(
     }
 }
 
+#[inline(always)]
 fn shader_modulate_fragment(
     source: Color,
     modulation: u32,
@@ -1796,6 +1800,7 @@ fn shader_modulate_fragment(
     )
 }
 
+#[inline(always)]
 fn prepare_color_by_owner_fragment(
     source: Color,
     mut modulation: u32,
@@ -1822,6 +1827,7 @@ fn prepare_color_by_owner_fragment(
     shader_modulate_fragment(source, modulation, mod2, blit.renderer_config)
 }
 
+#[inline(always)]
 pub(crate) fn prepare_sprite_fragment(
     source: Color,
     owner_mask: Option<ColorByOwnerSample>,
@@ -1855,6 +1861,7 @@ pub(crate) fn prepare_sprite_fragment(
     prepare_base_sprite_fragment(source, blit)
 }
 
+#[inline(always)]
 fn prepare_base_sprite_fragment(source: Color, blit: SpriteBlitState) -> PreparedSpriteFragment {
     if blit.modulation.is_none() && blit.fog_modulation.is_none() && blit.mode & C4GFXBLIT_MOD2 == 0
     {
@@ -1880,6 +1887,7 @@ fn prepare_base_sprite_fragment(source: Color, blit: SpriteBlitState) -> Prepare
 /// eight-bit texel. Native filtering precedes both owner-color passes and all
 /// shader modulation, so fractional RGBA must survive until framebuffer
 /// composition.
+#[inline(always)]
 pub(crate) fn prepare_filtered_sprite_fragment(
     source: [f32; 4],
     owner_mask: Option<FilteredColorByOwnerSample>,
@@ -1913,6 +1921,7 @@ pub(crate) fn prepare_filtered_sprite_fragment(
     prepare_base_filtered_sprite_fragment(source, blit)
 }
 
+#[inline(always)]
 fn prepare_base_filtered_sprite_fragment(
     source: [f32; 4],
     blit: SpriteBlitState,
@@ -1932,6 +1941,7 @@ fn prepare_base_filtered_sprite_fragment(
     shader_modulate_sample(source, modulation, mod2, blit.renderer_config)
 }
 
+#[inline(always)]
 fn prepare_filtered_color_by_owner_fragment(
     source: [f32; 4],
     mut modulation: u32,

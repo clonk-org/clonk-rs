@@ -862,6 +862,7 @@ fn blend_fragment_additive(
     )
 }
 
+#[inline(always)]
 pub(crate) fn composite_sprite_fragment(
     source: PreparedSpriteFragment,
     destination: Color,
@@ -877,6 +878,7 @@ pub(crate) fn composite_sprite_fragment(
     composite_single_sprite_fragment(source, destination, blit, gamma)
 }
 
+#[inline(always)]
 fn composite_single_sprite_fragment(
     source: PreparedSpriteFragment,
     destination: Color,
