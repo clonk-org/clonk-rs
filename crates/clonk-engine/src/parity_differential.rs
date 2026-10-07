@@ -510,7 +510,8 @@ func FxUpperStart(object target, int number, int temp)
             engine.objects[index].state.effects = vec![
                 effect_lifecycle_entry("Absorber", 1, 50, 0, None, Some("ELOD")),
                 effect_lifecycle_entry("Upper", 2, 200, 0, None, Some("ELOD")),
-            ];
+            ]
+            .into();
             engine.rng = LcgRng::new(seed);
             let result = effect_lifecycle_i32(
                 engine
@@ -599,7 +600,8 @@ func FxUpperStart(object target, int number, int temp)
             engine.objects[index].state.effects = vec![
                 effect_lifecycle_entry("One", 1, 1, 0, None, Some("ELOH")),
                 effect_lifecycle_entry("Upper", 2, 100, 0, None, Some("ELOH")),
-            ];
+            ]
+            .into();
             engine.rng = LcgRng::new(seed);
             let result = effect_lifecycle_i32(
                 engine
@@ -656,7 +658,8 @@ func FxHighestStart(object target, int number, int temp)
                 effect_lifecycle_entry("Anchor", 1, 100, 0, None, Some("ELOK")),
                 effect_lifecycle_entry("Suspended", 2, 200, 0, None, Some("ELOK")),
                 effect_lifecycle_entry("Highest", 3, 300, 0, None, Some("ELOK")),
-            ];
+            ]
+            .into();
             engine.rng = LcgRng::new(seed);
             let result = effect_lifecycle_i32(
                 engine
@@ -698,7 +701,8 @@ func FxReplacementDamage(object target, int number, int change, int cause, int c
             engine.objects[index].state.effects = vec![
                 effect_lifecycle_entry("First", 1, 100, 0, None, Some("ELOF")),
                 effect_lifecycle_entry("Victim", 2, 200, 0, None, Some("ELOF")),
-            ];
+            ]
+            .into();
             effect_lifecycle_state(&mut engine, "LifecycleReset");
             engine.rng = LcgRng::new(seed);
             engine
@@ -746,7 +750,8 @@ func FxCommandedTimer(object target, int number, int time)
                 0,
                 Some(command_target_number),
                 Some("ELOG"),
-            )];
+            )]
+            .into();
             effect_lifecycle_state(&mut engine, "LifecycleReset");
             engine.rng = LcgRng::new(seed);
             let result = effect_lifecycle_i32(
@@ -794,7 +799,8 @@ func FxErrorTimer(object target, int number, int time)
                 1,
                 None,
                 Some("ELOI"),
-            )];
+            )]
+            .into();
             effect_lifecycle_state(&mut engine, "LifecycleReset");
             engine.rng = LcgRng::new(seed);
             engine

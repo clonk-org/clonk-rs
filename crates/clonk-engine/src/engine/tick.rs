@@ -2770,7 +2770,7 @@ impl Engine {
                 object.set_shape_vertex_buffer(vertices.clone());
             }
             if let Some(overlays) = graphics_overlays {
-                object.state.graphics_overlays = overlays;
+                object.state.graphics_overlays = overlays.into();
             }
             if let Some(base_graphics) = update_base_graphics {
                 if object.state.base_graphics != base_graphics {
@@ -2787,13 +2787,15 @@ impl Engine {
                     &components,
                     component_order
                         .clone()
-                        .unwrap_or_else(|| object.state.component_order.clone()),
+                        .unwrap_or_else(|| object.state.component_order.to_vec()),
                     &[],
-                );
+                )
+                .into();
                 object.state.components = components;
             } else if let Some(component_order) = component_order {
                 object.state.component_order =
-                    normalized_component_order(&object.state.components, component_order, &[]);
+                    normalized_component_order(&object.state.components, component_order, &[])
+                        .into();
             }
 
             object.clamp_velocity(&self.physics);

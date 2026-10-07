@@ -268,10 +268,10 @@ fn callback_reuses_object_effects_from_its_state_snapshot() {
         engine.capture_state().objects[0].snapshot.effects,
         state.objects[0].snapshot.effects
     );
-    // One snapshot vector and three owned allocations per effect: name,
-    // variable list, and nested array. No second callback-private copy.
+    // Read-only callbacks share the receiver's effect storage, including
+    // effect names and nested values, rather than copying it on entry.
     assert!(
-        populated <= empty + 64 * 3 + 2,
+        populated <= empty + 2,
         "object effect allocations grew from {empty} to {populated}"
     );
 }

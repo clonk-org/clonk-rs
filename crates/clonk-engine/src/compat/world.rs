@@ -4,7 +4,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 mod buffers;
 mod callback;
 mod snapshot;
-use snapshot::CallbackSnapshot;
+use snapshot::{CallbackSnapshot, DeferredRefCell};
 
 /// Shared by callback-local views until one needs the full script state.
 #[derive(Debug)]
@@ -2590,7 +2590,7 @@ pub struct HostWorldContext {
     /// Mutable projection of the players' C4ObjectInfoList state. A host
     /// callback can recruit/create several infos before its outcome is folded
     /// into Engine, so consumed entries and newly allocated indices live here.
-    pub(crate) crew_info_state: Rc<RefCell<HostCrewInfoState>>,
+    pub(crate) crew_info_state: Rc<DeferredRefCell<HostCrewInfoState>>,
     /// Names of loaded particle defs (C4ParticleSystem::GetDef,
     /// C4Particles.cpp:465-473). `None` = no registry attached (legacy
     /// fixture contexts): name lookups behave permissively. `Some` = engine
@@ -2770,7 +2770,7 @@ impl Default for HostWorldContext {
             flag_removeable: false,
             standard_crew_names: None,
             definition_crew_names: Rc::new(HashMap::new()),
-            crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
+            crew_info_state: Rc::new(DeferredRefCell::new(HostCrewInfoState::default())),
             team_home_base_rule: false,
             shared_bases: true,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
@@ -3252,7 +3252,7 @@ impl HostWorldContext {
                 || Rc::new(HashMap::new()),
                 |tables| Rc::clone(&tables.definition_crew_names),
             ),
-            crew_info_state: Rc::new(RefCell::new(crew_info_state)),
+            crew_info_state: Rc::new(DeferredRefCell::new(crew_info_state)),
             particle_defs: None,
             reloadable_particle_defs: None,
             particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
@@ -4562,7 +4562,7 @@ impl HostWorldContext {
         };
         let object = Rc::make_mut(object);
         if let Some(state) = object.full_state_mut() {
-            Rc::make_mut(state).effects = effects.to_vec();
+            Rc::make_mut(state).effects = effects.to_vec().into();
         }
     }
 

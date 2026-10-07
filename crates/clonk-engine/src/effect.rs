@@ -38,7 +38,7 @@ impl std::ops::DerefMut for SharedEffectStates {
         match self {
             Self::Owned(effects) => Rc::make_mut(effects),
             Self::Object(state) => {
-                *self = state.effects.clone().into();
+                *self = state.effects.to_vec().into();
                 self.deref_mut()
             }
         }

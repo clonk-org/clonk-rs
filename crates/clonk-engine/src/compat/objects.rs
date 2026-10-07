@@ -143,7 +143,7 @@ pub(crate) fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
             .or_else(|| {
                 object
                     .full_state()
-                    .map(|state| state.component_order.clone())
+                    .map(|state| state.component_order.to_vec())
             });
         let def_order = context
             .world
@@ -2445,7 +2445,7 @@ pub(crate) fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
                 context.get_world_object(self_id).and_then(|object| {
                     object
                         .full_state()
-                        .map(|state| state.component_order.clone())
+                        .map(|state| state.component_order.to_vec())
                 })
             })
             .unwrap_or_default();
@@ -7863,7 +7863,7 @@ fn resolve_component_list(
                 object.as_ref().and_then(|object| {
                     object
                         .full_state()
-                        .map(|state| state.component_order.clone())
+                        .map(|state| state.component_order.to_vec())
                 })
             })
             .unwrap_or_else(|| {
@@ -8842,7 +8842,7 @@ fn reflect_object_values(
         .or_else(|| state.map(|state| &state.components));
     let component_order = scope
         .and_then(|scope| scope.pending_update.component_order.as_ref())
-        .or_else(|| state.map(|state| &state.component_order));
+        .or_else(|| state.map(|state| &*state.component_order));
     if let (Some(components), Some(order)) = (components, component_order) {
         for id in order {
             reflection.push(

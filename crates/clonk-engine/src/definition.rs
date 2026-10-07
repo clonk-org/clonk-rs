@@ -2474,7 +2474,7 @@ impl Definition {
         // The scope publishes its whole overlay list, so it must start
         // from the object's real overlays: C4Object::GetGraphicsOverlay
         // splices a single node (src/C4Object.cpp:5962-5977).
-        .with_graphics_overlays(state.graphics_overlays.clone())
+        .with_graphics_overlays(state.graphics_overlays.to_vec())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
         .with_controller(state.controller)
@@ -5692,7 +5692,7 @@ impl Definition {
                     // list (compat/contexts.rs:8892), so it must start from the
                     // calling object's real overlays or the write deletes the
                     // rest.
-                    .with_graphics_overlays(state.graphics_overlays.clone())
+                    .with_graphics_overlays(state.graphics_overlays.to_vec())
                     .with_walk_rotation(ambient_walk_rotation)
                     .with_script_fixed_position(state.script_fixed_position)
                     .with_script_fixed_velocity(state.script_fixed_velocity)

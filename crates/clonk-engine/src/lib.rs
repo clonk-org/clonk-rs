@@ -72,6 +72,7 @@ pub mod player_file;
 use player_file::PlayerInfoCoreState;
 pub mod component_list;
 pub use component_list::ComponentList;
+pub use shared_vec::SharedVec;
 pub mod pxs;
 mod record;
 mod runtime_join_player_restore;
@@ -84,6 +85,7 @@ mod scoreboard;
 mod script_constants;
 #[doc(hidden)]
 pub mod sector;
+mod shared_vec;
 mod sky;
 #[cfg(test)]
 mod test_game_call_ex;
@@ -386,6 +388,7 @@ std::thread_local! {
     static HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_DEFINITION_TABLE_PLACEHOLDERS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_CREW_INFO_STATE_PROJECTIONS: Cell<usize> = const { Cell::new(0) };
     static RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOLID_MASK_DEFINITION_LOOKUPS: Cell<usize> = const { Cell::new(0) };
@@ -11361,8 +11364,8 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         action: snapshot.action.clone(),
         direction: snapshot.direction,
         command_direction: snapshot.command_direction,
-        effects: snapshot.effects.clone(),
-        vertices: snapshot.vertices.clone(),
+        effects: snapshot.effects.clone().into(),
+        vertices: snapshot.vertices.clone().into(),
         shape_vertices: ShapeVertexBuffer::from_active(&snapshot.vertices),
         contact_density: snapshot.contact_density,
         container: snapshot.container,
@@ -11373,7 +11376,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         contents: snapshot.contents.clone(),
         contents_link_generation: 0,
         components: snapshot.components.clone(),
-        component_order,
+        component_order: component_order.into(),
         status: snapshot.status,
         owner: snapshot.owner,
         controller: snapshot.controller,
@@ -11384,7 +11387,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         crew_disabled: false,
         alive: snapshot.alive,
         base_graphics: snapshot.base_graphics.clone(),
-        graphics_overlays: snapshot.graphics_overlays.clone(),
+        graphics_overlays: snapshot.graphics_overlays.clone().into(),
         draw_transform: snapshot.draw_transform,
         local_vars: snapshot.local_vars.clone().into(),
         in_liquid: snapshot.in_liquid,
@@ -12822,7 +12825,7 @@ fn dispatch_global_effect_callback_with_continuation(
                         state.physical_changes.clone(),
                         ambient_definition_physical,
                     )
-                    .with_graphics_overlays(state.graphics_overlays.clone())
+                    .with_graphics_overlays(state.graphics_overlays.to_vec())
                     .with_walk_rotation(compat::WalkRotationSeed {
                         rotateable: ambient_rotateable,
                         t_attach: state.t_attach,

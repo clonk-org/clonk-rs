@@ -127,7 +127,13 @@ impl HostWorldContext {
             flag_removeable: engine.flag_removeable,
             standard_crew_names: tables.standard_crew_names.clone(),
             definition_crew_names: Rc::clone(&tables.definition_crew_names),
-            crew_info_state: Rc::new(RefCell::new(engine.host_crew_info_state())),
+            // SAFETY: the provider's paused-engine lifetime covers the rosters.
+            crew_info_state: Rc::new(unsafe {
+                DeferredRefCell::deferred(
+                    provider.source,
+                    crate::Engine::project_host_crew_info_state,
+                )
+            }),
             particle_defs: Some(engine.particle_system.shared_def_names()),
             reloadable_particle_defs: Some(engine.particle_system.shared_reloadable_def_names()),
             particle_reload_requests: Rc::clone(&engine.host_requests.particle_reload_requests),
@@ -293,6 +299,76 @@ unsafe fn scenario_section_landscape_extents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_crew_reads_share_edits_and_preserve_roster_order() {
+        // C4ObjectInfoList::GetIdle traverses the ordered roster and excludes
+        // dead, non-participating and already recruited entries
+        // (src/C4ObjectInfoList.cpp:113-130).
+        let mut engine = crate::Engine::new();
+        engine
+            .register_script_definition("CREW", "Crew", "")
+            .unwrap();
+        engine.crew_rosters.insert(
+            4,
+            ["First", "Second", "Dead", "Excluded"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| crate::player_file::CrewInfo {
+                    id: "CREW".into(),
+                    name: name.into(),
+                    has_died: index == 2,
+                    participation: i32::from(index != 3),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        engine.crew_info_order.insert(4, vec![1, 3, 0, 2]);
+        crate::HOST_CREW_INFO_STATE_PROJECTIONS.with(|count| count.set(0));
+        let first = crate::CrewInfoLink {
+            player_id: 4,
+            roster_index: 0,
+        };
+        let second = crate::CrewInfoLink {
+            player_id: 4,
+            roster_index: 1,
+        };
+        {
+            let world = engine.host_world_context();
+            let nested = world.clone();
+            assert_eq!(crate::HOST_CREW_INFO_STATE_PROJECTIONS.with(Cell::get), 0);
+            {
+                let state = world.crew_info_state.borrow();
+                assert_eq!(
+                    state.order[&4]
+                        .iter()
+                        .map(|link| link.roster_index)
+                        .collect::<Vec<_>>(),
+                    vec![1, 3, 0, 2]
+                );
+                assert_eq!(
+                    state.idle[&(4, "CREW".into())]
+                        .iter()
+                        .map(|(link, _)| *link)
+                        .collect::<Vec<_>>(),
+                    vec![second, first]
+                );
+            }
+            nested
+                .crew_info_state
+                .borrow_mut()
+                .entries
+                .get_mut(&second)
+                .unwrap()
+                .in_action = true;
+            assert!(world.crew_info_state.borrow().entries[&second].in_action);
+            assert_eq!(crate::HOST_CREW_INFO_STATE_PROJECTIONS.with(Cell::get), 1);
+        }
+        // Callback-local edits do not leak into the paused engine's roster.
+        assert!(!engine.crew_rosters[&4][1].in_action);
+        assert!(!engine.host_world_context().crew_info_state.borrow().entries[&second].in_action);
+        assert_eq!(crate::HOST_CREW_INFO_STATE_PROJECTIONS.with(Cell::get), 2);
+    }
 
     #[test]
     fn callbacks_without_section_queries_leave_section_tables_unbuilt() {

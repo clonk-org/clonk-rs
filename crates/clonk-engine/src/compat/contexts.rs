@@ -6888,7 +6888,7 @@ impl EffectHostContext {
             ocf_base,
             crew_member,
             state.plr_view_range,
-            state.graphics_overlays.clone(),
+            state.graphics_overlays.to_vec(),
             state.base_graphics.clone(),
             state.draw_transform,
             state.info_physical,
@@ -7122,7 +7122,7 @@ impl EffectHostContext {
                 self.get_world_object(target).and_then(|object| {
                     object
                         .full_state()
-                        .map(|state| state.component_order.clone())
+                        .map(|state| state.component_order.to_vec())
                 })
             })
             .unwrap_or_else(|| {
@@ -7604,7 +7604,7 @@ impl EffectHostContext {
                 .unwrap_or_else(|| state.base_graphics.clone()),
             graphics_overlays: scope
                 .map(|scope| scope.graphics_overlays.clone())
-                .unwrap_or_else(|| state.graphics_overlays.clone()),
+                .unwrap_or_else(|| state.graphics_overlays.to_vec()),
             blit_mode: self.object_blit_mode(target).unwrap_or(state.blit_mode),
             color: scope
                 .and_then(|scope| scope.pending_update.color)
@@ -8650,8 +8650,8 @@ impl EffectHostContext {
                         state.action.target2 = scope.effective_action_target(1);
                         state.direction = scope.direction();
                         state.command_direction = scope.command_direction();
-                        state.effects = scope.effects.snapshot();
-                        state.vertices = scope.vertices().to_vec();
+                        state.effects = scope.effects.snapshot().into();
+                        state.vertices = scope.vertices().to_vec().into();
                         state.shape_vertices = scope.shape_vertex_buffer();
                         state.contact_density = scope.contact_density();
                         state.container = scope.container();
@@ -8664,7 +8664,7 @@ impl EffectHostContext {
                         state.selected = scope.selected();
                         state.alive = scope.alive();
                         state.base_graphics = scope.base_graphics.clone();
-                        state.graphics_overlays = scope.graphics_overlays.clone();
+                        state.graphics_overlays = scope.graphics_overlays.clone().into();
                         state.draw_transform = scope.draw_transform();
                         state.in_liquid = scope.in_liquid();
                         state.mobile = scope.mobile();

@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
@@ -20,9 +21,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::DefinitionId;
 
 /// An ordered ID/count list mirroring `C4IDList`.
+///
+/// The entries are copy-on-write: every script callback snapshots its
+/// receiver's state, and the copy only diverges once one side writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ComponentList {
-    entries: Vec<(DefinitionId, i32)>,
+    entries: Arc<Vec<(DefinitionId, i32)>>,
 }
 
 impl ComponentList {
@@ -64,33 +68,31 @@ impl ComponentList {
 
     /// `SetCount(index, count)` (`C4IDList.cpp:53-58`).
     pub fn set_count_at(&mut self, index: usize, count: i32) -> bool {
-        match self.entries.get_mut(index) {
-            Some((_, existing)) => {
-                *existing = count;
-                true
-            }
-            None => false,
+        if index >= self.entries.len() {
+            return false;
         }
+        Arc::make_mut(&mut self.entries)[index].1 = count;
+        true
     }
 
     /// `SetIDCount` (`C4IDList.cpp:85-`): updates the **first** entry with this
     /// ID, appending when absent.
     pub fn set(&mut self, id: DefinitionId, count: i32) {
-        match self
-            .entries
+        let entries = Arc::make_mut(&mut self.entries);
+        match entries
             .iter_mut()
             .find(|(entry, _)| *entry == id)
             .map(|(_, existing)| existing)
         {
             Some(existing) => *existing = count,
-            None => self.entries.push((id, count)),
+            None => entries.push((id, count)),
         }
     }
 
     /// Appends without merging, so a caller replaying C++'s parse order keeps
     /// its repeats.
     pub fn push(&mut self, id: DefinitionId, count: i32) {
-        self.entries.push((id, count));
+        Arc::make_mut(&mut self.entries).push((id, count));
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&DefinitionId, i32)> {
@@ -102,7 +104,12 @@ impl ComponentList {
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(&DefinitionId, i32) -> bool) {
-        self.entries.retain(|(id, count)| keep(id, *count));
+        Arc::make_mut(&mut self.entries).retain(|(id, count)| keep(id, *count));
+    }
+
+    #[cfg(test)]
+    fn shares_entries_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.entries, &other.entries)
     }
 }
 
@@ -110,7 +117,7 @@ impl Serialize for ComponentList {
     /// Emitted as a sequence, because a map cannot hold a repeated ID.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut sequence = serializer.serialize_seq(Some(self.entries.len()))?;
-        for (id, count) in &self.entries {
+        for (id, count) in self.entries.iter() {
             sequence.serialize_element(&(id, count))?;
         }
         sequence.end()
@@ -141,7 +148,9 @@ impl<'de> Deserialize<'de> for ComponentList {
                 while let Some(entry) = access.next_element::<(DefinitionId, i32)>()? {
                     entries.push(entry);
                 }
-                Ok(ComponentList { entries })
+                Ok(ComponentList {
+                    entries: Arc::new(entries),
+                })
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
@@ -150,7 +159,9 @@ impl<'de> Deserialize<'de> for ComponentList {
                     entries.push(entry);
                 }
                 entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-                Ok(ComponentList { entries })
+                Ok(ComponentList {
+                    entries: Arc::new(entries),
+                })
             }
         }
 
@@ -161,7 +172,7 @@ impl<'de> Deserialize<'de> for ComponentList {
 impl FromIterator<(DefinitionId, i32)> for ComponentList {
     fn from_iter<T: IntoIterator<Item = (DefinitionId, i32)>>(iter: T) -> Self {
         Self {
-            entries: iter.into_iter().collect(),
+            entries: Arc::new(iter.into_iter().collect()),
         }
     }
 }
@@ -173,7 +184,9 @@ impl From<HashMap<DefinitionId, i32>> for ComponentList {
     fn from(map: HashMap<DefinitionId, i32>) -> Self {
         let mut entries = map.into_iter().collect::<Vec<_>>();
         entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-        Self { entries }
+        Self {
+            entries: Arc::new(entries),
+        }
     }
 }
 
@@ -251,6 +264,22 @@ mod tests {
             vec![id("METL"), id("WOOD")],
             "map order is not deterministic, so the recovery sorts by ID"
         );
+    }
+
+    /// Every script callback snapshots its receiver's state
+    /// (`Object::script_state_snapshot`), components included. A copy must
+    /// share the entries until one side writes, or each snapshot reallocates
+    /// every component ID.
+    #[test]
+    fn clones_share_entries_until_written() {
+        let list = ComponentList::from_iter([(id("METL"), 2), (id("KLAS"), 1)]);
+        let mut copy = list.clone();
+        assert!(copy.shares_entries_with(&list));
+
+        assert!(copy.set_count_at(0, 5));
+        assert!(!copy.shares_entries_with(&list));
+        assert_eq!(list.count_at(0), Some(2), "the original is untouched");
+        assert_eq!(copy.count_at(0), Some(5));
     }
 
     #[test]
