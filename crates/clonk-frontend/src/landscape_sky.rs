@@ -54,6 +54,56 @@ mod tests {
     }
 
     #[test]
+    fn landscape_tile_reuses_released_snapshot_backings() {
+        let width = 3;
+        let height = 2;
+        let grid = PixelGrid::new(
+            width,
+            height,
+            vec![0; (width * height) as usize],
+            vec![0],
+            vec![None],
+            vec![None],
+        );
+        let mut cache =
+            LandscapeRenderCache::new(grid, width, height, false, (0, 0, true, true, None));
+        cache.pixels = Arc::from(vec![1; (width * height * 4) as usize].into_boxed_slice());
+        cache.liquid_mask = Arc::from(vec![2; (width * height) as usize].into_boxed_slice());
+        cache.record_gpu_update(&[(0, 0, width, height)]);
+        let first = cache.take_gpu_tile_resources(&[0]).remove(0);
+        let first_bytes = (first.0.pixels.to_vec(), first.1.pixels.to_vec());
+        let first_pointers = (first.0.pixels.as_ptr(), first.1.pixels.as_ptr());
+
+        Arc::make_mut(&mut cache.pixels)[4..8].fill(3);
+        Arc::make_mut(&mut cache.liquid_mask)[1] = 4;
+        cache.record_gpu_update(&[(1, 0, 1, 1)]);
+        let second = cache.take_gpu_tile_resources(&[0]).remove(0);
+        let second_pointers = (second.0.pixels.as_ptr(), second.1.pixels.as_ptr());
+        assert_eq!(first.0.pixels.as_ref(), first_bytes.0);
+        assert_eq!(first.1.pixels.as_ref(), first_bytes.1);
+        assert_ne!(first_pointers, second_pointers);
+        assert_eq!(Arc::strong_count(&first.0.pixels), 2);
+        assert_eq!(Arc::strong_count(&first.1.pixels), 2);
+        drop(first);
+
+        let mut captured = second;
+        for value in 5..21 {
+            let captured_bytes = (captured.0.pixels.to_vec(), captured.1.pixels.to_vec());
+            Arc::make_mut(&mut cache.pixels)[4..8].fill(value);
+            Arc::make_mut(&mut cache.liquid_mask)[1] = value;
+            cache.record_gpu_update(&[(1, 0, 1, 1)]);
+            let next = cache.take_gpu_tile_resources(&[0]).remove(0);
+            assert_eq!(captured.0.pixels.as_ref(), captured_bytes.0);
+            assert_eq!(captured.1.pixels.as_ref(), captured_bytes.1);
+            assert_eq!(&next.0.pixels[4..8], &[value; 4]);
+            assert_eq!(next.1.pixels[1], value);
+            let next_pointers = (next.0.pixels.as_ptr(), next.1.pixels.as_ptr());
+            assert!(next_pointers == first_pointers || next_pointers == second_pointers);
+            captured = next;
+        }
+    }
+
+    #[test]
     fn wide_landscape_records_one_gpu_command_per_visible_tile() {
         // C4Surface::GetTexAt selects the physical tile and BlitLandscape
         // submits tile-local texture coordinates (src/C4Surface.cpp:593-608;
@@ -182,6 +232,8 @@ struct LandscapeGpuTile {
     liquid_mask_id: GpuTextureId,
     pixels: Option<Arc<[u8]>>,
     liquid_mask: Option<Arc<[u8]>>,
+    retired_pixels: [Option<Arc<[u8]>>; 4],
+    retired_liquid_masks: [Option<Arc<[u8]>>; 4],
     revision: u64,
     published_revision: Option<u64>,
     dirty: Vec<SurfaceRect>,
@@ -259,6 +311,8 @@ impl LandscapeRenderCache {
                 },
                 pixels: None,
                 liquid_mask: None,
+                retired_pixels: std::array::from_fn(|_| None),
+                retired_liquid_masks: std::array::from_fn(|_| None),
                 revision: 0,
                 published_revision: None,
                 dirty: Vec::new(),
@@ -334,6 +388,34 @@ impl LandscapeRenderCache {
             .then_some((tile_index, layout))
     }
 
+    fn writable_tile_bytes<'a>(
+        current: &'a mut Arc<[u8]>,
+        retired: &mut [Option<Arc<[u8]>>; 4],
+    ) -> &'a mut [u8] {
+        if Arc::get_mut(current).is_none() {
+            let reusable = retired.iter_mut().position(|buffer| {
+                buffer
+                    .as_mut()
+                    .is_some_and(|buffer| Arc::get_mut(buffer).is_some())
+            });
+            let replacement = reusable.map_or_else(
+                || Arc::from(current.as_ref()),
+                |index| {
+                    let mut buffer = retired[index].take().expect("reusable backing is present");
+                    Arc::get_mut(&mut buffer)
+                        .expect("reusable backing is unique")
+                        .copy_from_slice(current);
+                    buffer
+                },
+            );
+            let previous = std::mem::replace(current, replacement);
+            if let Some(slot) = retired.iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(previous);
+            }
+        }
+        Arc::get_mut(current).expect("writable backing is unique")
+    }
+
     fn copy_tile_region(
         tile: &mut LandscapeGpuTile,
         source_pixels: &[u8],
@@ -357,16 +439,22 @@ impl LandscapeRenderCache {
         if left >= right || top >= bottom || logical_width == 0 || logical_height == 0 {
             return;
         }
-        let base = Arc::make_mut(tile.pixels.get_or_insert_with(|| {
-            let mut pixels = vec![255; tile_size.saturating_mul(tile_size).saturating_mul(4)];
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel[3] = 0;
-            }
-            Arc::from(pixels.into_boxed_slice())
-        }));
-        let mask = Arc::make_mut(tile.liquid_mask.get_or_insert_with(|| {
-            Arc::from(vec![0; tile_size.saturating_mul(tile_size)].into_boxed_slice())
-        }));
+        let base = Self::writable_tile_bytes(
+            tile.pixels.get_or_insert_with(|| {
+                let mut pixels = vec![255; tile_size.saturating_mul(tile_size).saturating_mul(4)];
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel[3] = 0;
+                }
+                Arc::from(pixels.into_boxed_slice())
+            }),
+            &mut tile.retired_pixels,
+        );
+        let mask = Self::writable_tile_bytes(
+            tile.liquid_mask.get_or_insert_with(|| {
+                Arc::from(vec![0; tile_size.saturating_mul(tile_size)].into_boxed_slice())
+            }),
+            &mut tile.retired_liquid_masks,
+        );
         for source_y in top..bottom {
             let local_y = source_y - origin_y;
             let source_row = source_y * source_width as usize;
@@ -662,14 +750,40 @@ pub(crate) fn record_gpu_landscape(
                 (world_bottom - tile_y as f32) / physical_size as f32,
             ],
         ];
+        let software_sprite = (!blit.renderer_config.no_box_fades)
+            .then(|| {
+                surface.add_gpu_software_sprite(clonk_graphics::GpuSoftwareSprite {
+                    destination: [offset, offset, surface_width as f32, surface_height as f32],
+                    source: [viewport_x, viewport_y, source_width, source_height],
+                    inverse: GraphicsTransform::identity(),
+                    translation: [0.0; 2],
+                    flip_x: false,
+                    inclusive_source_end: false,
+                    gamma: None,
+                    mapping: clonk_graphics::GpuSoftwareSpriteMapping::Landscape {
+                        zoom,
+                        world_extent: [cache.width, cache.height],
+                        tile_origin: tile_layout.origin,
+                        texture_size: base_texture_size as u32,
+                        indent,
+                    },
+                    fog: fog_modulation.map(|_| clonk_graphics::GpuSoftwareFog {
+                        destination: [offset, offset, surface_width as f32, surface_height as f32],
+                        source_range: [x.0, y.0, x.1, y.1],
+                    }),
+                })
+            })
+            .flatten();
         let command = |indices: [usize; 4], modulation: [[f32; 4]; 4]| GpuCommand::Landscape {
             base: tile.base_id,
             liquid_mask: liquid.map(|_| tile.liquid_mask_id),
             liquid,
             vertices: std::array::from_fn(|slot| {
                 let index = indices[slot];
-                GpuVertex::new(positions[index], uv[index], modulation[slot])
-                    .with_outer_modulation(outer_modulation)
+                let mut vertex = GpuVertex::new(positions[index], uv[index], modulation[slot])
+                    .with_outer_modulation(outer_modulation);
+                vertex.software_sprite = software_sprite;
+                vertex
             }),
             clip,
             phase,
@@ -1118,6 +1232,18 @@ pub(crate) fn lit_sky_texels(image: &ImageData, lighting: f32) -> Vec<Color> {
         .collect()
 }
 
+pub(crate) fn lit_sky_rgba_into(image: &ImageData, lighting: f32, pixels: &mut Vec<u8>) {
+    let expected = (image.width() as usize)
+        .checked_mul(image.height() as usize)
+        .unwrap_or(0);
+    pixels.clear();
+    pixels.reserve(expected.min(image.pixels().len() / 4) * 4);
+    for pixel in image.pixels().chunks_exact(4).take(expected) {
+        let color = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]).modulate(lighting);
+        pixels.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+    }
+}
+
 /// Sky texels already multiplied by the frame's daylight factor.
 ///
 /// [`lit_sky_texels`] walks the whole source image, so a large sky costs 20 ms
@@ -1138,6 +1264,42 @@ pub(crate) struct RetainedLitSkyTexture {
     pub(crate) image: ImageData,
     pub(crate) texture: GpuTextureId,
     pub(crate) revision: u64,
+    /// One reusable RGBA scratch image; compare before publishing an Arc.
+    pub(crate) scratch: Vec<u8>,
+    /// At most four previous backings; shared captured images remain immutable.
+    pub(crate) retired_pixels: [Option<Arc<[u8]>>; 4],
+}
+
+impl RetainedLitSkyTexture {
+    pub(crate) fn reuse_pixels(&mut self, source: &[u8]) -> Arc<[u8]> {
+        let recycled = self.retired_pixels.iter_mut().find_map(|slot| {
+            let pixels = slot.as_mut()?;
+            if pixels.len() == source.len() && Arc::get_mut(pixels).is_some() {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        let pixels = recycled.map_or_else(
+            || Arc::from(source),
+            |mut pixels| {
+                Arc::get_mut(&mut pixels)
+                    .expect("retired sky backing is unique")
+                    .copy_from_slice(source);
+                pixels
+            },
+        );
+        let previous = self.image.pixels_arc();
+        if let Some(slot) = self.retired_pixels.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(previous);
+        } else if let Some(index) = self.retired_pixels.iter_mut().position(|slot| {
+            slot.as_mut()
+                .is_some_and(|pixels| Arc::get_mut(pixels).is_some())
+        }) {
+            self.retired_pixels[index] = Some(previous);
+        }
+        pixels
+    }
 }
 
 fn draw_sky_tile_row(

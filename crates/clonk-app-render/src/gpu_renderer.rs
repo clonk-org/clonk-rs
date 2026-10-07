@@ -10487,6 +10487,10 @@ mod tests {
             outer_modulation: clonk_graphics::GpuOuterModulation::default(),
             owner_outer_modulation: clonk_graphics::GpuOuterModulation::default(),
             sample_tile: [0.0, 0.0, 1.0, 1.0],
+            software_blit: None,
+            software_alpha_mode: clonk_graphics::GpuSolidAlphaMode::SourceOver,
+            software_shader: true,
+            software_sprite: None,
         };
         let data1 = |smooth: bool| {
             packed_landscape_vertex(vertex, [2.0, 4.0], [0.0; 3], false, smooth, &projection)
@@ -10731,6 +10735,8 @@ mod tests {
             rect: [1.25, 2.5, 6.75, 5.875],
             uv: [0.125, 0.25, 0.875, 0.75],
             modulation: 0x407f_3fc0,
+            software_sprite: None,
+            software_shader: true,
         };
         let compact =
             packed_sprite_instance(sprite, true, true, SpriteProjection::new(&projection))
@@ -12319,11 +12325,9 @@ mod tests {
         let _ = render_identity_readback(&mut renderer, &device, &queue, &scene);
         assert_eq!(renderer.last_stats().draw_calls, 7);
 
-        let one_command_scene = GpuScene {
-            commands: vec![command(base_a, None, None, None)],
-            textures: resources,
-            ..scene
-        };
+        let mut one_command_scene = scene;
+        one_command_scene.commands = vec![command(base_a, None, None, None)];
+        one_command_scene.textures = resources;
         let presentation = GpuPresentation::identity(2, 2);
         let layers = [
             GpuSceneLayer::new(&one_command_scene, presentation),
@@ -15166,17 +15170,15 @@ mod tests {
                 style: GpuSolidStyle::NONE,
             }],
         );
-        let negative_diagonal_line_scene = GpuScene {
-            commands: vec![solid_command(
-                vec![
-                    solid_vertex(0.5, 2.5, rgba_f32(SOLID)),
-                    solid_vertex(4.5, 0.5, rgba_f32(SOLID)),
-                ],
-                GpuPrimitiveTopology::LineList,
-                fixture_options!(),
-            )],
-            ..diagonal_line_scene.clone()
-        };
+        let mut negative_diagonal_line_scene = diagonal_line_scene.clone();
+        negative_diagonal_line_scene.commands = vec![solid_command(
+            vec![
+                solid_vertex(0.5, 2.5, rgba_f32(SOLID)),
+                solid_vertex(4.5, 0.5, rgba_f32(SOLID)),
+            ],
+            GpuPrimitiveTopology::LineList,
+            fixture_options!(),
+        )];
         for (label, scene, expected_pixels) in [
             (
                 "forward",
@@ -15826,6 +15828,8 @@ mod tests {
                 rect,
                 uv: [0.0, 0.0, 1.0, 1.0],
                 modulation,
+                software_sprite: None,
+                software_shader: true,
             }],
             clip: options.clip,
             blend: options.blend,
@@ -15997,6 +16001,10 @@ mod tests {
             outer_modulation: GpuOuterModulation::default(),
             owner_outer_modulation: GpuOuterModulation::default(),
             sample_tile: [0.0; 4],
+            software_blit: None,
+            software_alpha_mode: clonk_graphics::GpuSolidAlphaMode::SourceOver,
+            software_shader: true,
+            software_sprite: None,
         }
     }
 
@@ -16352,11 +16360,15 @@ mod tests {
                             rect: [0.0, 0.0, 1.0, 2.0],
                             uv: [0.0, 0.0, 1.0, 1.0],
                             modulation: 0x00ff_ffff,
+                            software_sprite: None,
+                            software_shader: true,
                         },
                         GpuSpriteQuad {
                             rect: [3.0, 0.0, 4.0, 2.0],
                             uv: [0.0, 0.0, 1.0, 1.0],
                             modulation: 0x00ff_ffff,
+                            software_sprite: None,
+                            software_shader: true,
                         },
                     ],
                     clip,

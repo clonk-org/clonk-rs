@@ -104,24 +104,35 @@ pub(crate) fn tile_image_on_surface(
     if surface.is_gpu_scene_capture_active() {
         let start_x = origin_x.rem_euclid(image_width as i32);
         let start_y = origin_y.rem_euclid(image_height as i32);
-        let source = SourceRect::new(0, 0, image_width as i32, image_height as i32);
         let renderer_config =
             active_advanced_renderer_config().unwrap_or(AdvancedRendererConfig::DEFAULT);
         let mut y = -start_y;
         while y < surface_height as i32 {
             let mut x = -start_x;
             while x < surface_width as i32 {
-                draw_image_region(
+                capture_gpu_sprite_impl(
                     surface,
-                    &GuiRect::new(x as f32, y as f32, image_width as f32, image_height as f32),
+                    (x as f32, y as f32, image_width as f32, image_height as f32),
+                    (x as f32, y as f32, image_width as f32, image_height as f32),
+                    &GraphicsTransform::identity(),
                     image,
                     None,
-                    &source,
+                    FloatSourceRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: image_width as f32,
+                        height: image_height as f32,
+                    },
                     false,
                     None,
                     SpriteBlitState::normal().with_renderer_config(renderer_config),
                     gamma,
                     None,
+                    GpuSampler::Nearest,
+                    false,
+                    None,
+                    false,
+                    clonk_graphics::GpuSoftwareSpriteMapping::TileCopy,
                 );
                 x += image_width as i32;
             }
@@ -748,7 +759,8 @@ pub(crate) fn draw_pxs_pixel(
             GpuSolidAlphaMode::SourceOver,
             clip,
             GpuBlend::Normal,
-            GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
+            GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough()))
+                .with_software_blend(clonk_graphics::GpuSoftwareBlend::Legacy),
         );
         return;
     }
@@ -809,7 +821,8 @@ pub(crate) fn draw_pxs_line(
             GpuSolidAlphaMode::SourceOver,
             clip,
             GpuBlend::Normal,
-            GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
+            GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough()))
+                .with_software_blend(clonk_graphics::GpuSoftwareBlend::Legacy),
         );
         return;
     }
@@ -1291,7 +1304,8 @@ pub(crate) fn fill_rect_impl(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: GpuBlend::Normal,
-            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough()))
+                .with_software_blend(clonk_graphics::GpuSoftwareBlend::Legacy),
         });
         return;
     }
@@ -1312,7 +1326,8 @@ pub(crate) fn fill_rect_impl(
                     blend: GpuBlend::Normal,
                     style: GpuSolidStyle::with_gamma(
                         gamma.is_some_and(|gamma| !gamma.is_passthrough()),
-                    ),
+                    )
+                    .with_software_blend(clonk_graphics::GpuSoftwareBlend::Legacy),
                 });
                 continue;
             }

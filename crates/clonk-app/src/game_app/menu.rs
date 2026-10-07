@@ -4910,6 +4910,7 @@ impl GameApp {
         // mutate this save.
         self.finish_background_save_jobs();
         self.finish_pending_native_save_thumbnails(None);
+        self.saves.pending_cpu_native_thumbnails.clear();
         let last_startup_dialog = self.last_startup_dialog;
         self.scenario_lifecycle.abort_restart_pending = false;
         self.finalize_pending_league_end_for_teardown();

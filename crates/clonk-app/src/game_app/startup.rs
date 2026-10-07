@@ -4868,7 +4868,32 @@ impl GameApp {
             }
             self.presentation.pending_native_presentation.take()
         } else {
-            None
+            self.rendering.graphics.begin_gpu_scene_capture();
+            self.presentation.retained_cpu_logical_capture_active = true;
+            let _renderer = clonk_frontend::activate_advanced_renderer_config(
+                self.rendering.graphics.advanced_renderer_config(),
+            );
+            let captured = self.render_inactive_startup_dialog_layer(&mut ignored_outgoing_pixel);
+            self.presentation.retained_cpu_logical_capture_active = false;
+            let recorder = self
+                .rendering
+                .graphics
+                .surface_mut()
+                .take_gpu_scene_capture();
+            captured?;
+            Some(NativePresentationPlan {
+                batches: vec![NativePresentationBatch {
+                    software_fade: None,
+                    logical_layer: None,
+                    clip: None,
+                    native_loader_text: false,
+                    text: Vec::new(),
+                    fonts: None,
+                    gpu_recorder: recorder,
+                    owner: None,
+                }],
+                monitor_gamma: self.startup_monitor_gamma(),
+            })
         };
 
         Ok(StartupDialogFadeLayers {
@@ -5661,11 +5686,12 @@ impl GameApp {
             .graphics
             .surface()
             .is_clonk_text_capture_active()
-            || self
+            || (self
                 .rendering
                 .graphics
                 .surface()
-                .is_gpu_scene_capture_active();
+                .is_gpu_scene_capture_active()
+                && !self.presentation.retained_cpu_logical_capture_active);
         let scaled_output = self
             .loader
             .render_config

@@ -5823,6 +5823,168 @@ pub(crate) struct CursorPortraitImages {
     pub(crate) owner_overlay: Option<ImageData>,
 }
 
+const CURSOR_PORTRAIT_CACHE_MAX_ENTRIES: usize = 64;
+const CURSOR_PORTRAIT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Default)]
+struct CursorPortraitImageCache {
+    entries: VecDeque<CursorPortraitImageCacheEntry>,
+    retained_bytes: usize,
+}
+
+struct CursorPortraitImageCacheEntry {
+    dimensions: [u32; 2],
+    pixels: Arc<[u8]>,
+    mask: Option<Arc<[u8]>>,
+    images: CursorPortraitImages,
+    bytes: usize,
+}
+
+impl CursorPortraitImageCache {
+    fn get(
+        &mut self,
+        dimensions: [u32; 2],
+        pixels: &Arc<[u8]>,
+        mask: &Option<Arc<[u8]>>,
+    ) -> Option<CursorPortraitImages> {
+        let index = self.entries.iter().position(|entry| {
+            entry.dimensions == dimensions
+                && Arc::ptr_eq(&entry.pixels, pixels)
+                && match (&entry.mask, mask) {
+                    (Some(cached), Some(source)) => Arc::ptr_eq(cached, source),
+                    (None, None) => true,
+                    _ => false,
+                }
+        })?;
+        let entry = self.entries.remove(index)?;
+        let images = entry.images.clone();
+        self.entries.push_back(entry);
+        Some(images)
+    }
+
+    fn insert(
+        &mut self,
+        dimensions: [u32; 2],
+        pixels: Arc<[u8]>,
+        mask: Option<Arc<[u8]>>,
+        images: CursorPortraitImages,
+    ) {
+        let bytes = pixels
+            .len()
+            .saturating_add(mask.as_ref().map_or(0, |mask| mask.len()))
+            .saturating_add(images.base.pixels().len())
+            .saturating_add(
+                images
+                    .owner_overlay
+                    .as_ref()
+                    .map_or(0, |image| image.pixels().len()),
+            );
+        if bytes > CURSOR_PORTRAIT_CACHE_MAX_BYTES {
+            return;
+        }
+        while self.entries.len() >= CURSOR_PORTRAIT_CACHE_MAX_ENTRIES
+            || self.retained_bytes.saturating_add(bytes) > CURSOR_PORTRAIT_CACHE_MAX_BYTES
+        {
+            let Some(entry) = self.entries.pop_front() else {
+                break;
+            };
+            self.retained_bytes -= entry.bytes;
+        }
+        self.retained_bytes += bytes;
+        self.entries.push_back(CursorPortraitImageCacheEntry {
+            dimensions,
+            pixels,
+            mask,
+            images,
+            bytes,
+        });
+    }
+}
+
+thread_local! {
+    static CURSOR_PORTRAIT_IMAGE_CACHE: std::cell::RefCell<CursorPortraitImageCache> =
+        std::cell::RefCell::new(CursorPortraitImageCache::default());
+}
+
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5")
+))]
+mod cursor_portrait_cache_tests {
+    use super::*;
+
+    fn picture(pixels: Vec<u8>, mask: Vec<u8>) -> clonk_engine::DefinitionPictureImage {
+        let mut definition =
+            clonk_engine::Definition::from_script("PCCH", "Portrait cache", "").unwrap();
+        definition.set_picture(Some(clonk_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        }));
+        definition.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+            color_mask: Some(Arc::from(mask.into_boxed_slice())),
+        }));
+        let mut engine = Engine::new();
+        engine.register_definition(definition).unwrap();
+        engine.definition_picture_phase_image("PCCH", 0).unwrap()
+    }
+
+    #[test]
+    fn repeated_cursor_portrait_sources_reuse_derived_backings_without_rebuilding() {
+        let source = picture(vec![10, 20, 30, 255, 40, 50, 60, 128], vec![136, 0]);
+        let first = cursor_portrait_images(source.clone());
+        let first_base = first.base.pixels().to_vec();
+        let first_owner = first.owner_overlay.as_ref().unwrap().pixels().to_vec();
+        #[cfg(feature = "presentation-profile")]
+        let (second, calls, bytes) =
+            measure_app_profile_allocations(|| cursor_portrait_images(source.clone()));
+        #[cfg(not(feature = "presentation-profile"))]
+        let second = cursor_portrait_images(source.clone());
+        assert!(Arc::ptr_eq(
+            &first.base.pixels_arc(),
+            &second.base.pixels_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &first.owner_overlay.as_ref().unwrap().pixels_arc(),
+            &second.owner_overlay.as_ref().unwrap().pixels_arc()
+        ));
+        #[cfg(feature = "presentation-profile")]
+        assert_eq!(
+            (calls, bytes),
+            (0, 0),
+            "warmed derived portrait preparation"
+        );
+
+        let changed = picture(vec![90, 80, 70, 255, 60, 50, 40, 255], vec![0, 64]);
+        let changed = cursor_portrait_images(changed);
+        assert_ne!(changed.base.pixels(), first_base);
+        assert_ne!(
+            changed.owner_overlay.as_ref().unwrap().pixels(),
+            first_owner
+        );
+        assert_eq!(first.base.pixels(), first_base);
+        assert_eq!(first.owner_overlay.as_ref().unwrap().pixels(), first_owner);
+
+        let pixels = source.pixels();
+        let mask = source.color_mask().unwrap();
+        let weak_pixels = Arc::downgrade(&pixels);
+        let weak_mask = Arc::downgrade(&mask);
+        drop((source, pixels, mask));
+        assert!(
+            weak_pixels.upgrade().is_some(),
+            "cached identity retains its source owner"
+        );
+        assert!(
+            weak_mask.upgrade().is_some(),
+            "cached identity retains its mask owner"
+        );
+    }
+}
+
 /// Prepares the two surfaces consumed by `C4DefGraphics::DrawClr`. Keeping
 /// them separate lets the HUD scale/filter the base and owner overlay in the
 /// same two passes as C++.
@@ -5833,6 +5995,24 @@ pub(crate) fn cursor_portrait_images(
     let height = image.height();
     let mask = image.color_mask();
     let pixels = image.into_pixels();
+    CURSOR_PORTRAIT_IMAGE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(images) = cache.get([width, height], &pixels, &mask) {
+            return images;
+        }
+        let images =
+            prepare_cursor_portrait_images(width, height, Arc::clone(&pixels), mask.clone());
+        cache.insert([width, height], pixels, mask, images.clone());
+        images
+    })
+}
+
+fn prepare_cursor_portrait_images(
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+    mask: Option<Arc<[u8]>>,
+) -> CursorPortraitImages {
     let Some(mask) = mask else {
         return CursorPortraitImages {
             base: ImageData::from_arc(width, height, pixels),

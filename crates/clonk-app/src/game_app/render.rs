@@ -1346,7 +1346,88 @@ impl GameApp {
     /// refresh. A raw menu-cache hit still returns `true` when a deferred
     /// monitor-gamma pass remains to be applied.
     pub(crate) fn render(&mut self, frame: &mut [u8]) -> Result<bool> {
+        let surface_resolves_monitor = self.mode == AppMode::Running
+            && !self.loader_presentation_active()
+            && !self.console_session.enabled;
+        let gamma = self.retained_gpu_frame_gamma();
+        let gamma_mode =
+            retained_gpu_gamma_mode(self.rendering.graphics.advanced_renderer_config());
+        let (width, height) = (
+            self.rendering.graphics.surface().width(),
+            self.rendering.graphics.surface().height(),
+        );
+        self.presentation.retained_cpu_logical_capture_active = true;
+        let retained = self.capture_retained_logical_gpu_frame(
+            GpuPresentation::identity(width, height),
+            &gamma,
+            gamma_mode,
+            false,
+        );
+        self.presentation.retained_cpu_logical_capture_active = false;
+        let retained = retained?;
+        let mut presenter = self
+            .presentation
+            .cpu_logical_presenter
+            .take()
+            .filter(|presenter| presenter.physical_size() == (width, height))
+            .unwrap_or_else(|| clonk_scaling::FramePresenter::new(1.0, width, height));
+        let result = retained.render_cpu_without_monitor(
+            &mut self.presentation.cpu_scene_renderers,
+            &mut presenter,
+            frame,
+        );
+        self.presentation.cpu_logical_presenter = Some(presenter);
+        if result.is_ok() {
+            // Logical captures and pixel-inspecting callers retain the same
+            // surface as immediate rendering: running frames resolve the
+            // monitor ramp first; menus retain their pre-monitor pixels.
+            // The window presents into physical output without this copy.
+            if surface_resolves_monitor {
+                retained.resolve_cpu_monitor_gamma(frame);
+            }
+            self.rendering
+                .graphics
+                .surface_mut()
+                .pixels_mut()
+                .copy_from_slice(frame);
+            if !surface_resolves_monitor {
+                retained.resolve_cpu_monitor_gamma(frame);
+            }
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_immediate_oracle(&mut self, frame: &mut [u8]) -> Result<bool> {
         self.render_for_presentation(frame, false, false, false)
+    }
+
+    pub(crate) fn render_retained_cpu_presentation(
+        &mut self,
+        presenter: &mut clonk_scaling::FramePresenter,
+        frame: &mut [u8],
+    ) -> Result<bool> {
+        let geometry = presenter.presentation_geometry();
+        let (width, height) = geometry.physical_size();
+        let presentation = GpuPresentation {
+            physical_extent: [width, height],
+            scale: geometry.scale(),
+            crop_top: geometry.crop_top(),
+            world_zoom: self.rendering.graphics.viewport_zoom(),
+        };
+        let mut retained = self.render_retained_gpu_frame(presentation)?;
+        if !self.console_session.enabled
+            && retained_gpu_gamma_mode(self.rendering.graphics.advanced_renderer_config())
+                == GpuGammaMode::Monitor
+        {
+            for layer in &mut retained.layers {
+                layer.scene.gamma_mode = GpuGammaMode::Monitor;
+                if let Some((scene, _)) = &mut layer.software_fade {
+                    scene.gamma_mode = GpuGammaMode::Monitor;
+                }
+            }
+        }
+        retained.render_cpu(&mut self.presentation.cpu_scene_renderers, presenter, frame)
     }
 
     pub(crate) fn render_ordered_native_base(&mut self, frame: &mut [u8]) -> Result<bool> {
@@ -1753,6 +1834,7 @@ impl GameApp {
                         };
                         if retained_fade {
                             plan.batches.push(NativePresentationBatch {
+                                software_fade: None,
                                 logical_layer: None,
                                 clip: None,
                                 native_loader_text: false,
@@ -1771,6 +1853,7 @@ impl GameApp {
                             }
                             if incoming_opacity != 0 {
                                 let mut incoming = NativePresentationBatch {
+                                    software_fade: None,
                                     logical_layer: None,
                                     clip: None,
                                     native_loader_text: false,
@@ -1788,6 +1871,7 @@ impl GameApp {
                             if outgoing_opacity != 0 {
                                 if let Some(outgoing) = fade.outgoing_native_frame.as_deref() {
                                     plan.batches.push(NativePresentationBatch {
+                                        software_fade: None,
                                         logical_layer: Some(startup_fade_native_layer(
                                             outgoing,
                                             outgoing_opacity,
@@ -1806,6 +1890,7 @@ impl GameApp {
                             }
                             if incoming_opacity != 0 {
                                 plan.batches.push(NativePresentationBatch {
+                                    software_fade: None,
                                     logical_layer: Some(startup_fade_native_layer(
                                         &incoming_frame,
                                         incoming_opacity,
@@ -2591,7 +2676,7 @@ impl GameApp {
         Some(format_resource_string(template, &[&name]))
     }
 
-    fn retained_gpu_frame_gamma(&self) -> clonk_graphics::GammaRamp {
+    pub(crate) fn retained_gpu_frame_gamma(&self) -> clonk_graphics::GammaRamp {
         if self.loader_presentation_active() {
             return self.loader.active_gamma(
                 self.rendering
@@ -2655,6 +2740,26 @@ impl GameApp {
             return Ok(self.attach_startup_gpu_damage(frame, startup_damage_eligible, true));
         }
 
+        self.capture_retained_logical_gpu_frame(
+            presentation,
+            &gamma,
+            gamma_mode,
+            startup_damage_eligible,
+        )
+    }
+
+    pub(crate) fn capture_retained_logical_gpu_frame(
+        &mut self,
+        presentation: GpuPresentation,
+        gamma: &clonk_graphics::GammaRamp,
+        gamma_mode: GpuGammaMode,
+        startup_damage_eligible: bool,
+    ) -> Result<RetainedGpuFrame> {
+        let gamma_mode = if self.console_session.enabled {
+            GpuGammaMode::Disabled
+        } else {
+            gamma_mode
+        };
         self.rendering.graphics.begin_gpu_scene_capture();
         let mut ignored_cpu_pixel = [0_u8; 4];
         if let Err(error) = self.render_for_presentation_with_monitor_defer(
@@ -2664,20 +2769,27 @@ impl GameApp {
             false,
             true,
         ) {
-            let _ = self.rendering.graphics.finish_gpu_scene_capture(&gamma);
+            let _ = self.rendering.graphics.finish_gpu_scene_capture(gamma);
             return Err(error);
         }
         let (mut scene, capture_stats) = self
             .rendering
             .graphics
-            .finish_gpu_scene_capture_with_stats(&gamma)
+            .finish_gpu_scene_capture_with_stats(gamma)
             .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
         scene.gamma_mode = gamma_mode;
         if let Some(plan) = self.presentation.pending_native_presentation.take() {
             let mut frame =
-                self.retained_gpu_frame_from_native_plan(plan, presentation, &gamma, gamma_mode)?;
+                self.retained_gpu_frame_from_native_plan(plan, presentation, gamma, gamma_mode)?;
             if !scene.commands.is_empty() {
+                scene.clear = Color::transparent();
                 frame.layers.push(RetainedGpuFrameLayer {
+                    software_fade: None,
+                    software: if self.presentation.retained_cpu_logical_capture_active {
+                        RetainedSoftwareLayer::Physical
+                    } else {
+                        RetainedSoftwareLayer::Overlay { clip: None }
+                    },
                     scene,
                     presentation,
                     owner: None,
@@ -2688,6 +2800,8 @@ impl GameApp {
         }
         let frame = RetainedGpuFrame {
             layers: vec![RetainedGpuFrameLayer {
+                software_fade: None,
+                software: RetainedSoftwareLayer::Base,
                 scene,
                 presentation,
                 owner: None,
@@ -2821,6 +2935,9 @@ impl GameApp {
         gamma: &clonk_graphics::GammaRamp,
         gamma_mode: GpuGammaMode,
     ) -> Result<RetainedGpuFrame> {
+        let _renderer_config = clonk_frontend::activate_advanced_renderer_config(
+            self.rendering.graphics.advanced_renderer_config(),
+        );
         let logical_extent = [
             self.rendering.graphics.surface().width(),
             self.rendering.graphics.surface().height(),
@@ -2839,6 +2956,7 @@ impl GameApp {
                 Surface::new(physical_width, physical_height, PixelFormat::Rgba8888)
             });
         let mut layers = Vec::new();
+        let mut has_logical_base = false;
         let result = (|| -> Result<()> {
             for batch in plan.batches {
                 let owner = batch.owner;
@@ -2848,10 +2966,38 @@ impl GameApp {
                 );
                 if let Some(recorder) = batch.gpu_recorder {
                     capture_stats.merge(recorder.capture_stats());
-                    let mut scene =
-                        recorder.into_scene(logical_extent, Color::opaque(8, 12, 24), gamma);
+                    let software = if has_logical_base {
+                        if batch.software_fade.is_some()
+                            && self.presentation.retained_cpu_logical_capture_active
+                        {
+                            RetainedSoftwareLayer::FadeBytes
+                        } else {
+                            RetainedSoftwareLayer::Overlay { clip: batch.clip }
+                        }
+                    } else {
+                        has_logical_base = true;
+                        RetainedSoftwareLayer::Base
+                    };
+                    let software_fade = batch.software_fade.map(|(recorder, opacity)| {
+                        let clear = if matches!(software, RetainedSoftwareLayer::FadeBytes) {
+                            Color::opaque(8, 12, 24)
+                        } else {
+                            Color::transparent()
+                        };
+                        let mut scene = recorder.into_scene(logical_extent, clear, gamma);
+                        scene.gamma_mode = gamma_mode;
+                        (scene, opacity)
+                    });
+                    let clear = if matches!(software, RetainedSoftwareLayer::Base) {
+                        Color::opaque(8, 12, 24)
+                    } else {
+                        Color::transparent()
+                    };
+                    let mut scene = recorder.into_scene(logical_extent, clear, gamma);
                     scene.gamma_mode = gamma_mode;
                     layers.push(RetainedGpuFrameLayer {
+                        software_fade,
+                        software,
                         scene,
                         presentation: logical_presentation,
                         owner,
@@ -2909,6 +3055,8 @@ impl GameApp {
                 );
                 scene.gamma_mode = gamma_mode;
                 layers.push(RetainedGpuFrameLayer {
+                    software_fade: None,
+                    software: RetainedSoftwareLayer::Physical,
                     scene,
                     presentation: GpuPresentation::identity(physical_width, physical_height),
                     owner,
@@ -6160,6 +6308,7 @@ impl GameApp {
                 .expect("ordered presentation plan is active")
                 .batches
                 .push(NativePresentationBatch {
+                    software_fade: None,
                     logical_layer: None,
                     clip: None,
                     native_loader_text: false,

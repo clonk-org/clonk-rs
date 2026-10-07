@@ -87,6 +87,11 @@ pub(crate) struct ChatState {
     pub(crate) show_log_timestamps: bool,
 }
 
+pub(crate) enum CpuNativeSaveTitle {
+    AwaitingPresentation,
+    Captured(Option<Arc<[u8]>>),
+}
+
 /// The app's side of saving a game: where it writes, what it still owes,
 /// and the language the description is written in.
 ///
@@ -105,6 +110,10 @@ pub(crate) struct SaveState {
     pub(crate) description_language: Vec<u8>,
     pub(crate) pending_gpu_thumbnail_paths: VecDeque<PathBuf>,
     pub(crate) pending_native_thumbnails: VecDeque<PendingNativeSaveThumbnail>,
+    /// Aligned with native-slot jobs in the single worker's submission order.
+    pub(crate) native_slot_cpu_titles: VecDeque<(PathBuf, Option<CpuNativeSaveTitle>)>,
+    pub(crate) pending_cpu_native_thumbnails:
+        VecDeque<(Arc<PendingNativeSaveThumbnail>, CpuNativeSaveTitle)>,
     pub(crate) background_worker:
         Option<save_worker::BackgroundSaveWorker<save_worker::BackgroundSaveCompletion>>,
     pub(crate) last_native_timings: Option<save_worker::NativeSaveTimings>,
@@ -1615,6 +1624,10 @@ pub(crate) fn queue_league_record_bytes(network: Option<&NetworkManager>, bytes:
 /// the upscaled base, and the retained-GPU capture flags. `GameApp`
 /// composes it as `presentation`; nothing here is simulation state.
 pub(crate) struct PresentationState {
+    pub(crate) retained_cpu_logical_capture_active: bool,
+    pub(crate) retained_cpu_presentation_active: bool,
+    pub(crate) cpu_logical_presenter: Option<clonk_scaling::FramePresenter>,
+    pub(crate) cpu_scene_renderers: Vec<clonk_graphics::CpuSceneRenderer>,
     pub(crate) retained_gpu_presentation_active: bool,
     /// While scale-native text is captured, split the retained command stream
     /// at the same painter-order boundaries as `NativePresentationPlan`.

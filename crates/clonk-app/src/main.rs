@@ -28,6 +28,22 @@ static PROFILE_ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
 #[cfg(all(test, feature = "presentation-profile"))]
 static PROFILE_ALLOCATION_BYTES: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(all(test, feature = "presentation-profile"))]
+static PROFILE_MAX_ALLOCATION_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(test, feature = "presentation-profile"))]
+static PROFILE_FRAME_SIZED_ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(test, feature = "presentation-profile"))]
+fn record_app_profile_allocation(size: usize) {
+    PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+    let size = u64::try_from(size).unwrap_or(u64::MAX);
+    PROFILE_ALLOCATION_BYTES.fetch_add(size, AtomicOrdering::Relaxed);
+    PROFILE_MAX_ALLOCATION_BYTES.fetch_max(size, AtomicOrdering::Relaxed);
+    if size >= 1280 * 720 * 4 {
+        PROFILE_FRAME_SIZED_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+}
+
 /// The opt-in app-path probe keeps the shipped mimalloc allocator and wraps
 /// only its own test binary so each measured input/tick can report requested
 /// allocation calls and bytes. Ordinary tests retain the unwrapped allocator.
@@ -42,11 +58,7 @@ static GLOBAL: ProfileAllocator = ProfileAllocator(mimalloc::MiMalloc);
 unsafe impl std::alloc::GlobalAlloc for ProfileAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
-            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
-            PROFILE_ALLOCATION_BYTES.fetch_add(
-                u64::try_from(layout.size()).unwrap_or(u64::MAX),
-                AtomicOrdering::Relaxed,
-            );
+            record_app_profile_allocation(layout.size());
         }
         // SAFETY: the wrapped allocator receives the caller's original
         // allocation contract unchanged.
@@ -55,11 +67,7 @@ unsafe impl std::alloc::GlobalAlloc for ProfileAllocator {
 
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
         if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
-            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
-            PROFILE_ALLOCATION_BYTES.fetch_add(
-                u64::try_from(layout.size()).unwrap_or(u64::MAX),
-                AtomicOrdering::Relaxed,
-            );
+            record_app_profile_allocation(layout.size());
         }
         // SAFETY: the wrapped allocator receives the caller's original
         // allocation contract unchanged.
@@ -78,11 +86,7 @@ unsafe impl std::alloc::GlobalAlloc for ProfileAllocator {
         new_size: usize,
     ) -> *mut u8 {
         if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
-            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
-            PROFILE_ALLOCATION_BYTES.fetch_add(
-                u64::try_from(new_size).unwrap_or(u64::MAX),
-                AtomicOrdering::Relaxed,
-            );
+            record_app_profile_allocation(new_size);
         }
         // SAFETY: the pointer, old layout and new size are the caller's
         // original reallocation contract.
@@ -109,6 +113,8 @@ fn edge_scroll_profile_projection_count() -> u64 {
 fn measure_app_profile_allocations<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
     PROFILE_ALLOCATION_CALLS.store(0, AtomicOrdering::Relaxed);
     PROFILE_ALLOCATION_BYTES.store(0, AtomicOrdering::Relaxed);
+    PROFILE_MAX_ALLOCATION_BYTES.store(0, AtomicOrdering::Relaxed);
+    PROFILE_FRAME_SIZED_ALLOCATION_CALLS.store(0, AtomicOrdering::Relaxed);
     PROFILE_COUNT_ALLOCATIONS.store(true, AtomicOrdering::SeqCst);
     let result = operation();
     PROFILE_COUNT_ALLOCATIONS.store(false, AtomicOrdering::SeqCst);
@@ -1924,6 +1930,23 @@ fn run() -> Result<()> {
                     event: WindowEvent::RedrawRequested,
                 } if window_id == window.id() => {
                     let graphics_started = Instant::now();
+                    // SaveSlot refers to the last CPU frame the player saw.
+                    // Freeze it before a GPU retry can replace its buffer with
+                    // a 1x1 scratch target or a CPU redraw can overwrite it.
+                    if app.presentation.retained_cpu_presentation_active {
+                        if let Some(mut previous) = software_slot
+                            .as_mut()
+                            .map(crate::cpu_target::CpuTarget::Software)
+                            .or_else(|| pixels_slot.as_mut().map(crate::cpu_target::CpuTarget::Gpu))
+                        {
+                            let (width, height) = previous.buffer_extent();
+                            app.finish_retained_cpu_native_save_thumbnails(
+                                previous.frame_mut(),
+                                width,
+                                height,
+                            );
+                        }
+                    }
                     app.rendering
                         .graphics
                         .set_presentation_scale(presenter.scale());
@@ -1936,6 +1959,7 @@ fn run() -> Result<()> {
                         )
                     }) {
                         app.presentation.retained_gpu_presentation_active = true;
+                        app.presentation.retained_cpu_presentation_active = false;
                         let Some(pixels) = pixels_slot.as_mut() else {
                             return;
                         };
@@ -2116,6 +2140,7 @@ fn run() -> Result<()> {
                     };
                     let pixels = &mut pixels;
                     app.presentation.retained_gpu_presentation_active = false;
+                    app.presentation.retained_cpu_presentation_active = true;
                     app.invalidate_startup_gpu_damage();
                     let (physical_width, physical_height) = presenter.physical_size();
                     // Only a GPU target has a texture limit to exceed; the
@@ -2156,108 +2181,15 @@ fn run() -> Result<()> {
                             return;
                         }
                     }
-                    let ordered_native_text = !app.console_session.enabled
-                        && app.can_present_ordered_native_text(presenter.scale());
-                    let defer_native_main_text = !ordered_native_text
-                        && app.can_defer_native_main_menu_text(presenter.scale());
-                    let defer_native_loader_text =
-                        !ordered_native_text && app.can_defer_native_loader_text(presenter.scale());
-                    let defer_native_game_messages = !ordered_native_text
-                        && app.can_defer_native_game_messages(presenter.scale());
-                    let presentation_monitor_gamma = if ordered_native_text {
-                        None
-                    } else if app.loader_presentation_active() {
-                        app.startup_monitor_gamma()
-                    } else {
-                        match app.mode {
-                            AppMode::Menu | AppMode::Loading => app.startup_monitor_gamma(),
-                            AppMode::Running => {
-                                app.rendering.graphics.monitor_gamma_enabled().then(|| {
-                                    app.rendering
-                                        .graphics
-                                        .active_gamma_ramp(&app.snapshot.environment.gamma)
-                                })
+                    let refreshed =
+                        match app.render_retained_cpu_presentation(presenter, pixels.frame_mut()) {
+                            Ok(refreshed) => refreshed,
+                            Err(err) => {
+                                tracing::error!(error = ?err, "retained CPU render failed");
+                                event_target.exit();
+                                return;
                             }
-                        }
-                    };
-                    let native_game_message_gamma = if defer_native_game_messages {
-                        let active = app
-                            .rendering
-                            .graphics
-                            .active_gamma_ramp(&app.snapshot.environment.gamma);
-                        Some(if app.rendering.graphics.fragment_gamma_enabled() {
-                            active
-                        } else {
-                            clonk_graphics::GammaRamp::identity()
-                        })
-                    } else {
-                        None
-                    };
-                    let refreshed = match presenter.present(pixels.frame_mut(), |frame| {
-                        if ordered_native_text {
-                            app.render_ordered_native_base(frame)
-                        } else {
-                            app.render_for_presentation_with_monitor_defer(
-                                frame,
-                                defer_native_main_text,
-                                defer_native_loader_text,
-                                defer_native_game_messages,
-                                true,
-                            )
-                        }
-                    }) {
-                        Ok(refreshed) => refreshed,
-                        Err(err) => {
-                            tracing::error!(error = ?err, "render failed");
-                            event_target.exit();
-                            return;
-                        }
-                    };
-                    if refreshed && ordered_native_text {
-                        let mut composer = presenter.ordered_composer(pixels.frame_mut());
-                        if let Err(err) = app.replay_pending_native_presentation(&mut composer) {
-                            tracing::error!(error = ?err, "ordered native text render failed");
-                            event_target.exit();
-                            return;
-                        }
-                    } else if refreshed && defer_native_loader_text {
-                        let (width, height) = presenter.physical_size();
-                        if let Err(err) =
-                            app.render_native_loader_text(pixels.frame_mut(), width, height)
-                        {
-                            tracing::error!(error = ?err, "native loader text render failed");
-                            event_target.exit();
-                            return;
-                        }
-                    } else if refreshed && defer_native_main_text {
-                        let (width, height) = presenter.physical_size();
-                        if let Err(err) =
-                            app.render_native_main_menu_text(pixels.frame_mut(), width, height)
-                        {
-                            tracing::error!(error = ?err, "native main-menu text render failed");
-                            event_target.exit();
-                            return;
-                        }
-                    } else if refreshed && defer_native_game_messages {
-                        let geometry = presenter.presentation_geometry();
-                        let Some(gamma) = native_game_message_gamma.as_ref() else {
-                            tracing::error!("deferred game-message gamma was not captured");
-                            event_target.exit();
-                            return;
                         };
-                        if let Err(err) =
-                            app.render_native_game_messages(pixels.frame_mut(), geometry, gamma)
-                        {
-                            tracing::error!(error = ?err, "native game-message render failed");
-                            event_target.exit();
-                            return;
-                        }
-                    }
-                    if refreshed {
-                        if let Some(gamma) = presentation_monitor_gamma.as_ref() {
-                            gamma.apply_to_rgba_bytes(pixels.frame_mut());
-                        }
-                    }
                     // The software presenter copies the whole CPU frame into
                     // the window buffer here, so this is the destination cost
                     // the graphics pass would otherwise hide.
@@ -2266,6 +2198,11 @@ fn run() -> Result<()> {
                     let present_duration = present_started.elapsed();
                     match present_result {
                         Ok(RetainedGpuPresentOutcome::Presented) => {
+                            app.finish_retained_cpu_sidecar_save_thumbnails(
+                                pixels.frame_mut(),
+                                physical_width,
+                                physical_height,
+                            );
                             surface_rebuild.note_presented();
                             if let Some(probe) = device_loss_probe.as_mut() {
                                 if probe.note_software_presentation().is_some() {
@@ -3079,6 +3016,10 @@ impl GameApp {
             pending_options_display_requests: VecDeque::new(),
             presentation: PresentationState {
                 retained_gpu_presentation_active: false,
+                retained_cpu_presentation_active: false,
+                cpu_scene_renderers: Vec::new(),
+                cpu_logical_presenter: None,
+                retained_cpu_logical_capture_active: false,
                 retained_gpu_ordered_capture_active: false,
                 retained_native_capture_surface: None,
                 startup_gpu_paint_owners: None,
@@ -3698,6 +3639,7 @@ impl GameApp {
             }
         }
         plan.batches.push(NativePresentationBatch {
+            software_fade: None,
             logical_layer: None,
             clip: None,
             native_loader_text: false,
@@ -3727,11 +3669,12 @@ impl GameApp {
             .is_some_and(|recorder| !recorder.is_empty());
         if has_raster || has_gpu_commands || !text.is_empty() {
             let clip = isolated_clip.filter(|clip| {
-                has_raster
+                (has_raster || has_gpu_commands)
                     && !text.is_empty()
                     && text.iter().all(|command| command.clip == Some(*clip))
             });
             plan.batches.push(NativePresentationBatch {
+                software_fade: None,
                 logical_layer: has_raster.then(|| surface.pixels().to_vec()),
                 clip,
                 native_loader_text: false,

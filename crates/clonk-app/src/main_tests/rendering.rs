@@ -2070,9 +2070,9 @@ fn installed_app_uses_approved_gamepad_phases_in_all_three_views() {
     ] {
         main_assert!(image.region_replacement([160, 0, 80, 36]).is_some());
     }
-    let scenario =
-        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
-            .test_value();
+    let scenario = app
+        .next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
+        .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
         .test_value();
@@ -2154,9 +2154,9 @@ fn active_scenario_uses_approved_menu_and_checked_options_icons() {
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
     persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
     let mut app = new_menu_app_with_paths(320, 200, &paths);
-    let scenario =
-        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
-            .test_value();
+    let scenario = app
+        .next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
+        .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
         .test_value();
@@ -2186,9 +2186,9 @@ fn active_scenario_upgrades_stock_hud_icons_and_keeps_custom_art() {
     main_assert!(crate::hd_hud_icons::is_installed(
         app.assets.hud_graphics().as_ref()
     ));
-    let scenario =
-        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
-            .test_value();
+    let scenario = app
+        .next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
+        .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
         .test_value();
@@ -2233,9 +2233,9 @@ fn approved_hand_gestures_reach_startup_and_loaded_game_hud() {
         main_assert_eq!((art.width(), art.height()) => (512, 512));
     }
 
-    let scenario =
-        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
-            .test_value();
+    let scenario = app
+        .next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
+        .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
         .test_value();
@@ -2274,9 +2274,9 @@ fn approved_navigation_arrows_reach_startup_and_loaded_game() {
         main_assert_eq!((art.width(), art.height()) => (152, 320));
     }
 
-    let scenario =
-        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
-            .test_value();
+    let scenario = app
+        .next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
+        .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
         .test_value();
@@ -3600,6 +3600,7 @@ fn startup_fade_modulates_retained_draws_and_text_like_cpp() {
         surface.begin_gpu_scene_capture();
         surface.fill(Color::new(source[0], source[1], source[2], source[3]));
         let mut batch = NativePresentationBatch {
+            software_fade: None,
             logical_layer: None,
             clip: None,
             native_loader_text: false,
@@ -7226,4 +7227,212 @@ fn startup_modal_suppresses_underlying_focus_paint_ownership() {
         .physical_damage
         .test_ref()
         .intersects(expected[0].bounds()));
+}
+#[test]
+fn retained_cpu_real_scenarios_match_immediate_captures() {
+    assert_retained_cpu_real_scenarios_match_immediate_captures(20);
+}
+
+fn assert_retained_cpu_real_scenarios_match_immediate_captures(frame_count: usize) {
+    for scenario in [
+        "Missions.c4f/SevenKeys.c4s",
+        "Collection.c4f/Magus.c4f/SkyBridge.c4s",
+        "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+    ] {
+        assert_retained_cpu_scenario_capture(scenario, frame_count);
+    }
+}
+
+fn assert_retained_cpu_scenario_capture(scenario: &str, frame_count: usize) {
+    struct SeedGuard;
+    impl Drop for SeedGuard {
+        fn drop(&mut self) {
+            clonk_engine::particles::clear_presentation_safe_random_seed();
+        }
+    }
+    let _seed = SeedGuard;
+    let prepared = PreparedRealInstalledScenario::new(scenario);
+    crate::seed_classic_safe_random(587);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
+    let mut oracle = prepared.instantiate_with_window("CPU capture parity", false, 1280, 720);
+    crate::seed_classic_safe_random(587);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
+    let mut retained = prepared.instantiate_with_window("CPU capture parity", false, 1280, 720);
+    let mut expected = vec![0; 1280 * 720 * 4];
+    let mut actual = expected.clone();
+    for tick in 0..frame_count {
+        oracle.app.test_update();
+        retained.app.test_update();
+        assert!(
+            oracle.app.snapshot == retained.app.snapshot,
+            "inputs differ: {scenario}, {tick}"
+        );
+        oracle
+            .app
+            .render_immediate_oracle(&mut expected)
+            .test_value();
+        if tick % 5 == 0 {
+            for renderer in &mut retained.app.presentation.cpu_scene_renderers {
+                renderer.invalidate();
+            }
+        }
+        retained.app.render(&mut actual).test_value();
+        let mismatch = actual.iter().zip(&expected).position(|(a, b)| a != b);
+        assert_eq!(
+            mismatch,
+            None,
+            "{scenario} tick={tick} first={:?}",
+            mismatch.map(|offset| (
+                offset / 4 % 1280,
+                offset / 4 / 1280,
+                &actual[offset / 4 * 4..offset / 4 * 4 + 4],
+                &expected[offset / 4 * 4..offset / 4 * 4 + 4]
+            ))
+        );
+    }
+}
+
+fn retained_cpu_stress_input(app: &mut GameApp, scroll: bool, lightning: bool) {
+    if scroll {
+        let dy = if app.snapshot.frame.is_multiple_of(2) {
+            64
+        } else {
+            -64
+        };
+        assert!(app
+            .rendering
+            .graphics
+            .scroll_observer_viewport(0, Vector2::new(0, dy)));
+    }
+    if lightning {
+        // Objects.c4d/Effects.c4d/Lightning.c4d/Script.c:86-90 writes ramp 5.
+        // Feed alternating lightning output to presentation without changing
+        // the measured scenario's authoritative weather or random stream.
+        let lgt = if app.snapshot.frame.is_multiple_of(2) {
+            96u32
+        } else {
+            0
+        };
+        let rgb = |v| v * 0x010101;
+        assert!(app
+            .snapshot
+            .environment
+            .gamma
+            .set_ramp(5, [rgb(lgt), rgb(128 + lgt / 2), 0xffffff]));
+    }
+}
+
+fn prepare_retained_cpu_observer(app: &mut GameApp) {
+    app.clear_physical_viewport_states();
+    let observer = app.viewports.ownerless_physical_viewport_state();
+    app.viewports.physical_viewports.push(observer);
+    app.viewports.physical_viewports_authoritative = true;
+}
+
+#[test]
+fn retained_cpu_scrolling_and_lightning_match_immediate_captures() {
+    let prepared =
+        PreparedRealInstalledScenario::new("Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s");
+    crate::seed_classic_safe_random(587);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
+    let mut oracle = prepared.instantiate_with_window("CPU stress parity", false, 1280, 720);
+    crate::seed_classic_safe_random(587);
+    clonk_engine::particles::install_presentation_safe_random_seed(587);
+    let mut retained = prepared.instantiate_with_window("CPU stress parity", false, 1280, 720);
+    prepare_retained_cpu_observer(&mut oracle.app);
+    prepare_retained_cpu_observer(&mut retained.app);
+    let mut expected = vec![0; 1280 * 720 * 4];
+    let mut actual = expected.clone();
+    oracle
+        .app
+        .render_immediate_oracle(&mut expected)
+        .test_value();
+    retained.app.render(&mut actual).test_value();
+    for _ in 0..8 {
+        oracle.app.test_update();
+        retained.app.test_update();
+        assert!(oracle.app.snapshot == retained.app.snapshot);
+        retained_cpu_stress_input(&mut oracle.app, true, true);
+        retained_cpu_stress_input(&mut retained.app, true, true);
+        oracle
+            .app
+            .render_immediate_oracle(&mut expected)
+            .test_value();
+        retained.app.render(&mut actual).test_value();
+        let mismatch = actual
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
+            .map(|(i, (a, b))| (i % 1280, i / 1280, a, b));
+        assert!(
+            mismatch.is_none(),
+            "frame={} {mismatch:?}",
+            oracle.app.snapshot.frame
+        );
+        assert!(
+            retained.app.presentation.cpu_scene_renderers[0]
+                .stats()
+                .rasterized_tiles
+                > 0
+        );
+    }
+    clonk_engine::particles::clear_presentation_safe_random_seed();
+}
+
+#[test]
+fn retained_cpu_physical_native_layers_match_the_previous_presenter() {
+    // C4GraphicsSystem.cpp:167-199 composes native GUI before monitor gamma;
+    // StdFont.cpp:814-903 keeps native glyph metrics at application scale.
+    for scale in [1.0, 1.5] {
+        for use_shader_gamma in [false, true] {
+            let mut oracle = new_real_menu_app(640, 480);
+            let mut retained = new_real_menu_app(640, 480);
+            for app in [&mut oracle, &mut retained] {
+                app.startup.dialog_fade = None;
+                app.rendering
+                    .graphics
+                    .set_runtime_sprite_filtering(scale, false);
+                app.configure_native_startup_fonts(scale, false);
+                app.rendering.graphics.set_advanced_renderer_config(
+                    clonk_frontend::AdvancedRendererConfig {
+                        use_shader_gamma,
+                        ..clonk_frontend::AdvancedRendererConfig::DEFAULT
+                    },
+                );
+                assert!(app.can_present_ordered_native_text(scale));
+            }
+            let (width, height) = ((640.0 * scale) as u32, (480.0 * scale) as u32);
+            let mut expected = vec![0; (width * height * 4) as usize];
+            let mut actual = expected.clone();
+            let mut old_presenter = clonk_scaling::FramePresenter::new(scale, width, height);
+            let mut new_presenter = clonk_scaling::FramePresenter::new(scale, width, height);
+            for frame in 0..2 {
+                let changed = old_presenter
+                    .present(&mut expected, |logical| {
+                        oracle.render_ordered_native_base(logical)
+                    })
+                    .test_value();
+                assert!(changed);
+                oracle
+                    .replay_pending_native_presentation(
+                        &mut old_presenter.ordered_composer(&mut expected),
+                    )
+                    .test_value();
+                retained
+                    .render_retained_cpu_presentation(&mut new_presenter, &mut actual)
+                    .test_value();
+                let mismatch = actual
+                    .chunks_exact(4)
+                    .zip(expected.chunks_exact(4))
+                    .enumerate()
+                    .find(|(_, (a, b))| a != b)
+                    .map(|(i, (a, b))| (i % width as usize, i / width as usize, a, b));
+                assert!(
+                    mismatch.is_none(),
+                    "scale={scale} shader_gamma={use_shader_gamma} frame={frame}: {mismatch:?}"
+                );
+            }
+        }
+    }
 }

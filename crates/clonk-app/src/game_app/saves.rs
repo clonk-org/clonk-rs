@@ -69,6 +69,7 @@ impl GameApp {
         if std::mem::take(&mut self.saves.pending_native_slots) == 0 {
             return;
         }
+        self.saves.native_slot_cpu_titles.clear();
         let detail = "background save worker stopped before saving finished";
         self.status_text = format!("Save failed: {detail}");
         let message =
@@ -1137,7 +1138,9 @@ impl GameApp {
         // the screenshot where the port would take one.
         let capture_title =
             self.engine.frame() != 0 && !self.console_session.enabled && self.window_active;
-        let title_png = if capture_title && !self.presentation.retained_gpu_presentation_active {
+        let retained_presentation = self.presentation.retained_gpu_presentation_active
+            || self.presentation.retained_cpu_presentation_active;
+        let title_png = if capture_title && !retained_presentation {
             let surface = self.rendering.graphics.surface();
             // C++ saves the back buffer with gamma resolved either way: with
             // shaders it is already baked in, without them `SavePNG` applies it
@@ -1164,7 +1167,7 @@ impl GameApp {
         self.save_to_slot_with_title_png(
             slot,
             title_png.as_deref(),
-            capture_title && self.presentation.retained_gpu_presentation_active,
+            capture_title && retained_presentation,
         );
     }
 
@@ -1217,6 +1220,141 @@ impl GameApp {
                         "failed to persist retained GPU native-save thumbnail"
                     );
                 }
+            }
+        }
+    }
+
+    /// Native saves capture the preceding presented back buffer
+    /// (C4Game.cpp:2102-2138), before the next CPU redraw replaces it.
+    pub(crate) fn finish_retained_cpu_native_save_thumbnails(
+        &mut self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        let waiting = self
+            .saves
+            .native_slot_cpu_titles
+            .iter()
+            .filter_map(|(_, title)| title.as_ref())
+            .chain(
+                self.saves
+                    .pending_cpu_native_thumbnails
+                    .iter()
+                    .map(|(_, title)| title),
+            )
+            .any(|title| matches!(title, CpuNativeSaveTitle::AwaitingPresentation));
+        if !waiting
+            && self.saves.pending_cpu_native_thumbnails.is_empty()
+            && self.saves.pending_native_thumbnails.is_empty()
+        {
+            return;
+        }
+        let encoded = (waiting || !self.saves.pending_native_thumbnails.is_empty())
+            .then(|| {
+                encode_presented_save_thumbnail(width, height, frame)
+                    .map(Arc::<[u8]>::from)
+                    .map_err(|error| {
+                        tracing::warn!(
+                            ?error,
+                            "failed to encode presented CPU frame for native saves"
+                        );
+                        error
+                    })
+                    .ok()
+            })
+            .flatten();
+        for title in self
+            .saves
+            .native_slot_cpu_titles
+            .iter_mut()
+            .filter_map(|(_, title)| title.as_mut())
+            .chain(
+                self.saves
+                    .pending_cpu_native_thumbnails
+                    .iter_mut()
+                    .map(|(_, title)| title),
+            )
+        {
+            if matches!(title, CpuNativeSaveTitle::AwaitingPresentation) {
+                *title = CpuNativeSaveTitle::Captured(encoded.clone());
+            }
+        }
+        self.finish_captured_cpu_native_save_thumbnails();
+        self.finish_pending_native_save_thumbnails(encoded.as_deref());
+    }
+
+    fn finish_captured_cpu_native_save_thumbnails(&mut self) {
+        let pending = self.saves.pending_cpu_native_thumbnails.len();
+        for _ in 0..pending {
+            let Some((request, title)) = self.saves.pending_cpu_native_thumbnails.pop_front()
+            else {
+                break;
+            };
+            if self
+                .saves
+                .native_slot_cpu_titles
+                .iter()
+                .any(|(path, _)| *path == request.path)
+            {
+                self.saves
+                    .pending_cpu_native_thumbnails
+                    .push_back((request, title));
+                continue;
+            }
+            let title = match title {
+                CpuNativeSaveTitle::AwaitingPresentation => {
+                    self.saves
+                        .pending_cpu_native_thumbnails
+                        .push_back((request, title));
+                    continue;
+                }
+                CpuNativeSaveTitle::Captured(None) => continue,
+                CpuNativeSaveTitle::Captured(Some(title)) => title,
+            };
+            let queued_request = Arc::clone(&request);
+            let queued_title = Arc::clone(&title);
+            let maker = self.process_group_maker.as_bytes().to_vec();
+            // The comparison, repack and publication share the native-save
+            // FIFO, so another save cannot publish between check and write.
+            let job = Box::new(
+                move || save_worker::BackgroundSaveCompletion::NativeThumbnail {
+                    path: queued_request.path.clone(),
+                    result: replace_native_save_title_png_if_unchanged(
+                        &queued_request,
+                        &queued_title,
+                        &maker,
+                    ),
+                },
+            );
+            if self.saves.submit_background_job(job).is_err() {
+                self.saves
+                    .pending_cpu_native_thumbnails
+                    .push_back((request, CpuNativeSaveTitle::Captured(Some(title))));
+            }
+        }
+    }
+
+    pub(crate) fn finish_retained_cpu_sidecar_save_thumbnails(
+        &mut self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        if self.saves.pending_gpu_thumbnail_paths.is_empty() {
+            return;
+        }
+        let encoded = encode_presented_save_thumbnail(width, height, frame);
+        while let Some(path) = self.saves.pending_gpu_thumbnail_paths.pop_front() {
+            let result = encoded
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error:#}"))
+                .and_then(|bytes| {
+                    fs::write(&path, bytes)
+                        .with_context(|| format!("failed to write thumbnail at {}", path.display()))
+                });
+            if let Err(error) = result {
+                tracing::warn!(?error,path=%path.display(),"failed to persist presented CPU save thumbnail");
             }
         }
     }
@@ -1297,8 +1435,18 @@ impl GameApp {
         &mut self,
         request: save_worker::NativeSlotSaveRequest,
     ) -> Result<()> {
+        let path = request.prepared.destination.clone();
+        let cpu_title = (request.request_gpu_thumbnail
+            && self.presentation.retained_cpu_presentation_active)
+            .then_some(CpuNativeSaveTitle::AwaitingPresentation);
         self.saves
             .submit_background_job(save_worker::native_slot_save_job(request))?;
+        // BackgroundSaveWorker executes one FIFO (save_worker.rs:431-434).
+        // Freeze this request's back buffer at the next redraw, even if its
+        // persistence is still held; later completions keep that same image.
+        self.saves
+            .native_slot_cpu_titles
+            .push_back((path, cpu_title));
         if self.saves.pending_native_slots == 0 {
             self.saves.notification = None;
         }
@@ -1335,17 +1483,16 @@ impl GameApp {
         if worker_stopped {
             self.fail_abandoned_native_slot_saves();
         }
+        self.finish_captured_cpu_native_save_thumbnails();
     }
 
     pub(crate) fn finish_background_save_jobs(&mut self) {
-        let completions = self
-            .saves
-            .background_worker
-            .take()
-            .map(|mut worker| worker.finish())
-            .unwrap_or_default();
-        for completion in completions {
-            self.apply_background_save_completion(completion);
+        while let Some(mut worker) = self.saves.background_worker.take() {
+            for completion in worker.finish() {
+                self.apply_background_save_completion(completion);
+            }
+            self.fail_abandoned_native_slot_saves();
+            self.finish_captured_cpu_native_save_thumbnails();
         }
         self.fail_abandoned_native_slot_saves();
     }
@@ -1356,6 +1503,11 @@ impl GameApp {
     ) {
         match completion {
             save_worker::BackgroundSaveCompletion::NativeSlot(completion) => {
+                let cpu_title = self
+                    .saves
+                    .native_slot_cpu_titles
+                    .pop_front()
+                    .and_then(|(_, title)| title);
                 self.saves.pending_native_slots = self.saves.pending_native_slots.saturating_sub(1);
                 match completion.result {
                     Ok(persisted) => {
@@ -1372,6 +1524,12 @@ impl GameApp {
                             "native save latency stages"
                         );
                         self.saves.last_native_timings = Some(persisted.timings);
+                        self.saves
+                            .pending_native_thumbnails
+                            .retain(|request| request.path != completion.path);
+                        self.saves
+                            .pending_cpu_native_thumbnails
+                            .retain(|(request, _)| request.path != completion.path);
                         if let Some(error) = persisted.thumbnail_retention_error {
                             tracing::warn!(
                                 path = %completion.path.display(),
@@ -1380,15 +1538,17 @@ impl GameApp {
                             );
                         }
                         if let Some(packed_group) = persisted.packed_group {
-                            self.saves
-                                .pending_native_thumbnails
-                                .retain(|request| request.path != completion.path);
-                            self.saves.pending_native_thumbnails.push_back(
-                                PendingNativeSaveThumbnail {
-                                    path: completion.path.clone(),
-                                    packed_group,
-                                },
-                            );
+                            let request = PendingNativeSaveThumbnail {
+                                path: completion.path.clone(),
+                                packed_group,
+                            };
+                            if let Some(title) = cpu_title {
+                                self.saves
+                                    .pending_cpu_native_thumbnails
+                                    .push_back((Arc::new(request), title));
+                            } else {
+                                self.saves.pending_native_thumbnails.push_back(request);
+                            }
                         }
                         self.scensel.reload_on_next_show = true;
                         let slots = self.savegame_slots();
@@ -1471,6 +1631,16 @@ impl GameApp {
                     }
                 }
             }
+            save_worker::BackgroundSaveCompletion::NativeThumbnail { path, result } => match result
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(path=%path.display(), "skipped stale retained CPU native-save thumbnail")
+                }
+                Err(error) => {
+                    tracing::warn!(?error, path=%path.display(), "failed to persist retained CPU native-save thumbnail")
+                }
+            },
             save_worker::BackgroundSaveCompletion::RuntimeDynamic(completion) => {
                 self.finish_runtime_dynamic_save(completion);
             }
@@ -1575,7 +1745,9 @@ impl GameApp {
 
     pub(crate) fn write_save_thumbnail(&mut self, path: &Path) -> Result<()> {
         let target = path.with_extension("png");
-        if self.presentation.retained_gpu_presentation_active {
+        if self.presentation.retained_gpu_presentation_active
+            || self.presentation.retained_cpu_presentation_active
+        {
             self.saves.pending_gpu_thumbnail_paths.push_back(target);
             return Ok(());
         }

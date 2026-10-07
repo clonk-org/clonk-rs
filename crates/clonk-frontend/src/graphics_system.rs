@@ -1,5 +1,148 @@
 use super::*;
 
+#[cfg(test)]
+mod landscape_page_read_tests {
+    use super::lit_sky_texel_cache_tests::measure_allocations;
+    use super::*;
+
+    fn graphics() -> GraphicsSystem {
+        let mut graphics = GraphicsSystem::new(
+            32,
+            32,
+            32,
+            "sparse landscape page reads",
+            Arc::new(clonk_graphics::BitmapFont::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(CursorAtlas::empty()),
+            Arc::new(HudGraphics::default()),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([
+            (
+                "rough".to_string(),
+                ImageData::new(1, 1, vec![192, 96, 48, 255]),
+            ),
+            (
+                "smooth".to_string(),
+                ImageData::new(1, 1, vec![48, 192, 96, 255]),
+            ),
+        ])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([
+            (
+                "earth".to_string(),
+                MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50).with_placement(70),
+            ),
+            (
+                "vehicle".to_string(),
+                MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 100).with_placement(100),
+            ),
+        ])));
+        graphics
+    }
+
+    fn capture(graphics: &mut GraphicsSystem, landscape: &Landscape) -> clonk_graphics::GpuScene {
+        graphics.surface.begin_gpu_scene_capture();
+        assert!(graphics.draw_ground_textured_with_parallel_rows(Some(landscape), None, false));
+        graphics
+            .surface
+            .take_gpu_scene_capture()
+            .expect("active capture")
+            .into_scene(
+                [32, 32],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::identity(),
+            )
+    }
+
+    #[test]
+    fn sparse_shared_landscape_patch_avoids_flattening_the_full_map() {
+        // C4Landscape.cpp:2497,2501 removes put masks before relighting;
+        // :2490-2609 recomposes only each recorded relight neighborhood.
+        const WIDTH: u32 = 2048;
+        const HEIGHT: u32 = 1024;
+        let mut grid = PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            vec![0, 50, 50, 100],
+            vec![
+                None,
+                Some("Earth".to_string()),
+                Some("Earth".to_string()),
+                Some("Vehicle".to_string()),
+            ],
+            vec![
+                None,
+                Some("Rough".to_string()),
+                Some("Smooth".to_string()),
+                Some("Smooth".to_string()),
+            ],
+        );
+        grid.write_mask_byte(11, 10, 3);
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_shade_materials(true);
+        let original = landscape.clone();
+        let mut patched = graphics();
+        let held = capture(&mut patched, &landscape);
+        let mut renderer = clonk_graphics::CpuSceneRenderer::default();
+        let mut held_pixels = vec![0; 32 * 32 * 4];
+        renderer
+            .render(&held, &mut held_pixels)
+            .expect("valid original frame");
+        // Warm the separate mutable tile backing while the old frame is held.
+        landscape.grid_write_byte(12, 12, 2);
+        drop(capture(&mut patched, &landscape));
+        let shared = landscape.clone();
+        landscape.grid_write_byte(12, 10, 2);
+        reset_material_composition_calls();
+        let (scene, allocations) = measure_allocations(|| capture(&mut patched, &landscape));
+        assert_eq!(material_composition_calls(), 3 * 17);
+        eprintln!(
+            "sparse shared landscape patch: {} allocations, {} bytes",
+            allocations.0, allocations.1
+        );
+        assert_eq!(shared.grid_byte_at(12, 10), Some(1));
+        assert_eq!(original.grid_byte_at(12, 12), Some(1));
+        assert_eq!(landscape.grid_byte_at(11, 10), Some(3));
+        assert_eq!(
+            landscape.pixel_grid().expect("grid").render_byte_at(11, 10),
+            Some(1)
+        );
+        let mut fresh = graphics();
+        assert!(fresh.draw_ground_textured_with_parallel_rows(Some(&landscape), None, false));
+        assert!(
+            patched
+                .landscape_cache
+                .as_ref()
+                .expect("patched cache")
+                .pixels
+                .as_ref()
+                == fresh
+                    .landscape_cache
+                    .as_ref()
+                    .expect("full cache")
+                    .pixels
+                    .as_ref(),
+            "sparse relighting must equal a complete redraw, including put-mask shading"
+        );
+        let mut actual = vec![0; 32 * 32 * 4];
+        renderer
+            .render(&scene, &mut actual)
+            .expect("valid patched frame");
+        assert_eq!(actual, fresh.surface.pixels());
+        assert_ne!(actual, held_pixels);
+        renderer
+            .render(&held, &mut actual)
+            .expect("valid held frame");
+        assert_eq!(actual, held_pixels);
+        assert!(
+            allocations.1 < 64 * 1024,
+            "one sparse edit must not materialize the {}-byte map: {allocations:?}",
+            WIDTH * HEIGHT
+        );
+    }
+}
+
 /// Opaque continuation for the ordered HUD half of one [`GraphicsSystem`]
 /// frame. It owns the snapshot and gamma state captured when the world phase
 /// began, so later layers cannot accidentally use a newer frame.
@@ -5522,13 +5665,12 @@ impl GraphicsSystem {
             }
         }
 
-        let pixels: Arc<[u8]> = Arc::from(
-            lit_sky_texels(source, lighting)
-                .into_iter()
-                .flat_map(|color| [color.r, color.g, color.b, color.a])
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
+        let mut scratch = self
+            .retained_lit_sky
+            .as_mut()
+            .map(|cached| std::mem::take(&mut cached.scratch))
+            .unwrap_or_default();
+        crate::landscape_sky::lit_sky_rgba_into(source, lighting, &mut scratch);
         let mut base_revision = None;
         let mut dirty = Vec::new();
         match self.retained_lit_sky.as_mut() {
@@ -5537,7 +5679,8 @@ impl GraphicsSystem {
                 cached.lighting = lighting_bits;
                 let same_extent = cached.image.width() == source.width()
                     && cached.image.height() == source.height();
-                if !same_extent || cached.image.pixels() != pixels.as_ref() {
+                if !same_extent || cached.image.pixels() != scratch.as_slice() {
+                    let pixels = cached.reuse_pixels(&scratch);
                     let previous_revision = cached.revision;
                     cached.revision = cached.revision.wrapping_add(1);
                     cached.image = ImageData::transient_from_arc(
@@ -5555,8 +5698,10 @@ impl GraphicsSystem {
                         ));
                     }
                 }
+                cached.scratch = scratch;
             }
             None => {
+                let pixels: Arc<[u8]> = Arc::from(scratch.as_slice());
                 self.retained_lit_sky = Some(RetainedLitSkyTexture {
                     source: source_id,
                     lighting: lighting_bits,
@@ -5567,6 +5712,8 @@ impl GraphicsSystem {
                     ),
                     texture: GpuTextureId::fresh(),
                     revision: 0,
+                    scratch,
+                    retired_pixels: std::array::from_fn(|_| None),
                 });
             }
         }
@@ -5696,44 +5843,42 @@ impl GraphicsSystem {
             renderer_config: self.advanced_renderer_config,
         };
         if self.surface.is_gpu_scene_capture_active() {
-            let gpu_blit = if lighting == 1.0 {
-                base_blit
-            } else {
-                let channel = (lighting.max(0.0) * 255.0).round().clamp(0.0, 255.0) as u32;
-                let lighting_modulation = (channel << 16) | (channel << 8) | channel;
-                SpriteBlitState {
-                    modulation: Some(
-                        base_blit
-                            .modulation
-                            .map(|modulation| modulate_c4_colors(modulation, lighting_modulation))
-                            .unwrap_or(lighting_modulation),
-                    ),
-                    ..base_blit
-                }
-            };
+            let (lit_image, lit_resource) = self.retained_lit_sky_texture(image, lighting);
             for region in &regions {
                 let bounds = region.bounds;
                 let target = GuiRect::from_origin_size(
                     GuiPoint::new(bounds.target_left() as f32, bounds.target_top() as f32),
                     GuiSize::new(bounds.width() as f32, bounds.height() as f32),
                 );
-                let source = SourceRect::new(
-                    bounds.source_left,
-                    bounds.source_top,
-                    bounds.width(),
-                    bounds.height(),
+                let destination = (
+                    target.origin.x,
+                    target.origin.y,
+                    target.size.width,
+                    target.size.height,
                 );
-                draw_image_region(
+                capture_gpu_sprite_impl(
                     &mut self.surface,
-                    &target,
-                    image,
+                    destination,
+                    destination,
+                    &GraphicsTransform::identity(),
+                    &lit_image,
                     None,
-                    &source,
+                    FloatSourceRect {
+                        x: bounds.source_left as f32,
+                        y: bounds.source_top as f32,
+                        width: bounds.width() as f32,
+                        height: bounds.height() as f32,
+                    },
                     false,
                     None,
-                    gpu_blit,
+                    base_blit,
                     gamma,
                     fog.as_ref(),
+                    GpuSampler::Nearest,
+                    false,
+                    Some(lit_resource.clone()),
+                    false,
+                    clonk_graphics::GpuSoftwareSpriteMapping::IntegerStretch,
                 );
             }
             return;
@@ -5950,7 +6095,7 @@ impl GraphicsSystem {
     }
 
     fn prepare_std_particle_sprite_quad(
-        &self,
+        &mut self,
         particle: &ParticleSnapshot,
         definition: &ParticleRenderDefinition,
         target: Option<&ObjectSnapshot>,
@@ -6094,6 +6239,31 @@ impl GraphicsSystem {
         }
         let image_width = image_width as f32;
         let image_height = image_height as f32;
+        let software_sprite =
+            self.surface
+                .add_gpu_software_sprite(clonk_graphics::GpuSoftwareSprite {
+                    destination: [
+                        dest_x as f32,
+                        dest_y as f32,
+                        dest_width as f32,
+                        dest_height as f32,
+                    ],
+                    source: [
+                        source.x as f32,
+                        source.y as f32,
+                        source.width as f32,
+                        source.height as f32,
+                    ],
+                    inverse: GraphicsTransform::identity(),
+                    translation: [0.0; 2],
+                    flip_x: false,
+                    inclusive_source_end: false,
+                    mapping: clonk_graphics::GpuSoftwareSpriteMapping::PixelCorner,
+                    fog: None,
+                    gamma: gamma
+                        .filter(|ramp| !ramp.is_passthrough())
+                        .map(clonk_graphics::GpuGammaLut::from_ramp),
+                });
         ParticleSpriteBatchPreparation::Draw {
             key: ParticleSpriteBatchKey {
                 texture: definition.image.gpu_texture_id(),
@@ -6120,6 +6290,8 @@ impl GraphicsSystem {
                     (source.y as f32 + source.height as f32) / image_height,
                 ],
                 modulation,
+                software_sprite,
+                software_shader: self.advanced_renderer_config.shader,
             },
         }
     }
@@ -6669,7 +6841,6 @@ impl GraphicsSystem {
                     vec![(0, 0, width, height)]
                 }
             };
-            let bytes = grid.bytes();
             let has_surface32_pixels = grid.has_surface32_pixels();
             let textures = grid.texture_names();
             let materials = grid.material_names();
@@ -6711,7 +6882,11 @@ impl GraphicsSystem {
                     std::array::from_fn(|index| placements.get(index).copied().unwrap_or(0));
                 // Compose and shade the landscape beneath each put mask, as
                 // the CPU pass below does (C4Landscape.cpp:2497,2501).
-                let mut index_plane = bytes.to_vec();
+                let mut index_plane = Vec::with_capacity(expected_bytes / 4);
+                for y in 0..height {
+                    index_plane
+                        .extend((0..width).map(|x| grid.byte_at(x as i32, y as i32).unwrap_or(0)));
+                }
                 grid.mask_backgrounds().for_each(|(slot, byte)| {
                     if let Some(texel) = index_plane.get_mut(slot) {
                         *texel = byte;
@@ -6747,9 +6922,10 @@ impl GraphicsSystem {
             // composed — not as its own material and not as the placement its
             // neighbours shade against. Read the plane the same way.
             let masks_put = grid.has_mask_background();
-            let render_byte = move |slot: usize| {
-                let byte = bytes[slot];
+            let render_byte = move |x: i32, y: i32| {
+                let byte = grid.byte_at(x, y).unwrap_or(0);
                 if masks_put {
+                    let slot = y as usize * width as usize + x as usize;
                     grid.render_byte_in_slot(slot, byte)
                 } else {
                     byte
@@ -6774,7 +6950,7 @@ impl GraphicsSystem {
                 if y as u32 >= height {
                     return border(bottom_open);
                 }
-                Some(render_byte(y as usize * width as usize + x as usize))
+                Some(render_byte(x, y))
             };
             let placement_at = |x: i32, y: i32| {
                 byte_with_border(x, y).map_or(0, |byte| placements[usize::from(byte & 0x7f)])
@@ -6816,7 +6992,7 @@ impl GraphicsSystem {
                         }
                         let (output, liquid) = pixel.split_at_mut(4);
                         output.fill(0);
-                        let byte = render_byte(y as usize * width as usize + x as usize);
+                        let byte = render_byte(x, y);
                         liquid[0] =
                             u8::from(liquid_slots[usize::from(byte & 0x7f)]).saturating_mul(255);
                         if has_surface32_pixels {
@@ -12045,8 +12221,50 @@ mod landscape_benchmark_capture_tests {
 }
 
 #[cfg(test)]
-mod lit_sky_texel_cache_tests {
+pub(crate) mod lit_sky_texel_cache_tests {
     use super::*;
+
+    struct AllocationCounter;
+    std::thread_local! {
+        static ALLOCATIONS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+    }
+    #[global_allocator]
+    static ALLOCATOR: AllocationCounter = AllocationCounter;
+    fn record_allocation(bytes: usize) {
+        let _ = ALLOCATIONS.try_with(|count| {
+            if let Some((calls, allocated)) = count.get() {
+                count.set(Some((calls + 1, allocated + bytes)));
+            }
+        });
+    }
+    // SAFETY: Every allocation and deallocation forwards its original pointer
+    // and layout to System; the counter only observes sizes on this test thread.
+    unsafe impl std::alloc::GlobalAlloc for AllocationCounter {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            record_allocation(layout.size());
+            unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+        }
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, pointer, layout) }
+        }
+        unsafe fn realloc(
+            &self,
+            pointer: *mut u8,
+            layout: std::alloc::Layout,
+            bytes: usize,
+        ) -> *mut u8 {
+            record_allocation(bytes);
+            unsafe { std::alloc::GlobalAlloc::realloc(&std::alloc::System, pointer, layout, bytes) }
+        }
+    }
+    pub(crate) fn measure_allocations<T>(action: impl FnOnce() -> T) -> (T, (usize, usize)) {
+        ALLOCATIONS.with(|count| count.set(Some((0, 0))));
+        let result = action();
+        let allocations = ALLOCATIONS
+            .with(|count| count.take())
+            .expect("measurement active");
+        (result, allocations)
+    }
 
     fn sky_graphics() -> GraphicsSystem {
         GraphicsSystem::new(
@@ -12063,6 +12281,72 @@ mod lit_sky_texel_cache_tests {
 
     fn sky_image() -> ImageData {
         ImageData::new(8, 8, vec![200_u8; 8 * 8 * 4])
+    }
+
+    #[test]
+    fn changing_sky_lighting_with_identical_rounded_pixels_allocates_nothing() {
+        let mut graphics = sky_graphics();
+        let image = ImageData::new(1, 1, vec![2, 2, 2, 255]);
+        let (first_image, first_resource) = graphics.retained_lit_sky_texture(&image, 0.751);
+        let ((second_image, second_resource), allocations) =
+            measure_allocations(|| graphics.retained_lit_sky_texture(&image, 0.752));
+        assert_eq!(second_image.pixels(), [2, 2, 2, 255]);
+        assert!(Arc::ptr_eq(&first_resource.pixels, &second_resource.pixels));
+        assert_eq!(first_image.pixels(), [2, 2, 2, 255]);
+        assert_eq!(second_resource.id, first_resource.id);
+        assert_eq!(second_resource.revision, first_resource.revision);
+        assert_eq!(second_resource.base_revision, None);
+        assert!(second_resource.dirty.is_empty());
+        assert_eq!(allocations, (0, 0), "changing only unrounded lighting bits");
+    }
+
+    #[test]
+    fn changed_sky_pixels_reuse_released_backings_without_mutating_snapshots() {
+        let mut graphics = sky_graphics();
+        let image = ImageData::new(8, 8, [200, 200, 200, 255].repeat(64));
+        let first = graphics.retained_lit_sky_texture(&image, 0.25);
+        let first_pointer = Arc::as_ptr(&first.1.pixels) as *const u8;
+        let (second, allocations) =
+            measure_allocations(|| graphics.retained_lit_sky_texture(&image, 0.75));
+        let second_pointer = Arc::as_ptr(&second.1.pixels) as *const u8;
+        assert_eq!(first.0.pixels(), [50, 50, 50, 255].repeat(64));
+        assert_eq!(
+            Arc::strong_count(&first.1.pixels),
+            3,
+            "the released snapshot backing must be retained; allocations={allocations:?}"
+        );
+        drop(first);
+        let third = graphics.retained_lit_sky_texture(&image, 0.25);
+        assert_eq!(Arc::as_ptr(&third.1.pixels) as *const u8, first_pointer);
+        assert_eq!(second.0.pixels(), [150, 150, 150, 255].repeat(64));
+        drop(second);
+        drop(third);
+        let mut lighting = 0.25;
+        let mut warm_allocations = (0, 0);
+        for _ in 0..32 {
+            // A fresh shared snapshot forces copy-on-write on every update.
+            let captured = graphics.retained_lit_sky_texture(&image, lighting);
+            let captured_bytes = captured.0.pixels().to_vec();
+            lighting = if lighting == 0.25 { 0.75 } else { 0.25 };
+            let (next, allocations) =
+                measure_allocations(|| graphics.retained_lit_sky_texture(&image, lighting));
+            warm_allocations.0 += allocations.0;
+            warm_allocations.1 += allocations.1;
+            assert_eq!(captured.0.pixels(), captured_bytes);
+            let pointer = Arc::as_ptr(&next.1.pixels) as *const u8;
+            assert!(pointer == first_pointer || pointer == second_pointer);
+            assert_eq!(next.1.id, captured.1.id);
+            assert_eq!(next.1.revision, captured.1.revision + 1);
+            assert_eq!(next.1.base_revision, Some(captured.1.revision));
+            assert_eq!(next.1.dirty, [clonk_graphics::Rect::new(0, 0, 8, 8)]);
+            // Only the owned dirty-rectangle vector may allocate after warmup.
+            assert!(
+                allocations.0 <= 1 && allocations.1 <= 64,
+                "allocations={allocations:?}"
+            );
+        }
+        eprintln!("retained sky: 32 changed publications reuse 2 backings; allocator calls={}, requested bytes={}",
+            warm_allocations.0, warm_allocations.1);
     }
 
     fn tile_once(graphics: &mut GraphicsSystem, image: &ImageData, lighting: f32) {

@@ -1,5 +1,143 @@
 use super::*;
 
+#[cfg(test)]
+mod lowering_storage_tests {
+    use super::*;
+    use crate::graphics_system::lit_sky_texel_cache_tests::measure_allocations;
+
+    #[test]
+    fn warmed_fogged_owner_lowering_preserves_frames_without_large_temporaries() {
+        // LegacyClonk StdDDraw2.cpp:759-778 paints every base chunk before
+        // any owner chunk, including when the same source is captured again.
+        let image = ImageData::new(1024, 1024, [64, 128, 192, 255].repeat(1024 * 1024));
+        let mask = ColorByOwnerMask::new(
+            1024,
+            1024,
+            Arc::from(
+                (0..1024 * 1024)
+                    .map(|index| if index % 128 < 64 { 0 } else { 255 })
+                    .collect::<Vec<u8>>(),
+            ),
+        );
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 64,
+                resolution_y: 64,
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![0x00ff_ffff; 4],
+            }),
+            zoom: 1.0,
+        };
+        let source = FloatSourceRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 1024.0,
+        };
+        let gamma = clonk_graphics::GammaRamp::identity();
+        let capture = |surface: &mut Surface, owner| {
+            surface.begin_gpu_scene_capture();
+            assert!(capture_gpu_sprite(
+                surface,
+                (0.0, 0.0, 32.0, 32.0),
+                (0.0, 0.0, 32.0, 32.0),
+                &GraphicsTransform::identity(),
+                &image,
+                Some(&mask),
+                source,
+                false,
+                Some(owner),
+                SpriteBlitState::normal(),
+                None,
+                Some(&fog),
+                GpuSampler::Nearest,
+                false
+            ));
+            surface
+                .take_gpu_scene_capture()
+                .expect("active capture")
+                .into_scene([32, 32], Color::transparent(), &gamma)
+        };
+        let mut surface = Surface::new(32, 32, PixelFormat::Rgba8888);
+        let held = capture(&mut surface, 0x00ff_0000);
+        assert_eq!(held.commands.len(), 512);
+        let textures = held
+            .commands
+            .iter()
+            .map(|command| match command {
+                GpuCommand::Quad { texture, .. } => *texture,
+                _ => panic!("fog chunks must remain quads"),
+            })
+            .collect::<Vec<_>>();
+        assert!(textures[..256]
+            .iter()
+            .all(|texture| *texture == textures[0]));
+        assert!(textures[256..]
+            .iter()
+            .all(|texture| *texture == textures[256]));
+        assert_ne!(textures[0], textures[256]);
+        let mut immediate = Surface::new(32, 32, PixelFormat::Rgba8888);
+        draw_image_region_transformed_float_source(
+            &mut immediate,
+            (0.0, 0.0, 32.0, 32.0),
+            &GraphicsTransform::identity(),
+            &image,
+            Some(&mask),
+            &source,
+            BlitSampling::Nearest,
+            false,
+            Some(0x00ff_0000),
+            SpriteBlitState::normal(),
+            None,
+            Some(&fog),
+        );
+        let mut pixels = vec![0; 32 * 32 * 4];
+        let mut renderer = clonk_graphics::CpuSceneRenderer::default();
+        renderer.render(&held, &mut pixels).expect("valid scene");
+        assert_eq!(pixels, immediate.pixels());
+        for _ in 0..3 {
+            drop(capture(&mut surface, 0x0000_00ff));
+        }
+        let (warm, allocations) = measure_allocations(|| capture(&mut surface, 0x0000_00ff));
+        eprintln!(
+            "warmed fogged owner capture: {} allocations, {} bytes",
+            allocations.0, allocations.1
+        );
+        assert_eq!(warm.commands.len(), held.commands.len());
+        renderer
+            .render(&warm, &mut pixels)
+            .expect("valid new scene");
+        assert_ne!(pixels, immediate.pixels());
+        renderer
+            .render(&held, &mut pixels)
+            .expect("valid held scene");
+        assert_eq!(pixels, immediate.pixels());
+        drop(warm);
+        let before = held
+            .textures
+            .iter()
+            .map(|resource| Arc::strong_count(&resource.pixels))
+            .collect::<Vec<_>>();
+        drop(capture(&mut surface, 0x0000_ff00));
+        assert_eq!(
+            held.textures
+                .iter()
+                .map(|resource| Arc::strong_count(&resource.pixels))
+                .collect::<Vec<_>>(),
+            before,
+            "released lowering storage must not retain pixel snapshots"
+        );
+        assert!(
+            allocations.1 < 64 * 1024,
+            "warmed lowering must not allocate a large command/chunk temporary: {allocations:?}"
+        );
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CapturedGpuSpriteChunk {
     position: [[f32; 3]; 4],
@@ -7,8 +145,77 @@ struct CapturedGpuSpriteChunk {
     fog_modulation: Option<[u32; 4]>,
     sample_tile: Option<[f32; 3]>,
     physical_tile: Option<(i32, i32, i32)>,
+    software_sprite: Option<clonk_graphics::GpuSoftwareSpriteId>,
 }
 
+type CapturedGpuSpriteGeometry = ((f32, f32), (f32, f32), Option<[u32; 4]>);
+
+#[derive(Default)]
+struct CapturedGpuSpriteLayer {
+    resources: Vec<GpuTextureResource>,
+    commands: Vec<GpuCommand>,
+}
+
+#[derive(Default)]
+struct CapturedGpuSpriteScratch {
+    geometry: Vec<CapturedGpuSpriteGeometry>,
+    chunks: Vec<CapturedGpuSpriteChunk>,
+    base: CapturedGpuSpriteLayer,
+    owner: CapturedGpuSpriteLayer,
+}
+
+impl CapturedGpuSpriteScratch {
+    fn release(&mut self) -> usize {
+        self.geometry.clear();
+        self.chunks.clear();
+        // Only empty allocation storage survives the capture. In particular,
+        // this scratch cache must never extend a texture snapshot's lifetime.
+        self.base.resources.clear();
+        self.base.commands.clear();
+        self.owner.resources.clear();
+        self.owner.commands.clear();
+        self.geometry
+            .capacity()
+            .saturating_mul(std::mem::size_of::<CapturedGpuSpriteGeometry>())
+            .saturating_add(
+                self.chunks
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<CapturedGpuSpriteChunk>()),
+            )
+            .saturating_add(
+                self.base
+                    .resources
+                    .capacity()
+                    .saturating_add(self.owner.resources.capacity())
+                    .saturating_mul(std::mem::size_of::<GpuTextureResource>()),
+            )
+            .saturating_add(
+                self.base
+                    .commands
+                    .capacity()
+                    .saturating_add(self.owner.commands.capacity())
+                    .saturating_mul(std::mem::size_of::<GpuCommand>()),
+            )
+    }
+}
+
+const SPRITE_CAPTURE_SCRATCH_MAX_BYTES: usize = 16 * 1024 * 1024;
+std::thread_local! {
+    static SPRITE_CAPTURE_SCRATCH: std::cell::RefCell<Option<CapturedGpuSpriteScratch>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+fn with_sprite_capture_scratch(action: impl FnOnce(&mut CapturedGpuSpriteScratch) -> bool) -> bool {
+    let mut scratch = SPRITE_CAPTURE_SCRATCH
+        .with(|storage| storage.borrow_mut().take())
+        .unwrap_or_default();
+    let result = action(&mut scratch);
+    if scratch.release() <= SPRITE_CAPTURE_SCRATCH_MAX_BYTES {
+        SPRITE_CAPTURE_SCRATCH.with(|storage| *storage.borrow_mut() = Some(scratch));
+    }
+    result
+}
 const CPP_MAX_TEXTURE_SIZE: u32 = 4_096;
 const PHYSICAL_TEXTURE_TILE_CACHE_MAX_ENTRIES: usize = 4_096;
 const PHYSICAL_TEXTURE_TILE_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
@@ -417,14 +624,37 @@ fn capture_compact_fogged_object_sprite(
             } else {
                 0.0
             };
-            base_captured[captured_count] = Some(GpuObjectSprite::new(
-                positions,
-                uv_rect,
-                base_modulation.map(packed_c4_modulation),
-                sampler,
-                sample_tile_size,
-                base_mod2,
-                GpuOuterModulation::Combine,
+            let software_sprite =
+                surface.add_gpu_software_sprite(clonk_graphics::GpuSoftwareSprite {
+                    destination: [dest.0, dest.1, dest.2, dest.3],
+                    source: [source.x, source.y, source.width, source.height],
+                    inverse: transform.inverse().unwrap_or_default(),
+                    translation: [0.0; 2],
+                    flip_x,
+                    inclusive_source_end: false,
+                    mapping: clonk_graphics::GpuSoftwareSpriteMapping::Native,
+                    gamma: gamma
+                        .filter(|ramp| !ramp.is_passthrough())
+                        .map(clonk_graphics::GpuGammaLut::from_ramp),
+                    fog: Some(clonk_graphics::GpuSoftwareFog {
+                        destination: [fog_dest.0, fog_dest.1, fog_dest.2, fog_dest.3],
+                        source_range: [left, top, right, bottom],
+                    }),
+                });
+            let with_software = |sprite: GpuObjectSprite| {
+                software_sprite.map_or(sprite, |id| sprite.with_software_sprite(id))
+            };
+            base_captured[captured_count] = Some(with_software(
+                GpuObjectSprite::new(
+                    positions,
+                    uv_rect,
+                    base_modulation.map(packed_c4_modulation),
+                    sampler,
+                    sample_tile_size,
+                    base_mod2,
+                    GpuOuterModulation::Combine,
+                )
+                .with_software_shader(blit.renderer_config.shader),
             ));
             if let Some((_, _, owner_modulation, owner_mod2, owner_outer_modulation)) =
                 owner_layers.as_ref()
@@ -435,7 +665,7 @@ fn capture_compact_fogged_object_sprite(
                     *owner_mod2,
                     blit.renderer_config,
                 );
-                owner_captured[captured_count] = Some(
+                owner_captured[captured_count] = Some(with_software(
                     GpuObjectSprite::new(
                         positions,
                         uv_rect,
@@ -445,8 +675,9 @@ fn capture_compact_fogged_object_sprite(
                         owner_mod2,
                         *owner_outer_modulation,
                     )
-                    .with_owner_layer(),
-                );
+                    .with_owner_layer()
+                    .with_software_shader(blit.renderer_config.shader),
+                ));
             }
             captured_count += 1;
         }
@@ -563,6 +794,7 @@ pub(crate) fn capture_gpu_sprite_with_resource(
         inclusive_source_end,
         retained_resource,
         false,
+        clonk_graphics::GpuSoftwareSpriteMapping::Native,
     )
 }
 
@@ -600,11 +832,12 @@ pub(crate) fn capture_gpu_object_sprite(
         inclusive_source_end,
         None,
         true,
+        clonk_graphics::GpuSoftwareSpriteMapping::Native,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture_gpu_sprite_impl(
+pub(crate) fn capture_gpu_sprite_impl(
     surface: &mut Surface,
     dest: (f32, f32, f32, f32),
     fog_dest: (f32, f32, f32, f32),
@@ -621,6 +854,7 @@ fn capture_gpu_sprite_impl(
     inclusive_source_end: bool,
     retained_resource: Option<GpuTextureResource>,
     compact_object: bool,
+    software_mapping: clonk_graphics::GpuSoftwareSpriteMapping,
 ) -> bool {
     if !surface.is_gpu_scene_capture_active() {
         return false;
@@ -658,6 +892,26 @@ fn capture_gpu_sprite_impl(
         return false;
     }
 
+    let software_sprite = if fog.is_none()
+        && blit.renderer_config.texture_indent() == 0.0
+        && !needs_physical_texture_tiles(image.width(), image.height())
+    {
+        surface.add_gpu_software_sprite(clonk_graphics::GpuSoftwareSprite {
+            destination: [dest.0, dest.1, dest.2, dest.3],
+            source: [source.x, source.y, source.width, source.height],
+            inverse: transform.inverse().unwrap_or_default(),
+            translation: [0.0; 2],
+            flip_x,
+            inclusive_source_end,
+            mapping: software_mapping,
+            fog: None,
+            gamma: gamma
+                .filter(|ramp| !ramp.is_passthrough())
+                .map(clonk_graphics::GpuGammaLut::from_ramp),
+        })
+    } else {
+        None
+    };
     let physical_texture_tiles = needs_physical_texture_tiles(image.width(), image.height());
     if physical_texture_tiles && inclusive_source_end {
         // Inclusive blits scale their sample extent before C++ walks physical
@@ -835,7 +1089,7 @@ fn capture_gpu_sprite_impl(
             } else {
                 0.0
             };
-            let base_sprite = GpuObjectSprite::new(
+            let mut base_sprite = GpuObjectSprite::new(
                 positions,
                 uv_rect,
                 base_modulation.map(packed_c4_modulation),
@@ -844,9 +1098,13 @@ fn capture_gpu_sprite_impl(
                 base_mod2,
                 base_outer_modulation,
             );
+            base_sprite = base_sprite.with_software_shader(blit.renderer_config.shader);
+            if let Some(id) = software_sprite {
+                base_sprite = base_sprite.with_software_sprite(id);
+            }
             let owner_sprite = owner_layers.as_ref().map(
                 |(_, _, owner_modulation, owner_mod2, owner_outer_modulation)| {
-                    GpuObjectSprite::new(
+                    let mut sprite = GpuObjectSprite::new(
                         positions,
                         uv_rect,
                         owner_modulation.map(packed_c4_modulation),
@@ -855,7 +1113,12 @@ fn capture_gpu_sprite_impl(
                         *owner_mod2,
                         *owner_outer_modulation,
                     )
-                    .with_owner_layer()
+                    .with_owner_layer();
+                    sprite = sprite.with_software_shader(blit.renderer_config.shader);
+                    if let Some(id) = software_sprite {
+                        sprite = sprite.with_software_sprite(id);
+                    }
+                    sprite
                 },
             );
             if let Some((_, owner_resource, ..)) = owner_layers {
@@ -889,9 +1152,11 @@ fn capture_gpu_sprite_impl(
         }
         let sample_tile = (sampler == GpuSampler::Linear).then_some([0.0, 0.0, tile_size]);
         let vertices = std::array::from_fn(|index| {
-            let vertex = GpuVertex::new(positions[index], uv[index], base_modulation[index])
+            let mut vertex = GpuVertex::new(positions[index], uv[index], base_modulation[index])
                 .with_outer_modulation(base_outer_modulation)
                 .with_owner_outer_modulation(base_outer_modulation);
+            vertex.software_shader = blit.renderer_config.shader;
+            vertex.software_sprite = software_sprite;
             sample_tile.map_or(vertex, |[x, y, size]| vertex.with_sample_tile(x, y, size))
         });
         let command = GpuCommand::Quad {
@@ -916,290 +1181,341 @@ fn capture_gpu_sprite_impl(
         owner_mask: mask.is_some(),
         physical_texture_tiles,
     };
-    let chunk_geometry = if let Some(sampler) = fog_sampler.as_ref() {
-        // Fog chunks use min(native tile size, 64), so every chunk is
-        // already contained within exactly one C4TexRef tile.
-        sampler
-            .quads
-            .iter()
-            .map(|quad| (quad.x, quad.y, Some(quad.modulation)))
-            .collect::<Vec<_>>()
-    } else if texture_indent != 0.0 || physical_texture_tiles {
-        // TexIndent restarts at each physical C4TexRef. A single interpolated
-        // UV quad cannot express that piecewise transform, so retain one GPU
-        // command per native texture tile only while the switch is active.
-        let x_ranges = FogSpriteSampler::axis_ranges(source.x, source.width, tile_size, flip_x);
-        let y_ranges = FogSpriteSampler::axis_ranges(source.y, source.height, tile_size, false);
-        if x_ranges
-            .len()
-            .checked_mul(y_ranges.len())
-            .is_none_or(|chunks| chunks > 1_000_000)
-        {
-            return false;
-        }
-        y_ranges
-            .iter()
-            .flat_map(|&y| x_ranges.iter().copied().map(move |x| (x, y, None)))
-            .collect()
-    } else {
-        vec![(
-            (0.0, source.width),
-            (0.0, source.height),
-            blit.fog_modulation.map(|sample| sample.vertex_modulation()),
-        )]
-    };
-
-    let sample_width = if inclusive_source_end {
-        (source.width - 1.0).max(0.0)
-    } else {
-        source.width
-    };
-    let sample_height = if inclusive_source_end {
-        (source.height - 1.0).max(0.0)
-    } else {
-        source.height
-    };
-    let mut chunks = Vec::with_capacity(chunk_geometry.len());
-    for (x_range, y_range, fog_modulation) in chunk_geometry {
-        let normalized_center_x = (x_range.0 + x_range.1) / (2.0 * source.width);
-        let normalized_center_y = (y_range.0 + y_range.1) / (2.0 * source.height);
-        let center_x = if flip_x {
-            source.x + (1.0 - normalized_center_x) * sample_width
-        } else {
-            source.x + normalized_center_x * sample_width
-        };
-        let center_y = source.y + normalized_center_y * sample_height;
-        let physical_tile = if texture_indent != 0.0 || physical_texture_tiles {
-            let Some(tile) = cpp_texture_tile_for_source(
-                image.width(),
-                image.height(),
-                center_x,
-                center_y,
-                fog_sampler.is_some(),
-            ) else {
-                continue;
-            };
-            Some(tile)
-        } else {
-            None
-        };
-        let texture_transform = physical_tile.and_then(|(tile_x, tile_y, physical_size)| {
-            let physical_size = physical_size as f32;
-            let denominator = physical_size + 2.0 * texture_indent;
-            if !denominator.is_finite() || denominator.abs() <= f32::EPSILON {
-                return None;
-            }
-            let chunk_size = if fog_sampler.is_some() {
-                physical_size.min(64.0)
-            } else {
-                physical_size
-            };
-            let chunk_start = |center: f32, tile_origin: i32, source_origin: f32| {
-                let tile_origin = tile_origin as f32;
-                source_origin
-                    .max(tile_origin + ((center - tile_origin) / chunk_size).floor() * chunk_size)
-            };
-            Some((
-                tile_x,
-                tile_y,
-                physical_size,
-                denominator,
-                chunk_start(center_x, tile_x, source.x),
-                chunk_start(center_y, tile_y, source.y),
-            ))
-        });
-        let local = [
-            (x_range.0, y_range.0),
-            (x_range.1, y_range.0),
-            (x_range.0, y_range.1),
-            (x_range.1, y_range.1),
-        ];
-        let mut positions = [[0.0; 3]; 4];
-        let mut uv = [[0.0; 2]; 4];
-        for (index, (local_x, local_y)) in local.into_iter().enumerate() {
-            let normalized_x = local_x / source.width;
-            let normalized_y = local_y / source.height;
-            let target_x = dest_x + normalized_x * dest_width;
-            let target_y = dest_y + normalized_y * dest_height;
-            let Some(position) = captured_sprite_position(transform, target_x, target_y) else {
-                return false;
-            };
-            positions[index] = position;
-            let sample_x = if flip_x {
-                source.x + (1.0 - normalized_x) * sample_width
-            } else {
-                source.x + normalized_x * sample_width
-            };
-            let sample_y = source.y + normalized_y * sample_height;
-            let (sample_x, sample_y) = texture_transform.map_or(
-                (sample_x, sample_y),
-                |(tile_x, tile_y, physical_size, denominator, quad_start_x, quad_start_y)| {
-                    let adjust = |edge: f32, tile_origin: i32, quad_start: f32| {
-                        let tile_origin = tile_origin as f32;
-                        (quad_start
-                            + texture_indent
-                            + (edge - quad_start) * physical_size / denominator)
-                            .clamp(tile_origin, tile_origin + physical_size)
-                    };
-                    (
-                        adjust(sample_x, tile_x, quad_start_x),
-                        adjust(sample_y, tile_y, quad_start_y),
-                    )
-                },
+    with_sprite_capture_scratch(|scratch| {
+        let CapturedGpuSpriteScratch {
+            geometry,
+            chunks,
+            base,
+            owner,
+        } = scratch;
+        if let Some(sampler) = fog_sampler.as_ref() {
+            // Fog chunks use min(native tile size, 64), so every chunk is
+            // already contained within exactly one C4TexRef tile.
+            geometry.extend(
+                sampler
+                    .quads
+                    .iter()
+                    .map(|quad| (quad.x, quad.y, Some(quad.modulation))),
             );
-            uv[index] = [
-                sample_x / image.width() as f32,
-                sample_y / image.height() as f32,
-            ];
-        }
-        if positions
-            .iter()
-            .any(|position| position[2].is_sign_positive())
-            && positions
-                .iter()
-                .any(|position| position[2].is_sign_negative())
-        {
-            return false;
-        }
-        // The shader derives the native tile origin from each fragment's
-        // interpolated source coordinate. This preserves C4TexRef seam and
-        // padding behavior without expanding an unfogged image into one draw
-        // command per tile.
-        let sample_tile = (sampler == GpuSampler::Linear).then(|| {
-            physical_tile.map_or([0.0, 0.0, tile_size], |(x, y, size)| {
-                [x as f32, y as f32, size as f32]
-            })
-        });
-        chunks.push(CapturedGpuSpriteChunk {
-            position: positions,
-            uv,
-            fog_modulation,
-            sample_tile,
-            physical_tile,
-        });
-    }
-
-    let main_modulation = blit.modulation.unwrap_or(0x00ff_ffff);
-    let owner_modulation = owner_color.map(|mut owner| {
-        if let Some(global) = blit.modulation {
-            if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
-                owner = modulate_c4_colors(owner, global);
+        } else if texture_indent != 0.0 || physical_texture_tiles {
+            // TexIndent restarts at each physical C4TexRef. A single interpolated
+            // UV quad cannot express that piecewise transform, so retain one GPU
+            // command per native texture tile only while the switch is active.
+            let x_ranges = FogSpriteSampler::axis_ranges(source.x, source.width, tile_size, flip_x);
+            let y_ranges = FogSpriteSampler::axis_ranges(source.y, source.height, tile_size, false);
+            if x_ranges
+                .len()
+                .checked_mul(y_ranges.len())
+                .is_none_or(|chunks| chunks > 1_000_000)
+            {
+                return false;
             }
-        }
-        owner
-    });
-    let blend = if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
-        GpuBlend::Additive
-    } else {
-        GpuBlend::Normal
-    };
-    let clip = surface.clip();
-    let gamma = gamma.is_some_and(|gamma| !gamma.is_passthrough());
-    let commands_for = |resource: &GpuTextureResource,
-                        modulation,
-                        uses_mod2,
-                        outer_modulation|
-     -> Option<(Vec<GpuTextureResource>, Vec<GpuCommand>)> {
-        let mut resources = if physical_texture_tiles {
-            Vec::new()
+            geometry.extend(
+                y_ranges
+                    .iter()
+                    .flat_map(|&y| x_ranges.iter().copied().map(move |x| (x, y, None))),
+            );
         } else {
-            vec![resource.clone()]
+            geometry.push((
+                (0.0, source.width),
+                (0.0, source.height),
+                blit.fog_modulation.map(|sample| sample.vertex_modulation()),
+            ));
+        }
+
+        let sample_width = if inclusive_source_end {
+            (source.width - 1.0).max(0.0)
+        } else {
+            source.width
         };
-        let mut commands = Vec::with_capacity(chunks.len());
-        for chunk in &chunks {
-            let (texture, uv, sample_tile) = if physical_texture_tiles {
-                let tile = chunk.physical_tile?;
-                let tiled = physical_texture_tile_resource(resource, tile)?;
-                let (tile_x, tile_y, tile_size) = tile;
-                let mut uv = chunk.uv;
-                for value in &mut uv {
-                    value[0] = ((value[0] * image.width() as f32 - tile_x as f32)
-                        / tile_size as f32)
-                        .clamp(0.0, 1.0);
-                    value[1] = ((value[1] * image.height() as f32 - tile_y as f32)
-                        / tile_size as f32)
-                        .clamp(0.0, 1.0);
-                }
-                let sample_tile =
-                    (sampler == GpuSampler::Linear).then_some([0.0, 0.0, tile_size as f32]);
-                let texture = tiled.id;
-                resources.push(tiled);
-                (texture, uv, sample_tile)
+        let sample_height = if inclusive_source_end {
+            (source.height - 1.0).max(0.0)
+        } else {
+            source.height
+        };
+        chunks.reserve(geometry.len());
+        for (x_range, y_range, fog_modulation) in geometry.iter().copied() {
+            let normalized_center_x = (x_range.0 + x_range.1) / (2.0 * source.width);
+            let normalized_center_y = (y_range.0 + y_range.1) / (2.0 * source.height);
+            let center_x = if flip_x {
+                source.x + (1.0 - normalized_center_x) * sample_width
             } else {
-                (resource.id, chunk.uv, chunk.sample_tile)
+                source.x + normalized_center_x * sample_width
             };
-            let outer_modulation = if outer_modulation == GpuOuterModulation::Ignore {
-                GpuOuterModulation::Ignore
-            } else if chunk.fog_modulation.is_some() {
+            let center_y = source.y + normalized_center_y * sample_height;
+            let physical_tile = if texture_indent != 0.0 || physical_texture_tiles {
+                let Some(tile) = cpp_texture_tile_for_source(
+                    image.width(),
+                    image.height(),
+                    center_x,
+                    center_y,
+                    fog_sampler.is_some(),
+                ) else {
+                    continue;
+                };
+                Some(tile)
+            } else {
+                None
+            };
+            let texture_transform = physical_tile.and_then(|(tile_x, tile_y, physical_size)| {
+                let physical_size = physical_size as f32;
+                let denominator = physical_size + 2.0 * texture_indent;
+                if !denominator.is_finite() || denominator.abs() <= f32::EPSILON {
+                    return None;
+                }
+                let chunk_size = if fog_sampler.is_some() {
+                    physical_size.min(64.0)
+                } else {
+                    physical_size
+                };
+                let chunk_start = |center: f32, tile_origin: i32, source_origin: f32| {
+                    let tile_origin = tile_origin as f32;
+                    source_origin.max(
+                        tile_origin + ((center - tile_origin) / chunk_size).floor() * chunk_size,
+                    )
+                };
+                Some((
+                    tile_x,
+                    tile_y,
+                    physical_size,
+                    denominator,
+                    chunk_start(center_x, tile_x, source.x),
+                    chunk_start(center_y, tile_y, source.y),
+                ))
+            });
+            let local = [
+                (x_range.0, y_range.0),
+                (x_range.1, y_range.0),
+                (x_range.0, y_range.1),
+                (x_range.1, y_range.1),
+            ];
+            let mut positions = [[0.0; 3]; 4];
+            let mut uv = [[0.0; 2]; 4];
+            for (index, (local_x, local_y)) in local.into_iter().enumerate() {
+                let normalized_x = local_x / source.width;
+                let normalized_y = local_y / source.height;
+                let target_x = dest_x + normalized_x * dest_width;
+                let target_y = dest_y + normalized_y * dest_height;
+                let Some(position) = captured_sprite_position(transform, target_x, target_y) else {
+                    return false;
+                };
+                positions[index] = position;
+                let sample_x = if flip_x {
+                    source.x + (1.0 - normalized_x) * sample_width
+                } else {
+                    source.x + normalized_x * sample_width
+                };
+                let sample_y = source.y + normalized_y * sample_height;
+                let (sample_x, sample_y) = texture_transform.map_or(
+                    (sample_x, sample_y),
+                    |(tile_x, tile_y, physical_size, denominator, quad_start_x, quad_start_y)| {
+                        let adjust = |edge: f32, tile_origin: i32, quad_start: f32| {
+                            let tile_origin = tile_origin as f32;
+                            (quad_start
+                                + texture_indent
+                                + (edge - quad_start) * physical_size / denominator)
+                                .clamp(tile_origin, tile_origin + physical_size)
+                        };
+                        (
+                            adjust(sample_x, tile_x, quad_start_x),
+                            adjust(sample_y, tile_y, quad_start_y),
+                        )
+                    },
+                );
+                uv[index] = [
+                    sample_x / image.width() as f32,
+                    sample_y / image.height() as f32,
+                ];
+            }
+            if positions
+                .iter()
+                .any(|position| position[2].is_sign_positive())
+                && positions
+                    .iter()
+                    .any(|position| position[2].is_sign_negative())
+            {
+                return false;
+            }
+            // The shader derives the native tile origin from each fragment's
+            // interpolated source coordinate. This preserves C4TexRef seam and
+            // padding behavior without expanding an unfogged image into one draw
+            // command per tile.
+            let sample_tile = (sampler == GpuSampler::Linear).then(|| {
+                physical_tile.map_or([0.0, 0.0, tile_size], |(x, y, size)| {
+                    [x as f32, y as f32, size as f32]
+                })
+            });
+            let software_sprite = if fog_sampler.is_some()
+                && !physical_texture_tiles
+                && texture_indent == 0.0
+                && !blit.renderer_config.no_box_fades
+            {
+                surface.add_gpu_software_sprite(clonk_graphics::GpuSoftwareSprite {
+                    destination: [dest.0, dest.1, dest.2, dest.3],
+                    source: [source.x, source.y, source.width, source.height],
+                    inverse: transform.inverse().unwrap_or_default(),
+                    translation: [0.0; 2],
+                    flip_x,
+                    inclusive_source_end,
+                    mapping: software_mapping,
+                    gamma: gamma
+                        .filter(|ramp| !ramp.is_passthrough())
+                        .map(clonk_graphics::GpuGammaLut::from_ramp),
+                    fog: Some(clonk_graphics::GpuSoftwareFog {
+                        destination: [fog_dest.0, fog_dest.1, fog_dest.2, fog_dest.3],
+                        source_range: [x_range.0, y_range.0, x_range.1, y_range.1],
+                    }),
+                })
+            } else {
+                software_sprite
+            };
+            chunks.push(CapturedGpuSpriteChunk {
+                position: positions,
+                uv,
+                fog_modulation,
+                sample_tile,
+                physical_tile,
+                software_sprite,
+            });
+        }
+
+        let main_modulation = blit.modulation.unwrap_or(0x00ff_ffff);
+        let owner_modulation = owner_color.map(|mut owner| {
+            if let Some(global) = blit.modulation {
+                if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
+                    owner = modulate_c4_colors(owner, global);
+                }
+            }
+            owner
+        });
+        let blend = if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
+            GpuBlend::Additive
+        } else {
+            GpuBlend::Normal
+        };
+        let clip = surface.clip();
+        let gamma = gamma.is_some_and(|gamma| !gamma.is_passthrough());
+        let commands_for =
+            |resource: &GpuTextureResource,
+             modulation,
+             uses_mod2,
+             outer_modulation,
+             layer: &mut CapturedGpuSpriteLayer|
+             -> Option<()> {
+                let CapturedGpuSpriteLayer {
+                    resources,
+                    commands,
+                } = layer;
+                if !physical_texture_tiles {
+                    resources.push(resource.clone());
+                }
+                commands.reserve(chunks.len().saturating_mul(
+                    if blit.renderer_config.no_box_fades {
+                        2
+                    } else {
+                        1
+                    },
+                ));
+                for chunk in chunks.iter() {
+                    let (texture, uv, sample_tile) = if physical_texture_tiles {
+                        let tile = chunk.physical_tile?;
+                        let tiled = physical_texture_tile_resource(resource, tile)?;
+                        let (tile_x, tile_y, tile_size) = tile;
+                        let mut uv = chunk.uv;
+                        for value in &mut uv {
+                            value[0] = ((value[0] * image.width() as f32 - tile_x as f32)
+                                / tile_size as f32)
+                                .clamp(0.0, 1.0);
+                            value[1] = ((value[1] * image.height() as f32 - tile_y as f32)
+                                / tile_size as f32)
+                                .clamp(0.0, 1.0);
+                        }
+                        let sample_tile =
+                            (sampler == GpuSampler::Linear).then_some([0.0, 0.0, tile_size as f32]);
+                        let texture = tiled.id;
+                        resources.push(tiled);
+                        (texture, uv, sample_tile)
+                    } else {
+                        (resource.id, chunk.uv, chunk.sample_tile)
+                    };
+                    let outer_modulation = if outer_modulation == GpuOuterModulation::Ignore {
+                        GpuOuterModulation::Ignore
+                    } else if chunk.fog_modulation.is_some() {
+                        GpuOuterModulation::Combine
+                    } else {
+                        outer_modulation
+                    };
+                    let (modulation, mod2) = captured_sprite_modulation(
+                        modulation,
+                        chunk.fog_modulation,
+                        uses_mod2,
+                        blit.renderer_config,
+                    );
+                    let command = |indices: [usize; 4], modulation: [[f32; 4]; 4]| {
+                        let vertices = std::array::from_fn(|slot| {
+                            let index = indices[slot];
+                            let mut vertex =
+                                GpuVertex::new(chunk.position[index], uv[index], modulation[slot])
+                                    .with_outer_modulation(outer_modulation)
+                                    .with_owner_outer_modulation(outer_modulation);
+                            vertex.software_shader = blit.renderer_config.shader;
+                            vertex.software_sprite = chunk.software_sprite;
+                            sample_tile
+                                .map_or(vertex, |[x, y, size]| vertex.with_sample_tile(x, y, size))
+                        });
+                        GpuCommand::Quad {
+                            texture,
+                            owner_mask: None,
+                            vertices,
+                            clip,
+                            blend,
+                            base_mod2: mod2,
+                            owner_mod2: false,
+                            sampler,
+                            gamma,
+                        }
+                    };
+                    if blit.renderer_config.no_box_fades && chunk.fog_modulation.is_some() {
+                        commands.extend([
+                            command([0, 1, 2, 2], [modulation[2]; 4]),
+                            command([2, 1, 3, 3], [modulation[3]; 4]),
+                        ]);
+                    } else {
+                        commands.push(command([0, 1, 2, 3], modulation));
+                    }
+                }
+                Some(())
+            };
+
+        let (base_resource, overlay_resource) = match (mask, owner_modulation) {
+            (Some(mask), Some(_)) => {
+                let Some((base, overlay)) = mask.gpu_layer_resources(image) else {
+                    return false;
+                };
+                (base, Some(overlay))
+            }
+            _ => (
+                retained_resource.unwrap_or_else(|| image.gpu_texture_resource()),
+                None,
+            ),
+        };
+        if commands_for(
+            &base_resource,
+            main_modulation,
+            blit.mode & C4GFXBLIT_MOD2 != 0,
+            if blit.modulation.is_some() {
                 GpuOuterModulation::Combine
             } else {
-                outer_modulation
-            };
-            let (modulation, mod2) = captured_sprite_modulation(
-                modulation,
-                chunk.fog_modulation,
-                uses_mod2,
-                blit.renderer_config,
-            );
-            let command = |indices: [usize; 4], modulation: [[f32; 4]; 4]| {
-                let vertices = std::array::from_fn(|slot| {
-                    let index = indices[slot];
-                    let vertex = GpuVertex::new(chunk.position[index], uv[index], modulation[slot])
-                        .with_outer_modulation(outer_modulation)
-                        .with_owner_outer_modulation(outer_modulation);
-                    sample_tile.map_or(vertex, |[x, y, size]| vertex.with_sample_tile(x, y, size))
-                });
-                GpuCommand::Quad {
-                    texture,
-                    owner_mask: None,
-                    vertices,
-                    clip,
-                    blend,
-                    base_mod2: mod2,
-                    owner_mod2: false,
-                    sampler,
-                    gamma,
-                }
-            };
-            if blit.renderer_config.no_box_fades && chunk.fog_modulation.is_some() {
-                commands.extend([
-                    command([0, 1, 2, 2], [modulation[2]; 4]),
-                    command([2, 1, 3, 3], [modulation[3]; 4]),
-                ]);
-            } else {
-                commands.push(command([0, 1, 2, 3], modulation));
-            }
+                GpuOuterModulation::Inherit
+            },
+            base,
+        )
+        .is_none()
+        {
+            return false;
         }
-        Some((resources, commands))
-    };
-
-    let (base_resource, overlay_resource) = match (mask, owner_modulation) {
-        (Some(mask), Some(_)) => {
-            let Some((base, overlay)) = mask.gpu_layer_resources(image) else {
-                return false;
-            };
-            (base, Some(overlay))
-        }
-        _ => (
-            retained_resource.unwrap_or_else(|| image.gpu_texture_resource()),
-            None,
-        ),
-    };
-    let Some((base_resources, base_commands)) = commands_for(
-        &base_resource,
-        main_modulation,
-        blit.mode & C4GFXBLIT_MOD2 != 0,
-        if blit.modulation.is_some() {
-            GpuOuterModulation::Combine
-        } else {
-            GpuOuterModulation::Inherit
-        },
-    ) else {
-        return false;
-    };
-    let overlay_commands =
         if let Some((overlay, modulation)) = overlay_resource.as_ref().zip(owner_modulation) {
-            let Some(commands) = commands_for(
+            if commands_for(
                 overlay,
                 modulation,
                 blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0,
@@ -1208,38 +1524,35 @@ fn capture_gpu_sprite_impl(
                 } else {
                     GpuOuterModulation::Combine
                 },
-            ) else {
+                owner,
+            )
+            .is_none()
+            {
                 return false;
-            };
-            Some(commands)
-        } else {
-            None
-        };
-
-    let _ = surface.record_gpu_sprite_fallback(
-        fallback_reasons,
-        usize::from(fallback_reasons.spatial_fog).saturating_mul(chunks.len()),
-    );
-    for resource in base_resources {
-        let _ = surface.add_gpu_texture(resource);
-    }
-    if let Some((resources, _)) = overlay_commands.as_ref() {
-        for resource in resources {
-            let _ = surface.add_gpu_texture(resource.clone());
+            }
         }
-    }
-    // Native C4Surface owner bitmaps are two complete painter-order passes.
-    // Keep every base chunk ahead of every owner chunk, rather than
-    // interleaving the layers chunk by chunk.
-    for command in base_commands {
-        let _ = surface.push_gpu_command(command);
-    }
-    if let Some((_, commands)) = overlay_commands {
-        for command in commands {
+
+        let _ = surface.record_gpu_sprite_fallback(
+            fallback_reasons,
+            usize::from(fallback_reasons.spatial_fog).saturating_mul(chunks.len()),
+        );
+        for resource in base.resources.drain(..) {
+            let _ = surface.add_gpu_texture(resource);
+        }
+        for resource in owner.resources.drain(..) {
+            let _ = surface.add_gpu_texture(resource);
+        }
+        // Native C4Surface owner bitmaps are two complete painter-order passes.
+        // Keep every base chunk ahead of every owner chunk, rather than
+        // interleaving the layers chunk by chunk.
+        for command in base.commands.drain(..) {
             let _ = surface.push_gpu_command(command);
         }
-    }
-    true
+        for command in owner.commands.drain(..) {
+            let _ = surface.push_gpu_command(command);
+        }
+        true
+    })
 }
 
 pub(crate) fn gpu_sampler_for_blit(sampling: BlitSampling) -> GpuSampler {
@@ -1842,7 +2155,7 @@ pub(crate) fn draw_image_region(
 
     let dest_x = rect.origin.x.round() as i32;
     let dest_y = rect.origin.y.round() as i32;
-    if capture_gpu_sprite(
+    if capture_gpu_sprite_impl(
         surface,
         (
             dest_x as f32,
@@ -1872,6 +2185,9 @@ pub(crate) fn draw_image_region(
         fog,
         GpuSampler::Nearest,
         false,
+        None,
+        false,
+        clonk_graphics::GpuSoftwareSpriteMapping::PixelCorner,
     ) {
         return;
     }
@@ -2070,7 +2386,7 @@ pub(crate) fn draw_image_region_rotated(
     // axis-aligned batch cannot express rotation and so fell back to a
     // 232-byte generic quad — for 59 of the 130 particle definitions in the
     // current content snapshot (clonk-org/clonk-rs#271).
-    if capture_gpu_object_sprite(
+    if capture_gpu_sprite_impl(
         surface,
         (
             center_x - half_w,
@@ -2100,6 +2416,13 @@ pub(crate) fn draw_image_region_rotated(
         fog,
         GpuSampler::Nearest,
         true,
+        None,
+        true,
+        clonk_graphics::GpuSoftwareSpriteMapping::RotatedCorner {
+            center: [center_x, center_y],
+            cos: cos_theta,
+            sin: sin_theta,
+        },
     ) {
         return;
     }

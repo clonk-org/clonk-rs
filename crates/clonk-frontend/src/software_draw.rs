@@ -23,6 +23,7 @@ pub(crate) fn capture_gpu_gui_image(
         modulation,
         gamma,
         renderer_config,
+        true,
     )
 }
 
@@ -37,6 +38,7 @@ fn capture_gpu_gui_image_with_renderer_config(
     modulation: Option<u32>,
     gamma: Option<&clonk_graphics::GammaRamp>,
     renderer_config: AdvancedRendererConfig,
+    compatibility_sampling: bool,
 ) -> bool {
     let offset = renderer_config.destination_offset();
     let dest = (dest.0 + offset, dest.1 + offset, dest.2, dest.3);
@@ -44,7 +46,19 @@ fn capture_gpu_gui_image_with_renderer_config(
         BilinearBlend::AlphaOver => 0,
         BilinearBlend::Additive => C4GFXBLIT_ADDITIVE,
     };
-    capture_gpu_sprite(
+    let mapping = if sampler == GpuSampler::Linear
+        && !renderer_config.changes_generic_textured_blit(requested_mode, modulation.is_some())
+    {
+        clonk_graphics::GpuSoftwareSpriteMapping::GuiLinear { modulation }
+    } else if sampler == GpuSampler::Nearest
+        && compatibility_sampling
+        && !renderer_config.changes_generic_textured_blit(requested_mode, modulation.is_some())
+    {
+        clonk_graphics::GpuSoftwareSpriteMapping::GuiNearest
+    } else {
+        clonk_graphics::GpuSoftwareSpriteMapping::Native
+    };
+    capture_gpu_sprite_impl(
         surface,
         dest,
         dest,
@@ -64,6 +78,9 @@ fn capture_gpu_gui_image_with_renderer_config(
         None,
         sampler,
         false,
+        None,
+        false,
+        mapping,
     )
 }
 
@@ -190,6 +207,7 @@ pub(crate) fn draw_image_source_configured_on_surface(
         modulation,
         gamma,
         renderer_config,
+        false,
     ) {
         return;
     }
@@ -695,7 +713,8 @@ pub fn draw_color_rect(
             alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: surface.clip(),
             blend: GpuBlend::Normal,
-            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
+            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough()))
+                .with_software_blend(clonk_graphics::GpuSoftwareBlend::Legacy),
         });
         return;
     }

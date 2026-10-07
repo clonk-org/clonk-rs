@@ -2054,24 +2054,42 @@ fn draw_scaled_region(
         if let (Ok(source_width), Ok(source_height)) =
             (i32::try_from(src.width), i32::try_from(src.height))
         {
-            crate::draw_image_region(
+            if crate::capture_gpu_sprite_impl(
                 surface,
-                &clonk_gui::Rect::new(
+                (
                     dest.x as f32,
                     dest.y as f32,
                     dest.width as f32,
                     dest.height as f32,
                 ),
+                (
+                    dest.x as f32,
+                    dest.y as f32,
+                    dest.width as f32,
+                    dest.height as f32,
+                ),
+                &clonk_graphics::Transform::identity(),
                 image,
                 None,
-                &crate::SourceRect::new(src.x, src.y, source_width, source_height),
+                crate::FloatSourceRect {
+                    x: src.x as f32,
+                    y: src.y as f32,
+                    width: source_width as f32,
+                    height: source_height as f32,
+                },
                 false,
                 None,
                 crate::SpriteBlitState::normal(),
                 gamma,
                 None,
-            );
-            return;
+                clonk_graphics::GpuSampler::Nearest,
+                false,
+                None,
+                false,
+                clonk_graphics::GpuSoftwareSpriteMapping::IntegerStretch,
+            ) {
+                return;
+            }
         }
     }
     let pixels = image.pixels();
@@ -5451,5 +5469,42 @@ mod hud_board_cache_tests {
         draw_band(&mut cache, &mut surface, &tile);
 
         assert_eq!(cache.compositions, 0);
+    }
+}
+
+#[cfg(test)]
+mod retained_cpu_tests {
+    use super::*;
+    use clonk_graphics::PixelFormat;
+    #[test]
+    fn retained_command_cells_keep_integer_nearest_coordinates() {
+        // C4Viewport.cpp: command cells select integer source facets. Keep
+        // the existing draw_scaled_region integer scaling as the pixel oracle.
+        let image = ImageData::new(2, 1, vec![20, 40, 60, 255, 200, 210, 220, 255]);
+        let draw = |surface: &mut Surface| {
+            surface.fill(Color::opaque(0, 0, 0));
+            draw_scaled_region(
+                surface,
+                &image,
+                SurfaceRect::new(0, 0, 2, 1),
+                SurfaceRect::new(0, 0, 3, 1),
+                None,
+            );
+        };
+        let mut oracle = Surface::new(3, 1, PixelFormat::Rgba8888);
+        draw(&mut oracle);
+        let mut captured = Surface::new(3, 1, PixelFormat::Rgba8888);
+        captured.begin_gpu_scene_capture();
+        draw(&mut captured);
+        let scene = captured.take_gpu_scene_capture().unwrap().into_scene(
+            [3, 1],
+            Color::transparent(),
+            &GammaRamp::identity(),
+        );
+        let mut actual = vec![0; 12];
+        clonk_graphics::CpuSceneRenderer::default()
+            .render(&scene, &mut actual)
+            .unwrap();
+        assert_eq!(actual, oracle.pixels());
     }
 }

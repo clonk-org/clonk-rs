@@ -21,7 +21,17 @@ pub(crate) struct RetainedGpuFrame {
     pub(crate) physical_damage: Option<clonk_graphics::DamageRegion>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RetainedSoftwareLayer {
+    Base,
+    Overlay { clip: Option<Rect> },
+    Physical,
+    FadeBytes,
+}
+
 pub(crate) struct RetainedGpuFrameLayer {
+    pub(crate) software_fade: Option<(GpuScene, u8)>,
+    pub(crate) software: RetainedSoftwareLayer,
     pub(crate) scene: GpuScene,
     pub(crate) presentation: GpuPresentation,
     /// Provenance for an isolated painter-order layer whose conservative
@@ -36,6 +46,7 @@ pub(crate) enum RetainedGpuLayerOwner {
 
 #[derive(Clone)]
 pub(crate) struct NativePresentationBatch {
+    pub(crate) software_fade: Option<(GpuSceneRecorder, u8)>,
     /// `None` for text attached directly to FramePresenter's already-scaled
     /// base; subsequent batches own a premultiplied logical chrome layer.
     pub(crate) logical_layer: Option<Vec<u8>>,
@@ -53,6 +64,129 @@ pub(crate) struct NativePresentationBatch {
     pub(crate) gpu_recorder: Option<GpuSceneRecorder>,
     /// Carried into every retained layer produced from this isolated batch.
     pub(crate) owner: Option<RetainedGpuLayerOwner>,
+}
+
+impl RetainedGpuFrame {
+    pub(crate) fn render_cpu(
+        &self,
+        renderers: &mut Vec<clonk_graphics::CpuSceneRenderer>,
+        presenter: &mut clonk_scaling::FramePresenter,
+        output: &mut [u8],
+    ) -> Result<bool> {
+        self.render_cpu_inner(renderers, presenter, output, true)
+    }
+    pub(crate) fn render_cpu_without_monitor(
+        &self,
+        renderers: &mut Vec<clonk_graphics::CpuSceneRenderer>,
+        presenter: &mut clonk_scaling::FramePresenter,
+        output: &mut [u8],
+    ) -> Result<bool> {
+        self.render_cpu_inner(renderers, presenter, output, false)
+    }
+    pub(crate) fn resolve_cpu_monitor_gamma(&self, output: &mut [u8]) {
+        let Some(base) = self.layers.first() else {
+            return;
+        };
+        if base.scene.gamma_mode.monitor_postpass() {
+            for pixel in output.chunks_exact_mut(4) {
+                for (channel, value) in pixel.iter_mut().take(3).enumerate() {
+                    *value = ((u32::from(base.scene.gamma.channels[channel][usize::from(*value)])
+                        + 128)
+                        / 257) as u8;
+                }
+            }
+        }
+    }
+    fn render_cpu_inner(
+        &self,
+        renderers: &mut Vec<clonk_graphics::CpuSceneRenderer>,
+        presenter: &mut clonk_scaling::FramePresenter,
+        output: &mut [u8],
+        resolve_monitor: bool,
+    ) -> Result<bool> {
+        let base = self
+            .layers
+            .first()
+            .context("retained CPU frame has no base layer")?;
+        anyhow::ensure!(
+            matches!(base.software, RetainedSoftwareLayer::Base),
+            "retained CPU frame does not begin with a logical base"
+        );
+        renderers.resize_with(self.layers.len(), clonk_graphics::CpuSceneRenderer::default);
+        let refreshed = presenter.present(output, |logical| {
+            renderers[0]
+                .render_without_monitor(&base.scene, logical)
+                .map(|()| true)
+        })?;
+        let mut composer = presenter.ordered_composer(output);
+        for (index, layer) in self.layers.iter().enumerate().skip(1) {
+            let scene = layer
+                .software_fade
+                .as_ref()
+                .map_or(&layer.scene, |(scene, _)| scene);
+            match layer.software {
+                RetainedSoftwareLayer::FadeBytes => {
+                    anyhow::ensure!(
+                        composer.geometry().scale() == 1.0,
+                        "byte fade composition requires a logical frame"
+                    );
+                    let opacity = u32::from(
+                        layer
+                            .software_fade
+                            .as_ref()
+                            .context("byte fade has no opacity")?
+                            .1,
+                    );
+                    renderers[index].render_without_monitor(scene, composer.begin_layer())?;
+                    composer.draw_native(|physical, _| {
+                        for (destination, source) in
+                            physical.iter_mut().zip(renderers[index].rendered_pixels())
+                        {
+                            *destination = ((u32::from(*source) * opacity
+                                + u32::from(*destination) * (255 - opacity)
+                                + 127)
+                                / 255) as u8;
+                        }
+                    });
+                }
+                RetainedSoftwareLayer::Overlay { clip } => {
+                    let logical = composer.begin_layer();
+                    renderers[index].render_without_monitor(scene, logical)?;
+                    if let Some((_, opacity)) = layer.software_fade.as_ref() {
+                        for value in logical {
+                            *value = ((u16::from(*value) * u16::from(*opacity) + 127) / 255) as u8;
+                        }
+                    }
+                    if let Some(clip) = clip {
+                        composer.composite_layer_with_clip(clip);
+                    } else {
+                        composer.composite_layer();
+                    }
+                }
+                RetainedSoftwareLayer::Physical => {
+                    composer.draw_native(|physical, _| {
+                        renderers[index].render_loaded(&layer.scene, physical)
+                    })?;
+                }
+                RetainedSoftwareLayer::Base => {
+                    anyhow::bail!("retained CPU frame has a second logical base")
+                }
+            }
+        }
+        if resolve_monitor && base.scene.gamma_mode.monitor_postpass() {
+            composer.draw_native(|physical, _| {
+                for pixel in physical.chunks_exact_mut(4) {
+                    for (channel, value) in pixel.iter_mut().take(3).enumerate() {
+                        *value =
+                            ((u32::from(base.scene.gamma.channels[channel][usize::from(*value)])
+                                + 128)
+                                / 257) as u8;
+                    }
+                }
+            });
+        }
+        Ok(refreshed)
+    }
 }
 
 /// Config-driven bits the startup parity renderers display.
@@ -1390,6 +1524,9 @@ pub(crate) fn apply_startup_fade_to_batch(
     batch: &mut NativePresentationBatch,
     opacity: u8,
 ) -> Result<()> {
+    if let Some(recorder) = batch.gpu_recorder.as_ref() {
+        batch.software_fade = Some((recorder.clone(), opacity));
+    }
     // `C4GUI::Dialog::Draw` switches to eFadeNone at the fully visible
     // endpoint and therefore does not activate even a white modulation.
     if opacity == u8::MAX {
