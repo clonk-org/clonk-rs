@@ -154,6 +154,54 @@ class LatencyReportTests(unittest.TestCase):
         self.assertIn("::warning::", process.stdout)
         self.assertEqual(report["cache_state"], "UNKNOWN")
 
+    def test_job_cancelled_before_it_started_has_no_execution_clock(self):
+        # GitHub reports completed_at a second before started_at for a job that
+        # was cancelled before any runner accepted it, exactly as it does for a
+        # skipped job (run 37086095527, job 111097961683: no runner, no steps).
+        endpoint = f"{PREFIX}/runs/900/jobs?filter=all&per_page=100&page=1"
+        cancelled = job_record(2, "Rust code coverage", start=461, end=460,
+                               conclusion="cancelled", created_at=stamp(461), steps=[])
+        self.fixtures[endpoint]["jobs"].append(cancelled)
+        self.fixtures[endpoint]["total_count"] = 2
+
+        process, report = self.invoke()
+
+        self.assertNotIn("error", report, process.stderr)
+        self.assertEqual(report["functional_conclusion"], "cancelled")
+        self.assertEqual(report["latency"]["execution_seconds"], 700)
+        retained = next(job for job in report["jobs"] if job["name"] == "Rust code coverage")
+        self.assertIsNone(retained["duration_seconds"])
+        self.assertIsNone(retained["queue_seconds"])
+
+    def test_unobservable_history_is_excluded_without_discarding_the_current_report(self):
+        reversed_run = run_record(901)
+        self.fixtures[f"{PREFIX}/runs/901/jobs?filter=all&per_page=100&page=1"] = {
+            "total_count": 1, "jobs": [job_record(9010, "Linux tests", start=400, end=300)],
+        }
+        unavailable_run = run_record(902)
+        self.fixtures[f"{PREFIX}/runs/902/jobs?filter=all&per_page=100&page=1"] = {"api_error": "unavailable"}
+        measured_run = run_record(903)
+        self.fixtures[f"{PREFIX}/runs/903/jobs?filter=all&per_page=100&page=1"] = {
+            "total_count": 1, "jobs": [job_record(9030, "Linux tests", 60, 260)],
+        }
+        self.fixtures[f"{PREFIX}/workflows/41/runs?status=completed&per_page=20&page=1"] = {
+            "total_count": 3, "workflow_runs": [reversed_run, unavailable_run, measured_run],
+        }
+
+        process, report = self.invoke()
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(report["functional_conclusion"], "success")
+        self.assertEqual(report["latency"]["execution_seconds"], 700)
+        history = report["history"]
+        self.assertEqual(history["ordinary"]["sample_count"], 1)
+        self.assertEqual(history["unobservable_run_count"], 2)
+        unobservable = {run["run_id"]: run for run in history["unobservable_runs"]}
+        self.assertEqual(unobservable[901]["reason"], "invalid_observation")
+        for field in ("run 901", "attempt 1", "job 9010", stamp(400), stamp(300)):
+            self.assertIn(field, unobservable[901]["error"])
+        self.assertEqual(unobservable[902]["reason"], "api_unavailable")
+
     def test_all_job_pages_and_prebuilds_define_the_release_candidate(self):
         endpoint = f"{PREFIX}/runs/900/jobs?filter=all&per_page=100&page="
         for page, job in enumerate([
