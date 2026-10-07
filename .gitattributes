@@ -7,3 +7,5 @@ docs/evidence/live-gpu-recovery/** -text -whitespace
 docs/evidence/pi4-retained-gpu/** -text -whitespace
 # Preserve verbatim third-party license text, including upstream whitespace.
 crates/clonk-frontend/src/dependency_licenses.txt -whitespace
+# Collapse raw benchmark samples in pull request and local diffs.
+benchmarks/results/** linguist-generated=true -diff
