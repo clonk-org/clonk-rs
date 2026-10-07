@@ -218,6 +218,30 @@ pub(crate) async fn handle_client_message(
             if state.deferred_resource_cores {
                 publish_pending_join_data(state).await;
             }
+            if capabilities.has(crate::PortCapabilities::RELEASE_DIAGNOSTICS) {
+                if let Some(route) = state.accepted_routes.get(&connection_id) {
+                    let reports = std::iter::once((HOST_CLIENT_ID, clonk_core::version::PORT_VERSION.to_string()))
+                        .chain(state.client_releases.iter().map(|(id, version)| (*id, version.clone())));
+                    for (client_id, version) in reports {
+                        let _ = route.outbound.try_send(ControlMessage::ClientRelease(crate::ClientRelease { client_id, version }));
+                    }
+                }
+            }
+        }
+        ControlMessage::ClientRelease(report) => {
+            if report.client_id != client_id
+                || !state.peer_capabilities.peer_supports(client_id as i32, crate::PortCapabilities::RELEASE_DIAGNOSTICS)
+                || state.client_releases.get(&client_id) == Some(&report.version)
+            {
+                return;
+            }
+            state.client_releases.insert(client_id, report.version.clone());
+            for route in state.accepted_routes.values().filter(|route| {
+                route.peer_is_port && state.peer_capabilities.peer_supports(route.client_id as i32, crate::PortCapabilities::RELEASE_DIAGNOSTICS)
+            }) {
+                let _ = route.outbound.try_send(ControlMessage::ClientRelease(report.clone()));
+            }
+            let _ = state.event_tx.send(HostEvent::ClientRelease(report)).await;
         }
         // Only the host restarts a session. A client claiming to is either
         // confused or hostile; either way there is nothing to act on.
@@ -917,6 +941,7 @@ pub(crate) async fn handle_client_disconnected(
         return;
     }
     state.peer_capabilities.forget(client_id as i32);
+    state.client_releases.remove(&client_id);
     mark_client_removing(client_id, state);
     let disconnected = state.clients.remove(&client_id);
     let removed_logical_client = disconnected.is_some();
@@ -1943,6 +1968,7 @@ pub(crate) async fn finish_host_restart_removals(state: &mut HostState) {
 
 async fn close_removed_client_connections(client_id: ClientId, state: &mut HostState) {
     state.peer_capabilities.forget(client_id as i32);
+    state.client_releases.remove(&client_id);
     let routes = state
         .accepted_routes
         .iter()

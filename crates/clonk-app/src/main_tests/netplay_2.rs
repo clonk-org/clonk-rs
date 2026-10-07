@@ -8838,6 +8838,48 @@ fn offline_create_script_player_joins_through_player_info_control_path() {
 }
 
 #[test]
+fn sync_loss_names_releases_that_differ_from_the_remote_host() {
+    let mut app = new_classic_running_sandbox_app();
+    let (mut manager, events) = NetworkManager::test_stub_for_client_id(7);
+    for (client_id, version) in [(0, "0.8.0"), (9, "0.9.0-dev")] {
+        events
+            .send(NetworkEvent::ClientRelease(clonk_network::ClientRelease {
+                client_id,
+                version: version.into(),
+            }))
+            .test_value();
+    }
+    manager.poll_events();
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(n2_client_settings()));
+    app.netplay.control_clients.replace_snapshot([
+        message_client(0, b"Host"),
+        message_client(7, b"Local"),
+        message_client(9, b"Ada"),
+        message_client(10, b"Unknown peer"),
+    ]);
+    let check = app.engine.sync_check(7);
+    app.handle_desync(check.clone(), check);
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.status_text.contains("host 0.8.0"));
+    main_assert!(app
+        .status_text
+        .contains(&format!("Local (clonk-rs {})", env!("CARGO_PKG_VERSION"))));
+    main_assert!(app.status_text.contains("Ada (clonk-rs 0.9.0-dev)"));
+    main_assert!(!app.status_text.contains("Unknown peer"));
+    let result =
+        String::from_utf8(app.snapshot.round_results.network_result_message.clone()).test_value();
+    main_assert!(result.contains("Ada (clonk-rs 0.9.0-dev)"));
+    main_assert!(
+        message_board_logical_entries(&app)
+            .iter()
+            .any(|line| line.contains("Ada (clonk-rs 0.9.0-dev)")),
+        "message-board history: {:?}",
+        app.chat.message_board.log_history
+    );
+}
+
+#[test]
 fn client_direct_cpp_sync_check_desync_continues_running_round_locally() {
     // An inactive C++ host sends CID_SyncCheck through
     // PID_ControlPkt/CDT_Direct, which HandleControlPkt executes at once
@@ -11357,6 +11399,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     let cached_player_raster = ImageData::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]);
     let cached_rows = vec![
         LobbyRosterRow::Client(LobbyClientRow {
+            release: None,
             id: 0,
             name: "Host".to_string(),
             nick: String::new(),

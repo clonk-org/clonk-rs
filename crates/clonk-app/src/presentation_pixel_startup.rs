@@ -406,6 +406,9 @@ mod tests {
         assert!(app.lobby.classic_host.is_some() || app.lobby.session.is_some());
         assert!(app.dialogs.messages.is_empty());
         assert!(app.status_text.is_empty());
+        assert!(app.lobby.classic_host.as_ref().unwrap().controller.rows().iter().all(|row| {
+            !matches!(row, clonk_frontend::game_lobby::LobbyRosterRow::Client(client) if client.release.is_some())
+        }));
         Ok(())
     }
 }

@@ -796,6 +796,19 @@
   ],
   "port_only_features": [
     {
+      "id": "local-release-diagnostics",
+      "area": "presentation",
+      "summary": "After the first capability-negotiated release report, annotations show each client's port version in the lobby and identify differences from the host in synchronization-loss messages. Host-only and non-negotiating sessions retain the legacy list. Reports never enter lockstep controls or admission; older port and stock peers receive no release-report packets.",
+      "cited_in": [
+        "crates/clonk-network/src/client_release.rs",
+        "crates/clonk-network/src/session/host_dispatch.rs",
+        "crates/clonk-frontend/src/game_lobby.rs",
+        "docs/evidence/lobby-releases/README.md"
+      ],
+      "profile_action": "kept",
+      "owner": "clonk-org/clonk-rs#1869"
+    },
+    {
       "id": "local-voice-chat",
       "area": "presentation",
       "summary": "Proximity voice chat: microphone input, the push-to-talk rebind dialog, the port-only Voice.* config rows, and the \"Audio\" options-sheet group placed in the slack below C++'s own grid. No C++ counterpart; no game-control or lockstep effect.",

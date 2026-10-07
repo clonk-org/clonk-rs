@@ -1174,6 +1174,144 @@ mod tests {
         assert!(host.try_recv().is_err());
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mismatched_release_reaches_a_late_joiner_without_notifying_old_peers() {
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
+        let mut host_events = host.take_event_receiver();
+        let (mut alice, alice_id) = raw_client_transport(address, b"Alice").await;
+        let report = crate::ClientRelease {
+            client_id: alice_id,
+            version: "0.9.0-dev".into(),
+        };
+        alice
+            .send_message(ControlMessage::PortCapabilities(
+                crate::PortCapabilities::supported_without_voice(),
+            ))
+            .await
+            .test_value();
+        alice
+            .send_message(ControlMessage::ClientRelease(report.clone()))
+            .await
+            .test_value();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match host_events.recv().await {
+                    Some(HostEvent::ClientRelease(received)) => {
+                        assert_eq!(received, report);
+                        break;
+                    }
+                    Some(_) => {}
+                    None => panic!("host closed before learning Alice's release"),
+                }
+            }
+        })
+        .await
+        .test_value();
+        let (mut old, old_id) = raw_client_transport(address, b"Older port").await;
+        old.send_message(ControlMessage::PortCapabilities(
+            crate::PortCapabilities::from_bits(
+                crate::PortCapabilities::supported_without_voice().bits()
+                    & !crate::PortCapabilities::RELEASE_DIAGNOSTICS,
+            ),
+        ))
+        .await
+        .test_value();
+        let mut beta = connect_test_player(address, "Beta").await;
+        assert!(
+            beta.mesh_peer_ids().await.is_empty(),
+            "release metadata must reach relay-only clients"
+        );
+        let beta_id = beta.client_id();
+        let mut beta_events = beta.take_event_receiver();
+        let releases = timeout(EVENT_WAIT, async {
+            let mut releases = BTreeMap::new();
+            while releases.len() < 3 {
+                match beta_events.recv().await {
+                    Some(ClientEvent::ClientRelease(received)) => {
+                        releases.insert(received.client_id, received.version);
+                    }
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("mixed release was disconnected: {reason:?}")
+                    }
+                    Some(_) => {}
+                    None => panic!("client closed before the release snapshot"),
+                }
+            }
+            releases
+        })
+        .await
+        .test_value();
+        assert_eq!(releases.get(&alice_id), Some(&report.version));
+        for client_id in [HOST_CLIENT_ID, beta_id] {
+            assert_eq!(
+                releases.get(&client_id).map(String::as_str),
+                Some(clonk_core::version::PORT_VERSION)
+            );
+        }
+        assert!(
+            !releases.contains_key(&old_id),
+            "an old peer has an unknown release"
+        );
+        assert!(
+            !raw_client_received_message(
+                &mut old,
+                &ControlMessage::ClientRelease(report),
+                Duration::from_millis(100)
+            )
+            .await,
+            "an old decoder must never receive the new packet ID"
+        );
+        drop(alice);
+        drop(old);
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
+    }
+
+    #[tokio::test]
+    async fn release_reports_require_negotiation_and_cannot_impersonate_another_client() {
+        let (outbound, mut received) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let report = crate::ClientRelease {
+            client_id: 7,
+            version: "0.9.0".into(),
+        };
+        handle_client_message(
+            1,
+            7,
+            ControlMessage::ClientRelease(report.clone()),
+            0,
+            &mut state,
+        )
+        .await;
+        assert!(
+            state.client_releases.is_empty(),
+            "silence does not negotiate diagnostics"
+        );
+        state
+            .peer_capabilities
+            .record(7, crate::PortCapabilities::supported());
+        state.accepted_routes.get_mut(&1).unwrap().peer_is_port = true;
+        let mut forged = report.clone();
+        forged.client_id = 0;
+        handle_client_message(1, 7, ControlMessage::ClientRelease(forged), 0, &mut state).await;
+        assert!(
+            state.client_releases.is_empty(),
+            "a client cannot report the host's release"
+        );
+        handle_client_message(
+            1,
+            7,
+            ControlMessage::ClientRelease(report.clone()),
+            0,
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.client_releases.get(&7), Some(&report.version));
+        assert!(
+            matches!(received.try_recv().unwrap(), HostOutboundMessage::Message(ControlMessage::ClientRelease(received)) if received == report)
+        );
+    }
+
     fn host_state_with_test_route(client_id: ClientId, outbound: HostOutboundSender) -> HostState {
         let config = HostConfig::default();
         let backlog_limit = config.backlog_limit;
@@ -1230,6 +1368,7 @@ mod tests {
             control_discarded_clients: BTreeMap::new(),
             straggler_late: Default::default(),
             peer_capabilities: Default::default(),
+            client_releases: Default::default(),
             async_control_wait: None,
             admission: HostAdmission::new(
                 1,
@@ -16504,7 +16643,10 @@ mod tests {
         let beta = connect_test_player(addr, "Beta").await;
 
         let data = loop {
-            match timeout(EVENT_WAIT, alpha_events.recv()).await.test_value() {
+            match timeout(EVENT_WAIT, next_client_gameplay_event(&mut alpha_events))
+                .await
+                .test_value()
+            {
                 Some(ClientEvent::Direct {
                     delivery: ControlDelivery::Direct,
                     data,
@@ -16787,9 +16929,12 @@ mod tests {
         let mut client = connect_test_player(addr, "Alice").await;
         let mut events = client.take_event_receiver();
 
-        assert!(timeout(Duration::from_millis(50), events.recv())
-            .await
-            .is_err());
+        assert!(timeout(
+            Duration::from_millis(50),
+            next_client_gameplay_event(&mut events)
+        )
+        .await
+        .is_err());
 
         shutdown_test_session(client, host).await;
     }
@@ -16816,12 +16961,17 @@ mod tests {
                     assert_eq!(requested, status);
                     break;
                 }
-                Some(HostEvent::ClientJoined { .. }) | Some(HostEvent::Direct { .. }) => continue,
+                Some(HostEvent::ClientRelease(_))
+                | Some(HostEvent::ClientJoined { .. })
+                | Some(HostEvent::Direct { .. }) => continue,
                 other => panic!("expected host status request event, got {other:?}"),
             }
         }
         loop {
-            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
+            match timeout(EVENT_WAIT, next_client_gameplay_event(&mut client_events))
+                .await
+                .test_value()
+            {
                 Some(ClientEvent::Status(received)) => {
                     assert_eq!(received, status);
                     break;
@@ -16841,20 +16991,27 @@ mod tests {
                     assert_eq!((received_id, received), (client_id, status));
                     break;
                 }
-                Some(HostEvent::StatusChanged(_))
+                Some(HostEvent::ClientRelease(_))
+                | Some(HostEvent::StatusChanged(_))
                 | Some(HostEvent::ClientJoined { .. })
                 | Some(HostEvent::Direct { .. }) => continue,
                 other => panic!("expected host status ack event, got {other:?}"),
             }
         }
 
-        assert!(timeout(Duration::from_millis(50), client_events.recv())
-            .await
-            .is_err());
+        assert!(timeout(
+            Duration::from_millis(50),
+            next_client_gameplay_event(&mut client_events)
+        )
+        .await
+        .is_err());
         host.status_reached(status, status.target_tick)
             .await
             .test_value();
-        match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
+        match timeout(EVENT_WAIT, next_client_gameplay_event(&mut client_events))
+            .await
+            .test_value()
+        {
             Some(ClientEvent::StatusAck(received)) => assert_eq!(received, status),
             other => panic!("expected client final status ack, got {other:?}"),
         }
@@ -17645,6 +17802,7 @@ mod tests {
 
         let ready = loop {
             match timeout(EVENT_WAIT, host_events.recv()).await {
+                Ok(Some(HostEvent::ClientRelease(_))) => continue,
                 Ok(Some(HostEvent::Ready { packet })) => break packet,
                 Ok(Some(HostEvent::TransportError { error, .. })) => {
                     panic!("valid inactive control became a transport error: {error}")
@@ -18754,9 +18912,12 @@ mod tests {
 
         let mut client_beta = connect_test_player(addr, "Beta").await;
         let mut beta_events = client_beta.take_event_receiver();
-        assert!(timeout(Duration::from_millis(50), beta_events.recv())
-            .await
-            .is_err());
+        assert!(timeout(
+            Duration::from_millis(50),
+            next_client_gameplay_event(&mut beta_events)
+        )
+        .await
+        .is_err());
         activate_joined_client(&host, &mut host_events, client_beta.client_id()).await;
 
         submit_control_pair(&mut host, &client_beta, 1, 0xC3, 0xD4).await;
@@ -18800,7 +18961,8 @@ mod tests {
         // Ensure the client loop processed the send before issuing the request.
         while let Ok(Some(event)) = timeout(Duration::from_millis(20), event_rx.recv()).await {
             match event {
-                ClientEvent::LocalAddressesChanged { .. }
+                ClientEvent::ClientRelease(_)
+                | ClientEvent::LocalAddressesChanged { .. }
                 | ClientEvent::PingMeasured { .. }
                 | ClientEvent::Ready { .. }
                 | ClientEvent::Direct { .. }
@@ -20865,12 +21027,24 @@ mod tests {
             .collect()
     }
 
+    async fn next_client_gameplay_event(
+        events: &mut mpsc::Receiver<ClientEvent>,
+    ) -> Option<ClientEvent> {
+        loop {
+            match events.recv().await {
+                Some(ClientEvent::ClientRelease(_)) => continue,
+                event => return event,
+            }
+        }
+    }
+
     async fn wait_for_host_ready(
         events: &mut mpsc::Receiver<HostEvent>,
         duration: Duration,
     ) -> ControlPacket {
         loop {
             match timeout(duration, events.recv()).await {
+                Ok(Some(HostEvent::ClientRelease(_))) => continue,
                 Ok(Some(HostEvent::Ready { packet })) => break packet,
                 Ok(Some(HostEvent::ClientJoined { .. })) => continue,
                 // A departing client's closing socket can surface a transient
@@ -20916,6 +21090,7 @@ mod tests {
     ) -> ControlPacket {
         loop {
             match timeout(duration, events.recv()).await {
+                Ok(Some(ClientEvent::ClientRelease(_))) => continue,
                 Ok(Some(ClientEvent::Ready { packet })) => break packet,
                 Ok(Some(ClientEvent::PingMeasured { .. })) => continue,
                 Ok(Some(ClientEvent::LocalAddressesChanged { .. })) => continue,

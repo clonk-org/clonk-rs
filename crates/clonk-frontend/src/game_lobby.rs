@@ -783,6 +783,8 @@ pub struct LobbyTeamValue {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LobbyClientRow {
+    /// Optional port diagnostics; absent until a peer reports its release.
+    pub release: Option<LobbyClientRelease>,
     pub id: i32,
     pub name: String,
     pub nick: String,
@@ -796,9 +798,42 @@ pub struct LobbyClientRow {
     pub ping_ms: Option<i32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LobbyClientRelease {
+    pub version: Option<String>,
+    pub host_version: Option<String>,
+}
+
+impl LobbyClientRelease {
+    pub fn mismatched(&self) -> bool {
+        self.version
+            .as_ref()
+            .zip(self.host_version.as_ref())
+            .is_some_and(|(version, host)| version != host)
+    }
+
+    pub fn description(&self) -> String {
+        match (&self.version, &self.host_version) {
+            (Some(version), Some(host)) if version != host => {
+                format!("clonk-rs {version}; differs from host {host}. Mixed releases may lose synchronization.")
+            }
+            (Some(version), _) => format!("clonk-rs {version}"),
+            (None, _) => "clonk-rs release unknown (older port or LegacyClonk)".into(),
+        }
+    }
+}
+
 impl LobbyClientRow {
-    fn display_name(&self) -> String {
-        let name = crate::c4_presentation_text(&self.name);
+    pub fn display_name(&self) -> String {
+        let mut name = crate::c4_presentation_text(&self.name);
+        if let Some(release) = &self.release {
+            let version = release.version.as_deref().unwrap_or("?");
+            name = format!(
+                "{}{} [{version}]",
+                if release.mismatched() { "(!) " } else { "" },
+                name
+            );
+        }
         if !self.local && self.connected {
             if let Some(progress) = self.resource_progress {
                 return format!("({}%) {}", progress.min(100), name);
@@ -4965,11 +5000,14 @@ impl GameLobby {
             HitTarget::RosterRow(index) | HitTarget::AddPlayer(index) | HitTarget::Team(index) => {
                 match self.rows.get(index) {
                     Some(LobbyRosterRow::Client(client)) => {
-                        format!(
+                        let identity = format!(
                             "Client {} ({})",
                             crate::c4_presentation_text(&client.name),
                             crate::c4_presentation_text(&client.nick)
-                        )
+                        );
+                        client.release.as_ref().map_or(identity.clone(), |release| {
+                            format!("{identity}|{}", release.description())
+                        })
                     }
                     Some(LobbyRosterRow::Header(header)) => match header.kind {
                         LobbyRosterHeader::UnassignedSavegamePlayers => {
@@ -5701,7 +5739,15 @@ impl GameLobby {
             label_x,
             row.rect.y,
             &name,
-            client.color,
+            if client
+                .release
+                .as_ref()
+                .is_some_and(LobbyClientRelease::mismatched)
+            {
+                [255, 196, 64, 255]
+            } else {
+                client.color
+            },
             TextAlign::Left,
             gamma,
             layout.roster_client,
@@ -6586,6 +6632,7 @@ mod tests {
 
     fn client(id: i32, local: bool) -> LobbyRosterRow {
         LobbyRosterRow::Client(LobbyClientRow {
+            release: None,
             id,
             name: format!("Client {id}"),
             nick: format!("Nick {id}"),

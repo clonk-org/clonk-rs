@@ -1923,7 +1923,22 @@ pub(crate) async fn run_client_loop_with_routes(
                     other => other,
                 };
                 match result {
-                    Ok(ControlMessage::PortCapabilities(_)) => {}
+                    Ok(ControlMessage::PortCapabilities(capabilities)) => {
+                        if ingress_peer_id == HOST_CLIENT_ID
+                            && capabilities.has(crate::PortCapabilities::RELEASE_DIAGNOSTICS)
+                        {
+                            let report = crate::ClientRelease {
+                                client_id: resource_state.catalog.local_client_id() as ClientId,
+                                version: clonk_core::version::PORT_VERSION.to_string(),
+                            };
+                            let _ = transport.send_message(ControlMessage::ClientRelease(report)).await;
+                        }
+                    }
+                    Ok(ControlMessage::ClientRelease(report)) => {
+                        if ingress_peer_id == HOST_CLIENT_ID {
+                            let _ = event_tx.send(ClientEvent::ClientRelease(report)).await;
+                        }
+                    }
                     Ok(ControlMessage::ResourceUpgrade(_)) if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::ResourceUpgrade(packet)) => {
                         if let Err(error) = resource_state.apply_resource_upgrade(packet) {

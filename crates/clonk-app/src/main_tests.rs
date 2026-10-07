@@ -1746,6 +1746,7 @@ fn install_test_classic_host_lobby(app: &mut GameApp) {
             false,
             5,
             vec![LobbyRosterRow::Client(LobbyClientRow {
+                release: None,
                 id: 0,
                 name: "Exact Host".to_string(),
                 nick: "Exact Host".to_string(),

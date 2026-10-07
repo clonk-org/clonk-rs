@@ -841,6 +841,7 @@ impl GameApp {
         }
 
         rows.push(LobbyRosterRow::Client(LobbyClientRow {
+            release: None,
             id: 0,
             name: c4_presentation_text(local_name),
             nick: c4_presentation_text(nick),
@@ -910,8 +911,9 @@ impl GameApp {
                 detail: "staged scenario loader is not installed".to_string(),
             })
         })?;
-        let (rows, active_players) =
+        let (mut rows, active_players) =
             self.classic_host_lobby_roster_rows(mode, &staged.lobby.local_name, &staged.lobby.nick);
+        Self::apply_lobby_release_labels(&mut rows, manager);
         let mut controller = ClassicGameLobby::new(
             LobbyRole::Host,
             loader.state().title(),
@@ -1443,6 +1445,9 @@ impl GameApp {
                 client.status = LobbyClientStatus::Host;
             }
         }
+        if let Some(manager) = &self.netplay.manager {
+            Self::apply_lobby_release_labels(&mut rows, manager);
+        }
         let maximum = i32::try_from(self.netplay.max_players).unwrap_or(i32::MAX);
         if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_rows(rows.clone());
@@ -1462,6 +1467,22 @@ impl GameApp {
         }
         self.close_stale_classic_lobby_team_combo();
         self.refresh_classic_lobby_client_telemetry();
+    }
+
+    fn apply_lobby_release_labels(rows: &mut [LobbyRosterRow], manager: &NetworkManager) {
+        for row in rows {
+            if let LobbyRosterRow::Client(client) = row {
+                client.release = manager.release_diagnostics_available().then(|| {
+                    clonk_frontend::game_lobby::LobbyClientRelease {
+                        version: ClientId::try_from(client.id)
+                            .ok()
+                            .and_then(|id| manager.client_release(id))
+                            .map(str::to_string),
+                        host_version: manager.client_release(0).map(str::to_string),
+                    }
+                });
+            }
+        }
     }
 
     fn sync_visible_classic_lobby_resources(&mut self) {

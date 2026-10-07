@@ -442,6 +442,7 @@ pub(crate) async fn run_host(
         control_discarded_clients: BTreeMap::new(),
         straggler_late: Default::default(),
         peer_capabilities: Default::default(),
+        client_releases: Default::default(),
         async_control_wait: None,
         admission,
         client_cores,

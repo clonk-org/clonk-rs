@@ -347,6 +347,8 @@ pub enum ControlMessage {
     /// ID it cannot unpack (release builds). See [`crate::capabilities`] for
     /// the actual C++ behaviour and the narrow exemption.
     PortCapabilities(crate::PortCapabilities),
+    /// Negotiated, display-only release identity supplied by the host.
+    ClientRelease(crate::ClientRelease),
     /// The host announcing that the session about to close is being restarted,
     /// not lost. See [`crate::host_restart`].
     HostRestarting {
@@ -718,6 +720,11 @@ impl<S> ControlTransport<S> {
             ControlMessage::PortCapabilities(capabilities) => {
                 frame.extend(crate::encode_port_capabilities(capabilities));
             }
+            ControlMessage::ClientRelease(report) => {
+                frame.extend(crate::client_release::encode_client_release(&report).ok_or(
+                    TransportError::UnsupportedPacket(crate::PID_PORT_CLIENT_RELEASE),
+                )?);
+            }
             ControlMessage::HostRestarting { rejoin_seconds } => {
                 frame.extend(crate::encode_host_restart_notice(rejoin_seconds));
             }
@@ -914,6 +921,11 @@ fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> 
         PID_CONTROL_REQ => parse_request(&body[1..]),
         PID_CONTROL_PKT => parse_packet(&body[1..]),
         PID_EXEC_SYNC_CTRL => parse_exec_sync(&body[1..]),
+        crate::PID_PORT_CLIENT_RELEASE => crate::client_release::decode_client_release(body)
+            .map(ControlMessage::ClientRelease)
+            .ok_or(TransportError::UnsupportedPacket(
+                crate::PID_PORT_CLIENT_RELEASE,
+            )),
         crate::PID_PORT_CAPABILITIES => crate::decode_port_capabilities(body)
             .map(ControlMessage::PortCapabilities)
             .ok_or(TransportError::UnsupportedPacket(
