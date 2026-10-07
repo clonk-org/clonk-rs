@@ -1,11 +1,11 @@
 {
   "actual": {
     "path": "run-2/rust/artifacts/network-lobby.png",
-    "sha256": "1a334d9875a14f88b7746fa97542dbc44ae925ff8b19ddbbf7e35ef763b7d129"
+    "sha256": "f9730393cb7e8f013c4ebc19805dbf7f3e4676e24d0b83f24e3e1531b193d1e7"
   },
   "case_id": "network-lobby",
   "comparator": {
-    "binary_sha256": "c3e181f9e7ecdc86922cf6cf9c5d3b3789c98651b1f25041cfa530a2641bc927",
+    "binary_sha256": "8c09fe796e4c3459ae3d8339332d6595b854ca8cef2697d086de4643796e8e5b",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "pixel",
