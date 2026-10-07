@@ -403,9 +403,13 @@ def observe(arguments: argparse.Namespace, run: dict, jobs: list[dict], phase_ca
     for job in jobs:
         start, end = optional_timestamp(job, "started_at"), optional_timestamp(job, "completed_at")
         queued = optional_timestamp(job, "created_at")
-        if job.get("conclusion") == "skipped":
+        if job.get("conclusion") == "skipped" or (
+            job.get("conclusion") == "cancelled" and start is not None and end is not None and end < start
+        ):
             # GitHub synthesizes these metadata timestamps without running a
             # job, and can report completed_at before started_at or created_at.
+            # A job cancelled before any runner accepted it carries the same
+            # synthetic clocks; its duration is unknown, not negative.
             job.update(duration_seconds=None, queue_seconds=None)
             step_timings(job)
             continue
@@ -414,7 +418,12 @@ def observe(arguments: argparse.Namespace, run: dict, jobs: list[dict], phase_ca
         if (start is not None and start < created) or (end is not None and start is not None and end < start) or (
             queued is not None and start is not None and queued > start
         ):
-            raise ReportError("GitHub job timestamps are out of order")
+            raise ReportError(
+                f"GitHub job timestamps are out of order: run {run['id']} attempt {job['run_attempt']} "
+                f"job {job['id']} ({job['name']}) conclusion={job.get('conclusion')} "
+                f"run_created_at={run['created_at']} created_at={job.get('created_at')} "
+                f"started_at={job.get('started_at')} completed_at={job.get('completed_at')}"
+            )
         if start is not None and end is not None:
             intervals.append((start, end))
         job["duration_seconds"] = (end - start).total_seconds() if start is not None and end is not None else None
@@ -526,14 +535,26 @@ def collect(arguments: argparse.Namespace) -> dict:
     historical, available = pages(f"{prefix}/workflows/{run['workflow_id']}/runs?status=completed",
                                   "workflow_runs", arguments.history_limit)
     groups = {"ordinary": [], "release": []}
+    unobservable = []
     historical_arguments = argparse.Namespace(**{**vars(arguments), "release": None, "allow_running": "false"})
     for candidate in historical:
         if candidate["id"] == run["id"] or candidate["event"] != run["event"]:
             continue
         if candidate["workflow_id"] != run["workflow_id"] or candidate["status"] != "completed":
             raise ReportError("GitHub history contains a foreign or incomplete workflow run")
-        candidate_jobs = run_jobs(prefix, candidate)
-        observation = observe(historical_arguments, candidate, candidate_jobs, phase_cache)
+        try:
+            candidate_jobs = run_jobs(prefix, candidate)
+            observation = observe(historical_arguments, candidate, candidate_jobs, phase_cache)
+        except (ReportError, KeyError, ValueError, TypeError, AttributeError) as error:
+            # One historical run that cannot be fetched or measured supplies no
+            # sample. It must not discard the current run's own measurement, so
+            # it is excluded with its reason rather than clamped or guessed.
+            unobservable.append({
+                "run_id": candidate["id"], "run_attempt": candidate.get("run_attempt"),
+                "reason": "api_unavailable" if isinstance(error, APIUnavailable) else "invalid_observation",
+                "error": str(error),
+            })
+            continue
         groups[observation["latency"]["slo"]["class"]].append(observation)
     report["history"] = {
         "limit": arguments.history_limit, "available_runs": available, "inspected_runs": len(historical),
@@ -542,6 +563,7 @@ def collect(arguments: argparse.Namespace) -> dict:
         "percentile_population": ("successful completed runs with validated operation clocks; missing, reused and no-op operations excluded"
                                   if arguments.phase in ("prepare", "publication") else
                                   "successful completed runs; elapsed clock retains original creation across reruns"),
+        "unobservable_run_count": len(unobservable), "unobservable_runs": unobservable,
         **{name: distribution(observations, arguments.phase) for name, observations in groups.items()},
     }
     return report
@@ -591,6 +613,10 @@ def write_summary(report: dict, destination: str | Path) -> None:
                          f"{values['p95_seconds']} | {values['workflow_elapsed_p50_seconds']} | "
                          f"{values['workflow_elapsed_p95_seconds']} | {values['execution_p50_seconds']} | "
                          f"{values['execution_p95_seconds']} |\n")
+        for unobservable in report["history"]["unobservable_runs"]:
+            output.write(f"\nUnobservable historical run {unobservable['run_id']} "
+                         f"(attempt {unobservable['run_attempt']}) excluded as `{unobservable['reason']}`: "
+                         f"{unobservable['error']}\n")
         for name in ("ordinary", "release"):
             reasons = report["history"][name]["excluded_reasons"]
             if reasons:
