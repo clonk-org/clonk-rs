@@ -7290,7 +7290,7 @@ protected func CalcDefValue(object base, int player)
         second.number = 1;
         second.priority = 100;
         second.command_target = Some(host.as_u64() as i32);
-        test_object_mut(&mut engine, target).state.effects = vec![first, second];
+        test_object_mut(&mut engine, target).state.effects = vec![first, second].into();
 
         let menu = open_native_context(&mut engine, crew, target);
         assert_eq!(menu_captions(&menu), ["First", "Second"]);
@@ -7330,7 +7330,7 @@ protected func CalcDefValue(object base, int player)
         let mut effect = crate::EffectState::new("Live");
         effect.number = 4;
         effect.command_target = Some(host.as_u64() as i32);
-        test_object_mut(&mut engine, target).state.effects = vec![effect];
+        test_object_mut(&mut engine, target).state.effects = vec![effect].into();
 
         let menu = open_native_context(&mut engine, crew, target);
         assert_eq!(menu.items.len(), 1);
@@ -7499,7 +7499,7 @@ global func FxWorldContextLateLast(target, number, menu, image) { [Global late l
         glow.command_target = Some(effect_host.as_u64() as i32);
         let mut world = crate::EffectState::new("World");
         world.number = 11;
-        test_object_mut(&mut engine, target).state.effects = vec![glow, world];
+        test_object_mut(&mut engine, target).state.effects = vec![glow, world].into();
         let mut attached_action = ActionState::new("Attached");
         attached_action.target = Some(target);
         engine.spawn_test_object(SpawnConfig::new("ATCH").with_action(attached_action));
@@ -7993,7 +7993,7 @@ func AllowWorld(target, number, menu, image) {
         definition.command_id = Some("DHST".to_string());
         let mut global = crate::EffectState::new("World");
         global.number = 11;
-        test_object_mut(&mut engine, target).state.effects = vec![live, definition, global];
+        test_object_mut(&mut engine, target).state.effects = vec![live, definition, global].into();
 
         let menu = open_native_context(&mut engine, crew, target);
         assert_eq!(
@@ -8951,7 +8951,7 @@ public func ContextMagic(object caller)
         // lands *after* the cursor where the live walk can still reach it.
         glow.priority = 10;
         glow.command_target = Some(target.as_u64() as i32);
-        engine.objects[target_index].state.effects = vec![glow];
+        engine.objects[target_index].state.effects = vec![glow].into();
 
         let crew_index = engine.test_object_index(crew);
         engine
@@ -8984,7 +8984,7 @@ public func ContextMagic(object caller)
         let mut fire = crate::EffectState::new(crate::C4FX_FIRE);
         fire.number = 8;
         fire.command_target = Some(target.as_u64() as i32);
-        engine.objects[target_index].state.effects = vec![glow, fire];
+        engine.objects[target_index].state.effects = vec![glow, fire].into();
 
         let crew_index = engine.test_object_index(crew);
         engine

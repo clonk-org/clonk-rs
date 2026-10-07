@@ -1324,8 +1324,8 @@ impl Engine {
                     action: snapshot.action.clone(),
                     direction: snapshot.direction,
                     command_direction: snapshot.command_direction,
-                    effects: snapshot.effects.clone(),
-                    vertices: snapshot.vertices.clone(),
+                    effects: snapshot.effects.clone().into(),
+                    vertices: snapshot.vertices.clone().into(),
                     shape_vertices: persisted
                         .shape_vertices
                         .clone()
@@ -1347,7 +1347,8 @@ impl Engine {
                         &snapshot.components,
                         snapshot.component_order.clone(),
                         &definition_component_order,
-                    ),
+                    )
+                    .into(),
                     status: snapshot.status,
                     owner: snapshot.owner,
                     controller: snapshot.controller,
@@ -1358,7 +1359,7 @@ impl Engine {
                     crew_disabled: persisted.crew_disabled,
                     alive: snapshot.alive,
                     base_graphics: snapshot.base_graphics.clone(),
-                    graphics_overlays: snapshot.graphics_overlays.clone(),
+                    graphics_overlays: snapshot.graphics_overlays.clone().into(),
                     draw_transform: snapshot.draw_transform,
                     local_vars: snapshot.local_vars.clone().into(),
                     in_liquid: snapshot.in_liquid,

@@ -1,5 +1,49 @@
 use super::*;
+use std::cell::{Ref, RefMut};
 use std::ops::Deref;
+
+/// A callback-entry projection with shared interior mutability, built when a
+/// host API first borrows it. Clones of the owning `Rc` share one cell, just
+/// like the eagerly built `Rc<RefCell<T>>` this replaces.
+pub(crate) struct DeferredRefCell<T> {
+    cell: OnceCell<RefCell<T>>,
+    source: Option<(*const (), unsafe fn(*const ()) -> T)>,
+}
+
+impl<T> DeferredRefCell<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self {
+            cell: OnceCell::from(RefCell::new(value)),
+            source: None,
+        }
+    }
+
+    /// # Safety
+    /// The same paused-engine lifetime and field-borrow contract as
+    /// [`CallbackSnapshot::deferred`].
+    pub(super) unsafe fn deferred(source: *const (), project: unsafe fn(*const ()) -> T) -> Self {
+        Self {
+            cell: OnceCell::new(),
+            source: Some((source, project)),
+        }
+    }
+
+    fn cell(&self) -> &RefCell<T> {
+        self.cell.get_or_init(|| {
+            let (source, project) = self.source.expect("a deferred cell has a source");
+            // SAFETY: the constructor's lifetime and field-borrow contract.
+            RefCell::new(unsafe { project(source) })
+        })
+    }
+
+    pub(crate) fn borrow(&self) -> Ref<'_, T> {
+        self.cell().borrow()
+    }
+
+    pub(crate) fn borrow_mut(&self) -> RefMut<'_, T> {
+        self.cell().borrow_mut()
+    }
+}
 
 /// A callback-entry projection allocated only when a host API reads it.
 /// Clones retain an initialized backing; writes detach it just like the

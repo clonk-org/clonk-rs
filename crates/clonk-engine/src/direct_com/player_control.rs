@@ -443,7 +443,7 @@ impl Engine {
                     definition_id: object.definition_id.clone(),
                     symbol_size: 35,
                     base_graphics: object.state.base_graphics.clone(),
-                    graphics_overlays: object.state.graphics_overlays.clone(),
+                    graphics_overlays: object.state.graphics_overlays.to_vec(),
                     blit_mode: object.state.blit_mode,
                     color: object.state.color,
                     color_modulation: object.state.color_modulation,

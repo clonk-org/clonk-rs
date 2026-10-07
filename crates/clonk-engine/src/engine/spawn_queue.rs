@@ -597,8 +597,8 @@ impl Engine {
                 action: initial_action,
                 direction,
                 command_direction,
-                effects: Vec::new(),
-                vertices: initial_vertices,
+                effects: Vec::new().into(),
+                vertices: initial_vertices.into(),
                 shape_vertices: initial_shape_vertices,
                 // Fresh Init copies Def->Shape. Loaded objects compile the
                 // embedded shape from a Clear() default of C4M_Solid.
@@ -621,7 +621,7 @@ impl Engine {
                 // (C4Object.cpp:197-199,519-526,1428-1464). Loaded objects
                 // bypass Init and compile their saved list verbatim (:2811).
                 components: initial_components,
-                component_order: initial_component_order,
+                component_order: initial_component_order.into(),
                 status: status.unwrap_or_default(),
                 owner,
                 controller: initial_controller,
@@ -635,7 +635,7 @@ impl Engine {
                 // false (C4Object.cpp:2756).
                 alive: initial_alive,
                 base_graphics,
-                graphics_overlays,
+                graphics_overlays: graphics_overlays.into(),
                 draw_transform,
                 local_vars: local_vars.into(),
                 in_liquid: in_liquid.unwrap_or(false),
@@ -792,7 +792,7 @@ impl Engine {
             // C4Effect::CompileFunc reconstructs the linked list without
             // invoking Fx*Start callbacks. The serialized order is already
             // the live order and must survive byte-for-byte reload semantics.
-            object.state.effects = effects;
+            object.state.effects = effects.into();
             // Old-style/bare OnFire saves with no effect list receive the
             // callback-suppressed native Fire node during CompileFunc
             // (C4Object.cpp:2878-2881).

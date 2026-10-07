@@ -464,6 +464,55 @@ fn an_absent_callback_materialises_nothing() {
 }
 
 #[test]
+/// C++ scripts act on the live `C4Object`; the port hands every callback a
+/// snapshot of its receiver (`Object::script_state_snapshot`). Collections a
+/// callback only reads must share the live object's storage, or each snapshot
+/// deep-copies every effect, vertex, component ID and overlay.
+fn a_script_state_snapshot_shares_its_collections() {
+    let mut engine = Engine::new();
+    engine.register_test_script_definition("SHAR", "Share", "#strict\nfunc Present() {}\n");
+    let object = spawn_fixture!(engine, "SHAR", with_position: Vector2::new(50, 50));
+    let index = engine.test_object_index(object);
+    let live = &mut engine.objects[index].state;
+    live.effects.push(crate::EffectState::new("Glow"));
+    live.component_order.push(DefinitionId::from("WOOD"));
+
+    let snapshot = engine.objects[index].script_state_snapshot();
+    let live = &engine.objects[index].state;
+    assert!(snapshot.effects.shares_storage_with(&live.effects));
+    assert!(snapshot.vertices.shares_storage_with(&live.vertices));
+    assert!(snapshot
+        .component_order
+        .shares_storage_with(&live.component_order));
+    assert!(snapshot
+        .graphics_overlays
+        .shares_storage_with(&live.graphics_overlays));
+}
+
+#[test]
+/// A callback context used to project every player's crew-info roster up
+/// front, although only the crew host functions (`MakeCrewMember`,
+/// `GrabObjectInfo` and friends) read it. A callback that never touches crew
+/// infos must not pay for that projection.
+fn a_callback_without_crew_calls_projects_no_crew_infos() {
+    let mut engine = Engine::new();
+    engine.register_test_script_definition(
+        "NOCR",
+        "No crew",
+        "#strict\nfunc Present() { return(1); }\n",
+    );
+    let object = spawn_fixture!(engine, "NOCR", with_position: Vector2::new(50, 50));
+    let index = engine.test_object_index(object);
+
+    HOST_CREW_INFO_STATE_PROJECTIONS.with(|count| count.set(0));
+    assert_eq!(
+        crate::TestValueExt::test_value(engine.call_object_function(index, "Present", Vec::new())),
+        Value::Int(1),
+    );
+    assert_eq!(HOST_CREW_INFO_STATE_PROJECTIONS.with(Cell::get), 0);
+}
+
+#[test]
 /// C++ leaves `Action.DrawDir` alone when `SetAction` moves to an action with
 /// the *same* `FlipDir` value, and never clamps it to the new action's
 /// `Directions` (`C4Object.cpp:4156-4157`, and `UpdateFlipDir` at

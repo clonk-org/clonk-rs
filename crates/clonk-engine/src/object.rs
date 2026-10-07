@@ -120,9 +120,9 @@ pub struct ObjectState {
     pub direction: Direction,
     #[serde(default)]
     pub command_direction: CommandDirection,
-    pub effects: Vec<EffectState>,
+    pub effects: SharedVec<EffectState>,
     #[serde(default)]
-    pub vertices: Vec<ObjectVertex>,
+    pub vertices: SharedVec<ObjectVertex>,
     /// Complete C4Shape slot storage. Public snapshots expose only the active
     /// `vertices` prefix; engine persistence carries this separately.
     #[serde(skip)]
@@ -158,8 +158,8 @@ pub struct ObjectState {
     /// C4Object::Component is a C4IDList: indexed access follows insertion
     /// order independently of the count map, and zero-count entries remain
     /// present (C4IDList.cpp:38-45,85-103).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub component_order: Vec<DefinitionId>,
+    #[serde(default, skip_serializing_if = "SharedVec::is_empty")]
+    pub component_order: SharedVec<DefinitionId>,
     #[serde(default)]
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
@@ -192,7 +192,7 @@ pub struct ObjectState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_graphics: Option<ObjectBaseGraphics>,
     #[serde(default)]
-    pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
+    pub graphics_overlays: SharedVec<ObjectGraphicsOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_transform: Option<DrawTransform>,
     /// Per-object storage for script-level local variables
@@ -381,8 +381,8 @@ pub(crate) fn preview_spawn_state(
         action: ActionState::new("Idle"),
         direction: Direction::default(),
         command_direction: CommandDirection::default(),
-        effects: Vec::new(),
-        vertices,
+        effects: Vec::new().into(),
+        vertices: vertices.into(),
         shape_vertices,
         contact_density,
         container: None,
@@ -392,7 +392,7 @@ pub(crate) fn preview_spawn_state(
         contents: Vec::new(),
         contents_link_generation: 0,
         components: ComponentList::new(),
-        component_order: Vec::new(),
+        component_order: Vec::new().into(),
         status: ObjectStatus::Normal,
         owner,
         controller,
@@ -403,7 +403,7 @@ pub(crate) fn preview_spawn_state(
         crew_disabled: false,
         alive: true,
         base_graphics: None,
-        graphics_overlays: Vec::new(),
+        graphics_overlays: Vec::new().into(),
         draw_transform: None,
         local_vars: LocalVariables::default(),
         in_liquid: false,
@@ -635,7 +635,7 @@ impl ObjectState {
             self.action.reconcile_with_library(library);
         }
         if let Some(vertices) = &delta.vertices {
-            self.vertices = vertices.clone();
+            self.vertices = vertices.clone().into();
         }
         // C4ObjectList::ShiftContents (C4ObjectList.cpp:815-833): cyclic
         // rotation so the target becomes First — relative order preserved.
@@ -646,7 +646,7 @@ impl ObjectState {
             }
         }
         if let Some(overlays) = &delta.graphics_overlays {
-            self.graphics_overlays = overlays.clone();
+            self.graphics_overlays = overlays.clone().into();
         }
         if let Some(transform) = &delta.draw_transform {
             self.draw_transform = *transform;
@@ -723,13 +723,14 @@ impl ObjectState {
                 delta
                     .component_order
                     .clone()
-                    .unwrap_or_else(|| self.component_order.clone()),
+                    .unwrap_or_else(|| self.component_order.to_vec()),
                 &[],
-            );
+            )
+            .into();
             self.components = components.clone();
         } else if let Some(component_order) = &delta.component_order {
             self.component_order =
-                normalized_component_order(&self.components, component_order.clone(), &[]);
+                normalized_component_order(&self.components, component_order.clone(), &[]).into();
         }
         if let Some(local_vars) = &delta.local_vars {
             self.local_vars = local_vars.clone().into();
@@ -2494,7 +2495,7 @@ impl Object {
             self.state.rotation,
         );
         self.state.shape_vertices.replace_active(&vertices);
-        self.state.vertices = vertices;
+        self.state.vertices = vertices.into();
         self.frame_vertex_contacts = vec![0; self.state.vertices.len()];
         self.frame_shape_contact_cnat = CNAT_NONE;
         self.frame_shape_contact_count = 0;
@@ -2559,13 +2560,13 @@ impl Object {
 
     pub(crate) fn set_live_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
         self.state.shape_vertices.replace_active(&vertices);
-        self.state.vertices = vertices;
+        self.state.vertices = vertices.into();
         self.frame_vertex_contacts
             .resize(self.state.vertices.len(), 0);
     }
 
     pub(crate) fn set_shape_vertex_buffer(&mut self, vertices: ShapeVertexBuffer) {
-        self.state.vertices = vertices.active_vec();
+        self.state.vertices = vertices.active_vec().into();
         self.state.shape_vertices = vertices;
         self.frame_vertex_contacts
             .resize(self.state.vertices.len(), 0);
@@ -2924,8 +2925,8 @@ impl Object {
             direction: self.state.direction,
             command_direction: self.state.command_direction,
             action_procedure: procedure,
-            effects: self.state.effects.clone(),
-            vertices: self.state.vertices.clone(),
+            effects: self.state.effects.to_vec(),
+            vertices: self.state.vertices.to_vec(),
             current_shape,
             current_fire_top,
             contact_density: self.state.contact_density,
@@ -2941,7 +2942,7 @@ impl Object {
             picture_rect: self.state.picture_rect,
             contents: self.state.contents.clone(),
             components: self.state.components.clone(),
-            component_order: self.state.component_order.clone(),
+            component_order: self.state.component_order.to_vec(),
             status: self.state.status,
             owner: self.state.owner,
             base: self.state.base,
@@ -2952,7 +2953,7 @@ impl Object {
             selected: self.state.selected,
             alive: self.state.alive,
             base_graphics: self.state.base_graphics.clone(),
-            graphics_overlays: self.state.graphics_overlays.clone(),
+            graphics_overlays: self.state.graphics_overlays.to_vec(),
             draw_transform: self.state.draw_transform,
             command_queue: self.command_queue.iter().cloned().collect(),
             command_stack: self.commands.snapshot(),

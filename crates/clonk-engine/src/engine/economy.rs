@@ -3898,10 +3898,30 @@ impl Engine {
     /// Exact callback-entry projection of every C4ObjectInfoList. The host
     /// consumes idle entries synchronously and allocates stable roster-index
     /// links for new infos before the callback outcome reaches Engine.
-    pub(crate) fn host_crew_info_state(&self) -> compat::HostCrewInfoState {
+    ///
+    /// # Safety
+    ///
+    /// `source` follows `LazyHostWorldProvider`'s paused-engine contract. Only
+    /// the crew roster fields and the definition table are borrowed, so a
+    /// callback may hold a disjoint object field exclusively meanwhile.
+    pub(crate) unsafe fn project_host_crew_info_state(
+        source: *const (),
+    ) -> compat::HostCrewInfoState {
+        let engine = source.cast::<Self>();
+        // SAFETY: these fields stay frozen for the synchronous callback.
+        let (control_counts, rosters, orders, definitions) = unsafe {
+            (
+                &*std::ptr::addr_of!((*engine).crew_info_control_counts),
+                &*std::ptr::addr_of!((*engine).crew_rosters),
+                &*std::ptr::addr_of!((*engine).crew_info_order),
+                &*std::ptr::addr_of!((*engine).definitions),
+            )
+        };
+        #[cfg(test)]
+        HOST_CREW_INFO_STATE_PROJECTIONS.with(|count| count.set(count.get() + 1));
         let mut state = compat::HostCrewInfoState::default();
-        state.control_counts = self.crew_info_control_counts.clone();
-        for (&number, roster) in &self.crew_rosters {
+        state.control_counts = control_counts.clone();
+        for (&number, roster) in rosters {
             state.next_indices.insert(number, roster.len());
             state.roster_names.insert(
                 number,
@@ -3915,7 +3935,7 @@ impl Engine {
                 state.entries.insert(link, info.clone());
             }
             let fallback_order;
-            let order = match self.crew_info_order.get(&number) {
+            let order = match orders.get(&number) {
                 Some(order) => order.as_slice(),
                 None => {
                     fallback_order = (0..roster.len()).collect::<Vec<_>>();
@@ -3934,9 +3954,7 @@ impl Engine {
                 if info.participation != 0
                     && !info.in_action
                     && !info.has_died
-                    && self
-                        .definitions
-                        .contains_key(&DefinitionId::from(info.id.as_str()))
+                    && definitions.contains_key(&DefinitionId::from(info.id.as_str()))
                 {
                     state
                         .idle

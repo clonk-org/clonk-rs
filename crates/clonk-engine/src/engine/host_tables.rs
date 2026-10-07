@@ -337,7 +337,7 @@ impl Engine {
             object.state.position,
             object.state.velocity,
             object.state.rotation,
-            object.state.vertices.clone(),
+            object.state.vertices.to_vec(),
             object.state.action.data,
             object.state.action.time,
             object.state.action.phase,
