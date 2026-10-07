@@ -609,6 +609,42 @@ class WorkspaceCacheTests(unittest.TestCase):
         self.assertFalse(report["cache_verified"])
         self.assertFalse(report["reused_units"])
         self.assertFalse(self.fingerprints("cache-consumer"))
+        self.assertIn(".cargo/config.toml", report["reason"])
+
+    def test_unread_documentation_change_keeps_every_workspace_unit(self) -> None:
+        # Two docs screenshots once discarded all 137 landing units although no
+        # compiler unit reads them; only rustc dep-info proves an input.
+        screenshot = self.write("docs/images/saved.png", "first frame\n")
+        self.git("add", "docs/images/saved.png")
+        self.build()
+        self.cache("record")
+        screenshot.write_text("second frame\n", encoding="utf-8")
+
+        report = self.cache("prepare")
+
+        self.assertTrue(report["cache_verified"], report["reason"])
+        self.assertFalse(report["invalidated_units"])
+        self.assertTrue(self.fingerprints("cache-base"))
+        self.assertTrue(self.fingerprints("cache-consumer"))
+
+    def test_documentation_read_by_a_unit_invalidates_only_that_user(self) -> None:
+        notes = self.write("docs/notes.txt", "7")
+        self.write("consumer/src/main.rs", 'fn main() { println!("{}", include_str!("../../docs/notes.txt")); }\n')
+        self.git("add", "docs/notes.txt", "consumer/src/main.rs")
+        self.build()
+        self.cache("record")
+        notes.write_text("9", encoding="utf-8")
+        os.utime(notes, (1, 1))
+        self.build()
+        self.assertEqual(self.value(), "7")
+
+        report = self.cache("prepare")
+
+        self.assertTrue(self.fingerprints("cache-base"))
+        self.assertFalse(self.fingerprints("cache-consumer"))
+        self.assertIn("docs/notes.txt", json.dumps(report["changed_inputs"]))
+        self.build()
+        self.assertEqual(self.value(), "9")
 
     def test_exact_content_gitlink_change_discards_all_workspace_units(self) -> None:
         self.git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},content")
