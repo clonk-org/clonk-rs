@@ -356,6 +356,7 @@ struct PreparedFogQuads {
 struct PreparedFogQuad {
     modulation: [[[f32; 4]; 4]; 2],
     nonzero: [bool; 2],
+    uniform: [Option<u32>; 2],
 }
 
 /// One axis of a rasterized fog sample. A blit reuses the same horizontal
@@ -429,6 +430,12 @@ impl FogSpriteSampler {
                     };
                     let modulation = [combine(base), owner.map_or([0; 4], combine)];
                     PreparedFogQuad {
+                        uniform: modulation.map(|corners| {
+                            corners
+                                .iter()
+                                .all(|corner| *corner == corners[0])
+                                .then_some(corners[0])
+                        }),
                         nonzero: modulation
                             .map(|corners| corners.iter().any(|corner| *corner != 0)),
                         modulation: modulation.map(unpack_modulation),
@@ -781,20 +788,26 @@ impl FogSpriteSampler {
                 weights
             };
             let combined = &prepared.quads[y.chunk * self.columns + x.chunk];
+            // axis_sample clamps finite offsets to [0, 1]. The triangle
+            // weights sum to one within a few f32 ulps: at most 255 times
+            // that error is far below a half-channel rounding boundary.
+            // Keep interpolation for NaN offsets, whose conversion yields 0.
+            let uniform_is_exact = x.offset.is_finite() && y.offset.is_finite();
+            let fragment = |pass| {
+                if uniform_is_exact {
+                    if let Some(color) = combined.uniform[pass] {
+                        return color;
+                    }
+                }
+                if combined.nonzero[pass] {
+                    interpolate_modulation(&combined.modulation[pass], weights)
+                } else {
+                    0
+                }
+            };
             FogModulationSample::Prepared {
                 modulation: quad.modulation,
-                fragments: [
-                    if combined.nonzero[0] {
-                        interpolate_modulation(&combined.modulation[0], weights)
-                    } else {
-                        0
-                    },
-                    if prepared.owner && combined.nonzero[1] {
-                        interpolate_modulation(&combined.modulation[1], weights)
-                    } else {
-                        0
-                    },
-                ],
+                fragments: [fragment(0), if prepared.owner { fragment(1) } else { 0 }],
                 nonzero: combined.nonzero,
             }
         } else {
@@ -1920,6 +1933,62 @@ pub(crate) fn prepare_liquid_animation_fragment(
 #[cfg(test)]
 mod fog_chunk_capacity_tests {
     use super::*;
+
+    #[test]
+    fn uniform_fog_chunks_reuse_their_exact_rounded_fragment() {
+        // StdGL.cpp:455-458 prepares vertex colours; equal integer channels
+        // remain that integer after triangle interpolation and rounding.
+        let blit = SpriteBlitState::normal();
+        let coordinates = [
+            0.0,
+            f32::from_bits(1),
+            f32::EPSILON,
+            f32::from_bits(0.1f32.to_bits() - 1),
+            0.1,
+            f32::from_bits(0.1f32.to_bits() + 1),
+            f32::from_bits(0.5f32.to_bits() - 1),
+            0.5,
+            f32::from_bits(0.5f32.to_bits() + 1),
+            0.9,
+            f32::from_bits(1.0f32.to_bits() - 1),
+            1.0,
+        ];
+        for channel in 0..=255u32 {
+            let color =
+                (channel << 24) | ((255 - channel) << 16) | (((channel * 73) & 255) << 8) | channel;
+            let mut raw = corner_sampler();
+            raw.quads[0].modulation = [color; 4];
+            let mut prepared = corner_sampler();
+            prepared.quads[0].modulation = [color; 4];
+            let prepared = prepared.prepare_for_blit(blit, Some(0x00ab_cdef));
+            FOG_INTERPOLATION_CALLS.with(|calls| calls.set(0));
+            for y in coordinates {
+                for x in coordinates {
+                    let old = raw.blit_at(blit, x, y).fog_modulation.expect("raw fog");
+                    let new = prepared
+                        .blit_at(blit, x, y)
+                        .fog_modulation
+                        .expect("prepared fog");
+                    assert_eq!(new.combine_with(0x00ff_ffff), old.combine_with(0x00ff_ffff));
+                    assert_eq!(
+                        new.combine_with_owner(0x00ab_cdef),
+                        old.combine_with_owner(0x00ab_cdef),
+                    );
+                }
+            }
+            assert_eq!(FOG_INTERPOLATION_CALLS.with(std::cell::Cell::get), 0);
+            // NaN axis offsets retain the old interpolation/conversion result.
+            let old = raw
+                .blit_at(blit, f32::NAN, 0.5)
+                .fog_modulation
+                .expect("raw fog");
+            let new = prepared
+                .blit_at(blit, f32::NAN, 0.5)
+                .fog_modulation
+                .expect("prepared fog");
+            assert_eq!(new.combine_with(0x00ff_ffff), old.combine_with(0x00ff_ffff));
+        }
+    }
 
     #[test]
     fn black_fog_chunks_return_zero_without_fragment_interpolation() {
