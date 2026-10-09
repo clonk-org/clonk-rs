@@ -207,6 +207,18 @@ class DeviceLossQualificationTests(unittest.TestCase):
                 SCRIPTS.parent / "crates/clonk-engine/tests/fixtures/embedded_player.c4p"
             ).read_bytes())
 
+    def test_the_probe_runs_lock_file_does_not_dirty_the_next_backends_source_check(self):
+        # The probe runs the app with the checkout as its install root, so the
+        # update lock it retains there (`crates/clonk-update/src/apply.rs`) must
+        # not count as an uncommitted input for the next backend's run.
+        import subprocess
+
+        ignored = subprocess.run(
+            ["git", "-C", str(SCRIPTS.parent), "check-ignore", "--no-index", "-q", ".clonk-update.lock"],
+            check=False,
+        )
+        self.assertEqual(ignored.returncode, 0)
+
     def test_release_qualification_exercises_each_desktop_backend(self):
         workflow = (SCRIPTS.parent / ".github/workflows/device-loss-qualification.yml").read_text()
         self.assertIn("uses: ./.github/actions/device-loss", workflow)

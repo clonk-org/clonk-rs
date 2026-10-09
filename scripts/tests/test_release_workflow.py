@@ -241,7 +241,10 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
             with self.subTest(before=before, after=after):
                 self.assertLess(package.index(f"name: {before}"), package.index(f"name: {after}"))
         for fragment in (
-            "source_root='target/dist/clonk-rust/Clonk Rust.app/Contents/MacOS'",
+            # Packaging moves the bundle into the disk image and deletes it, so
+            # macOS stages the signed universal payload from its engine component.
+            'unzip -q "${engines[0]}" -d target/dist/qualification-unpack',
+            "source_root=target/dist/qualification-unpack/Contents/MacOS",
             "target_arguments=(--target universal-apple-darwin)",
             "source_root=target/dist/clonk-rust/bin",
             'cmp "target/release-prebuild/${{ matrix.runtime_artifact }}/payload/$filename"',
