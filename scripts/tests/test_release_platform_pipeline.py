@@ -45,7 +45,7 @@ class ReleasePlatformPipelineTests(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/device-loss", workflow)
         self.assertIn("prebuilt-root: target/release-qualified/${{ matrix.name }}", workflow)
         self.assertLess(workflow.index("name: Check the macOS build is universal"), workflow.index("name: Qualify the packaged runtime"))
-        self.assertIn("target/dist/clonk-rust/Clonk Rust.app/Contents/MacOS", workflow)
+        self.assertIn("source_root=target/dist/qualification-unpack/Contents/MacOS", workflow)
         self.assertIn("--target universal-apple-darwin", workflow)
         self.assertIn("scripts/release-prebuild-manifest.py write", workflow)
         action = (REPOSITORY / ".github/actions/device-loss/action.yml").read_text()

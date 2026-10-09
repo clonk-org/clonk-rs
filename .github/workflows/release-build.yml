@@ -274,7 +274,12 @@ jobs:
           qualified_root="target/release-qualified/${{ matrix.name }}"
           mkdir -p "$qualified_root/payload"
           if [[ '${{ matrix.name }}' == 'macos' ]]; then
-            source_root='target/dist/clonk-rust/Clonk Rust.app/Contents/MacOS'
+            # The disk image consumed the staged bundle; the engine component
+            # carries the same signed universal binaries.
+            engines=(target/dist/components/update-engine-*-universal-apple-darwin.zip)
+            rm -rf target/dist/qualification-unpack
+            unzip -q "${engines[0]}" -d target/dist/qualification-unpack
+            source_root=target/dist/qualification-unpack/Contents/MacOS
             target_arguments=(--target universal-apple-darwin)
             parent_arguments=(
               --parent-manifest "target/release-prebuild/${{ matrix.runtime_artifact }}/manifest.json"
