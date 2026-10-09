@@ -87,6 +87,8 @@ docs/generated/
 *.c4s
 *.c4m
 Clonk.log
+# Update lock an app run retains in its install root, e.g. this checkout
+.clonk-update.lock
 
 # Rust build artifacts
 target/
