@@ -4,6 +4,48 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-10
+
+### Bug fixes
+
+- Stage release qualification from inputs that survive packaging (#1930)
+- Keep latency reports usable when GitHub job clocks are inconsistent (#1923)
+- Keep workspace caches across changes no compiler unit reads (#1922)
+- Let a host route read queued input before reporting its send failure (#1920)
+- Notify players when background saves finish (#1897)
+- Advertise host interface addresses in network references (#1900)
+- Enumerate Windows interface addresses for link-local join routes (#1884)
+- Close only the peer a Windows connection reset names (#1882)
+- Bound the client netpuncher lookup so an offline resolver cannot stall the join (#1881)
+- Name the players in lobby chat instead of their computer (#1874)
+
+### Continuous integration
+
+- Reuse verified inputs across CI and release qualification (#1896)
+
+### Features
+
+- Show mismatched releases without blocking network joins (#1927)
+- Explain unavailable LAN discovery in browser and host lobby (#1925)
+
+### Performance
+
+- Overlap simulation with graphics execution (#1926)
+- Execute retained scenes in the software presenter (#1918)
+- Cache sprite fog modulation once per chunk (#1915)
+- Specialize software sprite and fog span compositing (#1902)
+- Avoid child object clones in contents queries (#1898)
+
+### Refactoring
+
+- Share callback snapshots and defer crew projections (#1924)
+
+### Testing
+
+- Await the held ClonkMars masterserver Start instead of racing it (#1921)
+- Cover player resource downloads through host relay (#1899)
+- Serve the 24-player benchmark's bootstrap resources from the host (#1883)
+
 ## [1.5.0] - 2026-10-05
 
 ### Bug fixes
