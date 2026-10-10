@@ -640,3 +640,126 @@ fn scenario_cpu_stress_profile() {
         profile_one_pass(&prepared, scenario, path);
     }
 }
+// Manual two-core overlap evidence. Run with RAYON_NUM_THREADS=1 and taskset;
+// keep stage samples, final simulation state and every measured frame digest.
+#[test]
+#[ignore = "manual two-core production simulation/graphics overlap profile"]
+fn simulation_graphics_pipeline_profile() {
+    let _lock = env_lock().lock();
+    let scenario = std::env::var("CLONK_PIPELINE_PROFILE_SCENARIO")
+        .unwrap_or_else(|_| FRAME_PROFILE_SCENARIOS[2].into());
+    let prepared = PreparedRealInstalledScenario::new(&scenario);
+    let directory = PathBuf::from(std::env::var_os("CLONK_PIPELINE_PROFILE_OUTPUT").test_value());
+    fs::create_dir_all(&directory).test_value();
+    let measured = std::env::var("CLONK_PIPELINE_PROFILE_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(300);
+    let mut runs = Vec::new();
+    let mut serial_frame_bytes = Vec::new();
+    for pipelined in [false, true] {
+        seed_classic_safe_random(587);
+        clonk_engine::particles::install_presentation_safe_random_seed(587);
+        let mut fixture = prepared.instantiate_with_window(
+            "Pipeline Profile",
+            false,
+            FRAME_PROFILE_WIDTH,
+            FRAME_PROFILE_HEIGHT,
+        );
+        let app = &mut fixture.app;
+        let presenter =
+            clonk_scaling::FramePresenter::new(1.0, FRAME_PROFILE_WIDTH, FRAME_PROFILE_HEIGHT);
+        let mut state = graphics_pipeline::CpuFrameState::for_presenter(None, &presenter);
+        let mut renderers = Vec::new();
+        let mut worker = graphics_pipeline::FrameWorker::new(|| {}).test_value();
+        let mut samples = Vec::new();
+        let mut digests = Vec::new();
+        for index in 0..(200 + measured) {
+            let frame_started = Instant::now();
+            let retained = app
+                .prepare_retained_cpu_presentation(&presenter)
+                .test_value();
+            let mut feedback = Some(graphics_pipeline::DrawFeedback::capture(app));
+            let preparation = frame_started.elapsed();
+            let (output, simulation) = if pipelined {
+                worker
+                    .submit(move || {
+                        graphics_pipeline::execute_cpu_frame(retained, state, renderers)
+                    })
+                    .test_value();
+                let simulation_started = Instant::now();
+                app.test_update();
+                let simulation = simulation_started.elapsed();
+                (worker.finish().test_value().test_value(), simulation)
+            } else {
+                let output = graphics_pipeline::execute_cpu_frame(retained, state, renderers);
+                feedback.take().test_value().apply(app);
+                let simulation_started = Instant::now();
+                app.test_update();
+                (output, simulation_started.elapsed())
+            };
+            let interval = frame_started.elapsed();
+            if let Some(feedback) = feedback.take() {
+                feedback.apply(app);
+            }
+            let graphics_pipeline::GraphicsOutput::Cpu {
+                state: next_state,
+                renderers: next_renderers,
+                result,
+                execution,
+            } = output
+            else {
+                panic!("CPU worker returned GPU output");
+            };
+            result.test_value();
+            state = next_state;
+            renderers = next_renderers;
+            if index >= 200 {
+                if pipelined {
+                    assert_eq!(
+                        state.rgba,
+                        serial_frame_bytes[index - 200],
+                        "RGBA bytes at frame {index}"
+                    );
+                } else {
+                    serial_frame_bytes.push(state.rgba.clone());
+                }
+                let digest = state.rgba.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                });
+                digests.push(format!("{digest:016x}"));
+                samples.push(serde_json::json!({"prepare_ns": preparation.as_nanos() as u64,
+                    "simulation_ns": simulation.as_nanos() as u64, "graphics_ns": (preparation + execution).as_nanos() as u64,
+                    "graphics_execution_ns": execution.as_nanos() as u64,
+                    "interval_ns": interval.as_nanos() as u64,
+                    "expected_sum_ns": (preparation + simulation + execution).as_nanos() as u64,
+                    "expected_max_ns": simulation.max(preparation + execution).as_nanos() as u64,
+                    "pipeline_bound_ns": (preparation + simulation.max(execution)).as_nanos() as u64}));
+            }
+        }
+        let label = if pipelined { "pipelined" } else { "serial" };
+        let final_state = serde_json::to_value(app.engine.capture_state()).test_value();
+        runs.push((label, samples, digests, final_state));
+        clonk_engine::particles::clear_presentation_safe_random_seed();
+    }
+    assert_eq!(
+        runs[0].2, runs[1].2,
+        "every captured frame must have identical RGBA"
+    );
+    assert_eq!(
+        runs[0].3, runs[1].3,
+        "final raw simulation state and RNG must be unchanged"
+    );
+    let report = serde_json::json!({"scenario": scenario, "warmup": 200, "samples": measured,
+        "extent": [FRAME_PROFILE_WIDTH, FRAME_PROFILE_HEIGHT], "rayon_threads": std::env::var("RAYON_NUM_THREADS").ok(),
+        "cpu_affinity": fs::read_to_string("/proc/self/status").ok().and_then(|status| status.lines().find(|line| line.starts_with("Cpus_allowed_list:")).map(str::to_owned)),
+        "load_average": fs::read_to_string("/proc/loadavg").ok(), "rgba_equal": true, "rgba_byte_pairs": measured, "raw_state_equal": true,
+        "runs": runs.iter().map(|(label, samples, digests, _)| serde_json::json!({"path": label, "stage_samples": samples, "rgba_fnv64": digests})).collect::<Vec<_>>()});
+    let filename = format!("{}.json", scenario.replace(['/', '.'], "_"));
+    fs::write(
+        directory.join(&filename),
+        serde_json::to_vec_pretty(&report).test_value(),
+    )
+    .test_value();
+    eprintln!("pipeline_profile scenario={scenario} samples={measured} rgba_equal=true raw_state_equal=true output={filename}");
+}

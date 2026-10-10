@@ -1164,52 +1164,35 @@ pub(crate) fn present_retained_gpu_frame(
         .map(RetainedGpuProfiledOutcome::outcome)
 }
 
-pub(crate) fn present_retained_gpu_frame_profiled(
-    app: &mut GameApp,
+/// Submit the owned presentation projection independently of application state.
+pub(crate) fn submit_retained_gpu_frame_profiled(
     pixels: &WindowSurface,
-    presenter: &clonk_scaling::FramePresenter,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
-) -> Result<RetainedGpuProfiledOutcome> {
-    renderer
-        .check_health()
-        .context("retained GPU device was unavailable before presentation")?;
-    let geometry = presenter.presentation_geometry();
-    let (physical_width, physical_height) = geometry.physical_size();
-    let presentation = clonk_graphics::GpuPresentation {
-        physical_extent: [physical_width, physical_height],
-        scale: geometry.scale(),
-        crop_top: geometry.crop_top(),
-        // The renderer sizes point and line rasters from this; the frontend is
-        // no longer the only place that knows the zoom
-        // (clonk-org/clonk-rs#359).
-        world_zoom: app.rendering.graphics.viewport_zoom(),
-    };
-    let request_native_save_readback = !app.saves.pending_native_thumbnails.is_empty();
-    let request_current_readback =
-        !app.pending_screenshots.is_empty() || !app.saves.pending_gpu_thumbnail_paths.is_empty();
-    // A screenshot needs every presented pixel; a frame wanted only for save
-    // thumbnails does not. Reducing on the GPU maps the 200x150 result instead
-    // of the complete frame — about 117 KiB rather than 31.6 MiB at 4K.
-    let current_readback_is_thumbnail_only = app.pending_screenshots.is_empty();
-    let profile_context = RetainedGpuFrameContext::capture(
-        pixels,
-        renderer,
-        app.rendering.graphics.advanced_renderer_config(),
-        &geometry,
-    );
+    profile_context: RetainedGpuFrameContext,
+    request_native_save_readback: bool,
+    request_current_readback: bool,
+    current_readback_is_thumbnail_only: bool,
+    prepare: impl FnOnce() -> Result<(
+        RetainedGpuFrame,
+        Option<(
+            clonk_graphics::GpuTextureId,
+            clonk_graphics::ShaderLandscapePlan,
+        )>,
+        Duration,
+    )>,
+) -> Result<(
+    RetainedGpuProfiledOutcome,
+    Option<gpu_renderer::GpuReadbackTicket>,
+    Option<gpu_renderer::GpuReadbackTicket>,
+    bool,
+)> {
     let mut previous_native_readback = None;
     let mut readback = None;
     let mut readback_is_reduced = false;
     let mut retained_profile = None;
     let (submission, frame_preparation_error) = {
         let mut frame_preparation_error = None;
-        let mut frame_preparation = DeferredRetainedFramePreparation::new(|| {
-            let frame_preparation_started = Instant::now();
-            let frame = app.render_retained_gpu_frame(presentation)?;
-            let shader_landscape = app.rendering.graphics.take_shader_landscape_plan();
-            let frame_preparation = frame_preparation_started.elapsed();
-            Ok::<_, anyhow::Error>((frame, shader_landscape, frame_preparation))
-        });
+        let mut frame_preparation = DeferredRetainedFramePreparation::new(prepare);
         let submission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pixels.render_with_profiled(|encoder, surface_view, context| {
                 let (frame, shader_landscape, frame_preparation) = match frame_preparation.prepare()
@@ -1344,6 +1327,63 @@ pub(crate) fn present_retained_gpu_frame_profiled(
     }
     let outcome =
         retained_gpu_profiled_outcome(profiled_presentation.presentation, retained_profile)?;
+
+    Ok((
+        outcome,
+        previous_native_readback,
+        readback,
+        readback_is_reduced,
+    ))
+}
+
+pub(crate) fn present_retained_gpu_frame_profiled(
+    app: &mut GameApp,
+    pixels: &WindowSurface,
+    presenter: &clonk_scaling::FramePresenter,
+    renderer: &mut gpu_renderer::RetainedGpuRenderer,
+) -> Result<RetainedGpuProfiledOutcome> {
+    renderer
+        .check_health()
+        .context("retained GPU device was unavailable before presentation")?;
+    let geometry = presenter.presentation_geometry();
+    let (physical_width, physical_height) = geometry.physical_size();
+    let presentation = clonk_graphics::GpuPresentation {
+        physical_extent: [physical_width, physical_height],
+        scale: geometry.scale(),
+        crop_top: geometry.crop_top(),
+        // The renderer sizes point and line rasters from this; the frontend is
+        // no longer the only place that knows the zoom
+        // (clonk-org/clonk-rs#359).
+        world_zoom: app.rendering.graphics.viewport_zoom(),
+    };
+    let request_native_save_readback = !app.saves.pending_native_thumbnails.is_empty();
+    let request_current_readback =
+        !app.pending_screenshots.is_empty() || !app.saves.pending_gpu_thumbnail_paths.is_empty();
+    // A screenshot needs every presented pixel; a frame wanted only for save
+    // thumbnails does not. Reducing on the GPU maps the 200x150 result instead
+    // of the complete frame — about 117 KiB rather than 31.6 MiB at 4K.
+    let current_readback_is_thumbnail_only = app.pending_screenshots.is_empty();
+    let profile_context = RetainedGpuFrameContext::capture(
+        pixels,
+        renderer,
+        app.rendering.graphics.advanced_renderer_config(),
+        &geometry,
+    );
+    let (outcome, previous_native_readback, readback, readback_is_reduced) =
+        submit_retained_gpu_frame_profiled(
+            pixels,
+            renderer,
+            profile_context,
+            request_native_save_readback,
+            request_current_readback,
+            current_readback_is_thumbnail_only,
+            || {
+                let started = Instant::now();
+                let frame = app.render_retained_gpu_frame(presentation)?;
+                let shader_landscape = app.rendering.graphics.take_shader_landscape_plan();
+                Ok((frame, shader_landscape, started.elapsed()))
+            },
+        )?;
 
     if outcome == RetainedGpuProfiledOutcome::Skipped {
         // Pixels acquired no drawable. Keep screenshot/save requests queued so
@@ -2446,11 +2486,32 @@ pub(crate) fn handle_window_event(
             window, app, pixels, presenter, event, event_loop,
         );
     }
+    handle_game_window_event(
+        window,
+        app,
+        Some(pixels),
+        presenter,
+        display_options,
+        event,
+        event_loop,
+    )
+}
+
+pub(crate) fn handle_game_window_event(
+    window: &Window,
+    app: &mut GameApp,
+    pixels: Option<&mut crate::cpu_target::CpuTarget<'_>>,
+    presenter: &mut clonk_scaling::FramePresenter,
+    display_options: &mut DisplayOptions,
+    event: WindowEvent,
+    event_loop: &winit::event_loop::ActiveEventLoop,
+) -> Result<()> {
     match event {
         WindowEvent::CloseRequested => app.handle_window_close_requested(),
         WindowEvent::Resized(size) => {
             app.reject_classic_global_gui_bootstrap()?;
             let clamped = enforce_min_size(size);
+            let pixels = pixels.context("resize requires a drawable")?;
             pixels
                 .resize_surface(clamped.width, clamped.height)
                 .context("failed to resize pixel surface")?;

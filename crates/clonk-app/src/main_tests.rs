@@ -5192,3 +5192,180 @@ fn retained_cpu_console_shell_skips_fullscreen_monitor_gamma() {
     retained.render(&mut actual).test_value();
     assert_eq!(actual.iter().zip(&expected).position(|(a, b)| a != b), None);
 }
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn graphics_worker_keeps_the_captured_pixels_and_simulation_order() {
+    let mut app = new_state_only_running_sandbox_app();
+    install_synthetic_classic_test_assets(&mut app);
+    let (width, height) = (
+        app.rendering.graphics.surface().width(),
+        app.rendering.graphics.surface().height(),
+    );
+    let presenter = clonk_scaling::FramePresenter::new(1.0, width, height);
+    let retained = app
+        .prepare_retained_cpu_presentation(&presenter)
+        .test_value();
+    let mut expected = vec![0; width as usize * height as usize * 4];
+    retained
+        .render_cpu(
+            &mut Vec::new(),
+            &mut clonk_scaling::FramePresenter::new(1.0, width, height),
+            &mut expected,
+        )
+        .test_value();
+    let before = app.engine.frame();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mut worker = graphics_pipeline::FrameWorker::new(|| {}).test_value();
+    worker
+        .submit(move || {
+            started_tx.send(()).test_value();
+            release_rx.recv().test_value();
+            graphics_pipeline::execute_cpu_frame(
+                retained,
+                graphics_pipeline::CpuFrameState::for_presenter(None, &presenter),
+                Vec::new(),
+            )
+        })
+        .test_value();
+    started_rx.recv_timeout(Duration::from_secs(5)).test_value();
+    app.test_update();
+    assert_eq!(app.engine.frame(), before + 1);
+    assert!(
+        worker.try_finish().test_value().is_none(),
+        "simulation advanced while the captured graphics pass was still unfinished"
+    );
+    release_tx.send(()).test_value();
+    let output = worker.finish().test_value().test_value();
+    let graphics_pipeline::GraphicsOutput::Cpu { state, result, .. } = output else {
+        panic!("CPU worker returned GPU output");
+    };
+    result.test_value();
+    assert_eq!(state.rgba, expected);
+}
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn input_latency_probe_submits_the_same_tick_during_unfinished_graphics() {
+    let mut app = new_state_only_running_sandbox_app();
+    let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
+    app.netplay.manager = Some(network);
+    app.input_latency_benchmark = Some(InputLatencyBenchmark::new(Duration::from_millis(500)));
+    let tick = app.local_control_submission_tick();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mut worker = graphics_pipeline::FrameWorker::new(|| {}).test_value();
+    worker
+        .submit(move || release_rx.recv().test_value())
+        .test_value();
+    let now = Instant::now();
+    app.submit_due_input_latency_benchmark_pair(now, now);
+    let submitted = commands.take_submitted_local();
+    assert_eq!(submitted.len(), 2);
+    assert!(submitted
+        .iter()
+        .all(|(_, _, submitted_tick)| *submitted_tick == tick));
+    assert!(worker.try_finish().test_value().is_none());
+    release_tx.send(()).test_value();
+    worker.finish().test_value();
+}
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn pipelined_graphics_preserves_raw_state_and_rng_through_controls() {
+    let mut serial = new_state_only_running_sandbox_app();
+    let mut pipelined = new_state_only_running_sandbox_app();
+    install_synthetic_classic_test_assets(&mut serial);
+    install_synthetic_classic_test_assets(&mut pipelined);
+    let width = serial.rendering.graphics.surface().width();
+    let height = serial.rendering.graphics.surface().height();
+    let mut presenter = clonk_scaling::FramePresenter::new(1.0, width, height);
+    let mut worker = graphics_pipeline::FrameWorker::new(|| {}).test_value();
+    let mut state = graphics_pipeline::CpuFrameState::for_presenter(None, &presenter);
+    let mut renderers = Vec::new();
+    let mut expected = vec![0; width as usize * height as usize * 4];
+    for frame in 0..32 {
+        let key_state = if frame < 16 {
+            ElementState::Pressed
+        } else {
+            ElementState::Released
+        };
+        if frame == 0 || frame == 16 {
+            serial.test_key(VirtualKeyCode::ArrowLeft, key_state);
+            pipelined.test_key(VirtualKeyCode::ArrowLeft, key_state);
+        }
+        serial
+            .render_retained_cpu_presentation(&mut presenter, &mut expected)
+            .test_value();
+        let retained = pipelined
+            .prepare_retained_cpu_presentation(&state.presenter)
+            .test_value();
+        worker
+            .submit(move || graphics_pipeline::execute_cpu_frame(retained, state, renderers))
+            .test_value();
+        serial.test_update();
+        pipelined.test_update();
+        // EngineState carries raw C4Fixed object state and synchronized RNG;
+        // integer presentation positions alone would hide fractional drift.
+        assert_eq!(
+            serde_json::to_value(serial.engine.capture_state()).test_value(),
+            serde_json::to_value(pipelined.engine.capture_state()).test_value(),
+            "frame {frame}"
+        );
+        let output = worker.finish().test_value().test_value();
+        let graphics_pipeline::GraphicsOutput::Cpu {
+            state: next_state,
+            renderers: next_renderers,
+            result,
+            ..
+        } = output
+        else {
+            panic!("CPU worker returned GPU output");
+        };
+        result.test_value();
+        assert_eq!(next_state.rgba, expected, "captured frame {frame}");
+        state = next_state;
+        renderers = next_renderers;
+    }
+}
+
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn completed_pipeline_draw_uses_captured_audio_positions() {
+    // C4Object::GetAudibility keeps the draw's cached position/mix until
+    // the next graphics pass resets it (C4Object.cpp:5622-5628).
+    let mut app = new_state_only_running_sandbox_app();
+    install_synthetic_classic_test_assets(&mut app);
+    app.sound.context = Some(connect_audio_context(
+        &mut app.engine,
+        empty_test_audio_context(),
+    ));
+    // Native ordinary sprites use origin mixing. A parallax draw records
+    // the explicit draw-time audibility which this handoff must preserve.
+    for object in &mut app.snapshot.objects {
+        object.category |= C4D_PARALLAX;
+    }
+    let presenter = clonk_scaling::FramePresenter::new(
+        1.0,
+        app.rendering.graphics.surface().width(),
+        app.rendering.graphics.surface().height(),
+    );
+    app.prepare_retained_cpu_presentation(&presenter)
+        .test_value();
+    let expected = reduce_rendered_object_audibility(
+        app.rendering.graphics.rendered_object_audibility_calls(),
+        &app.snapshot,
+        &app.rendering.graphics.active_viewport_projections(),
+        &HashMap::new(),
+    );
+    assert!(
+        !expected.is_empty(),
+        "the fixture must have a rendered object"
+    );
+    let feedback = graphics_pipeline::DrawFeedback::capture(&app);
+    for object in &mut app.snapshot.objects {
+        object.position.x += 1400;
+    }
+    feedback.apply(&mut app);
+    assert_eq!(app.test_audio_ref().rendered_object_audibility, expected);
+}

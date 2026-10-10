@@ -1407,6 +1407,14 @@ impl GameApp {
         presenter: &mut clonk_scaling::FramePresenter,
         frame: &mut [u8],
     ) -> Result<bool> {
+        let retained = self.prepare_retained_cpu_presentation(presenter)?;
+        retained.render_cpu(&mut self.presentation.cpu_scene_renderers, presenter, frame)
+    }
+
+    pub(crate) fn prepare_retained_cpu_presentation(
+        &mut self,
+        presenter: &clonk_scaling::FramePresenter,
+    ) -> Result<RetainedGpuFrame> {
         let geometry = presenter.presentation_geometry();
         let (width, height) = geometry.physical_size();
         let presentation = GpuPresentation {
@@ -1427,7 +1435,7 @@ impl GameApp {
                 }
             }
         }
-        retained.render_cpu(&mut self.presentation.cpu_scene_renderers, presenter, frame)
+        Ok(retained)
     }
 
     pub(crate) fn render_ordered_native_base(&mut self, frame: &mut [u8]) -> Result<bool> {
