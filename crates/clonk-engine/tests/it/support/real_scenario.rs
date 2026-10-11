@@ -1,9 +1,9 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use clonk_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
+use clonk_engine::scenario::{load_system_scripts, LegacyDefinitionResolver, ScenarioLoaderHead};
 use clonk_engine::{Engine, JoinPlayerConfig, JoinedPlayer, ObjectId, Scenario, ScenarioError};
-use clonk_resources::{Group, GroupError, MaterialLibrary};
+use clonk_resources::{combine_network_scenario, Group, GroupError, MaterialLibrary, MutableGroup};
 
 struct ContentResolver {
     roots: Vec<PathBuf>,
@@ -208,6 +208,9 @@ pub struct PreparedInstalledScenario {
     system_scripts: Vec<(String, String)>,
     standard_names: Option<String>,
     load_timings: ScenarioLoadTimings,
+    /// Keeps a composed network-client scenario on disk while its groups
+    /// are still read from it.
+    _composed: Option<tempfile::TempDir>,
 }
 
 impl PreparedInstalledScenario {
@@ -384,7 +387,77 @@ fn prepare_scenario_at_path_loaded_by(
             materials: materials_elapsed,
             system_scripts: system_elapsed,
         },
+        _composed: None,
     }
+}
+
+/// The scenario as a network client opens it: the host's initial dynamic
+/// merged over the scenario group (C4Network2.cpp:619-667). That dynamic's
+/// core is `C4GameSaveNetwork`'s, which stores the host's localized
+/// `Parameters.ScenarioTitle` as `Head.Title` and names every definition
+/// module the host loaded (C4GameSave.cpp:79-92; C4GameSave.h:181), so a
+/// client's scenario core is not the host's even within one game.
+pub fn prepare_network_client_scenario(
+    relative_path: impl AsRef<Path>,
+    seed: u64,
+) -> PreparedInstalledScenario {
+    let relative_path = relative_path.as_ref();
+    let host = prepare_installed_scenario(relative_path, seed);
+    let roots = [content_root(), repository_root()];
+    let definition_modules = host
+        .scenario
+        .definition_resource_paths()
+        .iter()
+        .map(|path| {
+            let relative = roots
+                .iter()
+                .find_map(|root| path.strip_prefix(root).ok())
+                .unwrap_or_else(|| panic!("definition `{}` is installed", path.display()));
+            relative
+                .iter()
+                .map(|component| component.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\\")
+        })
+        .collect::<Vec<_>>();
+    let scenario_group = Group::open(&host.scenario_path).expect("open the host scenario");
+    // A US host's Parameters.ScenarioTitle (C4Game.cpp:253-255).
+    let title = ScenarioLoaderHead::load_from_group(&scenario_group)
+        .expect("the host resolves its scenario title");
+    let core = host
+        .scenario
+        .serialize_initial_network_scenario(
+            title.scenario_title(),
+            &definition_modules,
+            "",
+            "",
+            &relative_path.to_string_lossy(),
+        )
+        .expect("the host serializes its initial network scenario core");
+
+    let composed = tempfile::tempdir().expect("network client work directory");
+    let dynamic_path = composed.path().join("Dyn.c4s");
+    let mut dynamic = MutableGroup::new("Dyn.c4s");
+    dynamic
+        .add_file("Scenario.txt", core)
+        .expect("the dynamic holds the network core");
+    std::fs::write(&dynamic_path, dynamic.pack().expect("pack the dynamic"))
+        .expect("write the dynamic");
+    let combined = combine_network_scenario(
+        &scenario_group,
+        &Group::open(&dynamic_path).expect("open the dynamic"),
+        "Combined1.c4s",
+        "",
+    )
+    .expect("RetrieveScenario merges the dynamic over the scenario");
+    let combined_path = composed.path().join("Combined1.c4s");
+    std::fs::write(&combined_path, combined).expect("write the combined scenario");
+
+    let mut client = prepare_scenario_at_path_loaded_by(combined_path, seed, |path, resolver| {
+        Scenario::load_from_path_with_seed(path, resolver, seed)
+    });
+    client._composed = Some(composed);
+    client
 }
 
 pub fn load_installed_scenario(relative_path: impl AsRef<Path>, seed: u64) -> Engine {

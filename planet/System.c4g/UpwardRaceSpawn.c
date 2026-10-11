@@ -11,9 +11,12 @@
 public func OnClonkRecruitment(object clonk, int player)
 {
   var result = _inherited(clonk, player);
-  // Both Abwaerts races share this internal title; only Falschrum goes up.
-  if (GetScenarioVal("Title", "Head") != "RunterRennenTeam"
-      || GameCall("GetRACEDirection") != 3
+  // Recognise the race by its course, which every peer scripts alike.
+  // Head.Title differs per peer: a network client's core carries the
+  // host's localized title (C4GameSave.cpp:79; C4Network2.cpp:619-667).
+  if (GameCall("GetRACEDirection") != 3
+      || GameCall("GetRACEStartOffset") != 90
+      || GameCall("GetRACEEndOffset") != 140
       || FindObjectOwner(SGNL, player))
     return result;
 

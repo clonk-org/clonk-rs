@@ -4,7 +4,7 @@
 
 use crate::support::real_scenario::{
     join_local_player_on_team, load_installed_scenario, object_with_definition,
-    prepare_installed_scenario,
+    prepare_installed_scenario, prepare_network_client_scenario,
 };
 use crate::support::EngineTestExt;
 use clonk_engine::{Engine, SpawnConfig, Vector2};
@@ -69,6 +69,37 @@ fn joining_upward_race_restores_footing_after_starting_platform_is_destroyed() {
     let standing = engine.test_object_snapshot(clonk);
     assert!(standing.alive, "the player survives the destroyed start");
     assert_eq!(standing.position.y, START_PLATFORM_Y - 10);
+}
+
+#[test]
+fn network_clients_restore_the_same_footing_as_the_host() {
+    // A client's scenario core carries the localized title its host saved into
+    // the network dynamic, while the host keeps the raw Scenario.txt title, so
+    // GetScenarioVal("Title") differs between them in one game
+    // (C4Script.cpp:4244-4250; C4GameSave.cpp:79; C4Network2.cpp:619-667).
+    let host = prepare_installed_scenario(SCENARIO, 0);
+    let client = prepare_network_client_scenario(SCENARIO, 0);
+    let footing = [host, client].map(|prepared| {
+        let mut engine = prepared.instantiate();
+        destroy_starting_platform(&mut engine);
+        let player = join_local_player_on_team(&mut engine, "Climber", 1);
+        let start = engine
+            .test_object_snapshot(engine.crew_members(player)[0])
+            .position;
+        engine
+            .tick_without_snapshot()
+            .expect("finish spawn placement");
+        (
+            start,
+            engine.debug_landscape_material_name(start.x, START_PLATFORM_Y),
+        )
+    });
+
+    assert_eq!(
+        footing[1], footing[0],
+        "a network client restores exactly the host's footing"
+    );
+    assert_eq!(footing[0].1.as_deref(), Some("Earth"));
 }
 
 #[test]
