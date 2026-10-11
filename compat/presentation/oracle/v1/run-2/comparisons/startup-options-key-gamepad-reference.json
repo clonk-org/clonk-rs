@@ -5,7 +5,7 @@
   },
   "case_id": "startup-options-key-gamepad-reference",
   "comparator": {
-    "binary_sha256": "8c09fe796e4c3459ae3d8339332d6595b854ca8cef2697d086de4643796e8e5b",
+    "binary_sha256": "ca68afaa43dcc894efa4385eb1a4d6552e28cd48d89c87fe603d5d67162762ec",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "pixel",
