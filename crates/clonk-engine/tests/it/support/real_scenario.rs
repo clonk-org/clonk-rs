@@ -322,6 +322,21 @@ fn prepare_installed_scenario_loaded_by(
     load: impl FnOnce(&Path, &ContentResolver) -> Result<Scenario, ScenarioError>,
 ) -> PreparedInstalledScenario {
     let content = content_root();
+    let bundled = repository_root();
+    let relative_path = relative_path.as_ref();
+    let scenario_path = [bundled.join(relative_path), content.join(relative_path)]
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .unwrap_or_else(|| bundled.join(relative_path));
+    prepare_scenario_at_path_loaded_by(scenario_path, seed, load)
+}
+
+fn prepare_scenario_at_path_loaded_by(
+    scenario_path: PathBuf,
+    seed: u64,
+    load: impl FnOnce(&Path, &ContentResolver) -> Result<Scenario, ScenarioError>,
+) -> PreparedInstalledScenario {
+    let content = content_root();
     let content_install = content.parent().unwrap_or_else(|| {
         panic!(
             "content root `{}` has no repository parent",
@@ -329,11 +344,6 @@ fn prepare_installed_scenario_loaded_by(
         )
     });
     let bundled = repository_root();
-    let relative_path = relative_path.as_ref();
-    let scenario_path = [bundled.join(relative_path), content.join(relative_path)]
-        .into_iter()
-        .find(|candidate| candidate.exists())
-        .unwrap_or_else(|| bundled.join(relative_path));
     let scenario_started = std::time::Instant::now();
     let scenario = load(
         &scenario_path,
