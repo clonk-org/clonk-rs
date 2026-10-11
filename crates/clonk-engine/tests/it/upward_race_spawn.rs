@@ -212,6 +212,48 @@ fn upward_race_relaunch_restores_a_destroyed_bridge_without_regrowing_it_midlife
 }
 
 #[test]
+fn a_later_players_checkpoint_relaunch_keeps_its_authored_footing() {
+    // The race's System.c4g/Redefine.c answers Recruitment() and calls
+    // _inherited() without the player, so CLNK broadcasts
+    // OnClonkRecruitment(clonk, 0) for every player
+    // (Objects.c4d/Crew.c4d/Clonk.c4d/Script.c:29-34).
+    let mut engine = load_installed_scenario(SCENARIO, 0);
+    join_local_player_on_team(&mut engine, "Leader", 1);
+    let player = join_local_player_on_team(&mut engine, "Follower", 2);
+    assert_ne!(player, 0, "the checkpoint belongs to a later player");
+    engine.tick_without_snapshot().expect("complete both joins");
+    let sign = engine.spawn_test_object(
+        SpawnConfig::new("SGNL")
+            .with_owner(player)
+            .with_position(Vector2::new(250, 3650)),
+    );
+    let checkpoint = engine.test_object_snapshot(sign).position;
+    destroy_starting_platform(&mut engine);
+
+    let suicide = object_with_definition(&engine, "_SUI").expect("the race has its suicide rule");
+    let index = engine.test_object_index(suicide);
+    engine
+        .call_object_function(index, "Activate", vec![Value::Int(player)])
+        .expect("relaunch at the checkpoint");
+    assert_eq!(
+        engine
+            .test_object_snapshot(engine.crew_members(player)[0])
+            .position,
+        checkpoint
+    );
+    engine
+        .tick_without_snapshot()
+        .expect("leave checkpoint footing unchanged");
+    assert!(
+        !engine
+            .landscape()
+            .expect("race landscape")
+            .is_solid_at(checkpoint.x, START_PLATFORM_Y),
+        "no start bridge appears beneath a checkpoint relaunch"
+    );
+}
+
+#[test]
 fn upward_race_compatibility_content_keeps_the_authored_missing_ground() {
     let prepared = prepare_installed_scenario(SCENARIO, 0);
     let mut engine = prepared.instantiate_without_system_script(APPEND);

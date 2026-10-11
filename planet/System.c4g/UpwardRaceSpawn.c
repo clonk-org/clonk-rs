@@ -17,7 +17,9 @@ public func OnClonkRecruitment(object clonk, int player)
   if (GameCall("GetRACEDirection") != 3
       || GameCall("GetRACEStartOffset") != 90
       || GameCall("GetRACEEndOffset") != 140
-      || FindObjectOwner(SGNL, player))
+      // Abwaerts' own Recruitment() inherits without the player, so the
+      // broadcast always names player 0; the owner is the real one.
+      || FindObjectOwner(SGNL, GetOwner(clonk)))
     return result;
 
   // Recruitment runs before JoinPlayer sets the final spawn position.
