@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-app"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-app-core"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-core",
  "clonk-engine",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-app-menus"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-app-core",
  "clonk-engine",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-app-netplay"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "anyhow",
  "clonk-app-core",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-app-render"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-engine",
  "clonk-frontend",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-audio"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "aec3",
  "block2 0.6.2",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-c4group"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-platform",
  "clonk-resources",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-core"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "chrono",
  "indexmap",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-engine"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "chrono",
  "clonk-core",
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-engine-core"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "rand_core",
  "serde",
@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-engine-integration-tests"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "chrono",
  "clonk-core",
@@ -1047,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-engine-unit-tests"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "chrono",
  "clonk-core",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-frontend"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "anyhow",
  "clonk-core",
@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-frontend-unit-tests"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "anyhow",
  "clonk-core",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-game"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-graphics"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "font8x8",
  "rand",
@@ -1167,14 +1167,14 @@ dependencies = [
 
 [[package]]
 name = "clonk-gui"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-graphics",
 ]
 
 [[package]]
 name = "clonk-icon"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "embed-resource",
  "image",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-launcher"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "anyhow",
  "clonk-core",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-launcher-shell"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-launcher-ui"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-graphics",
  "clonk-gui",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-logging"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-core",
  "libc",
@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-network"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "bitflags 2.13.2",
  "clonk-core",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-network-integration-tests"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-engine",
  "clonk-network",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-platform"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-core",
  "libc",
@@ -1295,14 +1295,14 @@ dependencies = [
 
 [[package]]
 name = "clonk-protocol"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "clonk-resources"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "byteorder",
  "clonk-script",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-scaling"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-graphics",
  "rayon",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-script"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "criterion",
  "indexmap",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-surface"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "pollster 1.0.1",
  "raw-window-handle",
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-test-support"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-engine",
  "clonk-graphics",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-update"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-core",
  "clonk-platform",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "clonk-update-net"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clonk-update",
  "reqwest",
@@ -6234,7 +6234,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "anyhow",
  "clonk-core",
