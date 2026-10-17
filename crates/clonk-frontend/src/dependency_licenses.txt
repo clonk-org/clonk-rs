@@ -18416,7 +18416,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------
-Applies to: zip 8.6.0
+Applies to: zip 9.0.4
 Distributed as: LICENSE
 
 The MIT License (MIT)
