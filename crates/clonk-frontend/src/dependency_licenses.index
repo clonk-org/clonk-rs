@@ -462,7 +462,7 @@ wayland-scanner	0.31.11	MIT
 wayland-sys	0.31.11	MIT
 web-sys	0.3.106	MIT OR Apache-2.0
 web-time	1.1.0	MIT OR Apache-2.0
-webpki-root-certs	1.0.9	CDLA-Permissive-2.0
+webpki-root-certs	1.0.10	CDLA-Permissive-2.0
 wgpu	30.0.1	MIT OR Apache-2.0
 wgpu-core	30.0.1	MIT OR Apache-2.0
 wgpu-core-deps-apple	30.0.1	MIT OR Apache-2.0
