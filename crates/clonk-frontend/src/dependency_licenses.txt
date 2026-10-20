@@ -17361,7 +17361,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ------------------------------------------------------------------------
-Applies to: webpki-root-certs 1.0.9
+Applies to: webpki-root-certs 1.0.10
 Distributed as: LICENSE
 
 # Community Data License Agreement - Permissive - Version 2.0
