@@ -165,7 +165,7 @@ jobs:
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.91
           fallback: none
@@ -312,7 +312,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Retain reuse decision and fallback reason
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qualification-reuse-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/qualification-reuse.json
@@ -361,7 +361,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.91
           fallback: none
@@ -457,7 +457,7 @@ jobs:
 
       - name: Download the independently qualified Windows runtime
         if: needs.qualification-reuse.outputs.run-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-qualified-runtime-windows-${{ github.sha }}-${{ needs.qualification-reuse.outputs.run-id }}
           github-token: ${{ github.token }}
@@ -516,7 +516,7 @@ jobs:
 
       - name: Preserve Windows software presentation evidence
         if: ${{ always() && inputs.software_presentation }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-software-presentation
           path: target/windows-software-presentation
@@ -568,7 +568,7 @@ jobs:
 
       - name: Retain the cache retention receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-cache-retention-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ci-cache-retention.json
@@ -624,7 +624,7 @@ jobs:
 
       - name: Retain the post-merge latency report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-latency-postmerge-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ci-latency-postmerge.json
