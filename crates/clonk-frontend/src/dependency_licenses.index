@@ -215,7 +215,7 @@ libm	0.2.16	MIT
 libmimalloc-sys	0.1.49	MIT
 libredox	0.1.25	MIT
 libudev-sys	0.1.4	MIT
-libz-sys	1.1.30	MIT OR Apache-2.0
+libz-sys	1.1.31	MIT OR Apache-2.0
 linux-raw-sys	0.12.1	Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 linux-raw-sys	0.4.15	Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 linux-raw-sys	0.9.4	Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
