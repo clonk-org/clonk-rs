@@ -105,7 +105,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-targets: false
           shared-key: full-parity
@@ -479,7 +479,7 @@ jobs:
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.91
           fallback: none
@@ -498,7 +498,7 @@ jobs:
       # key hash cannot be kept correct by asking the next reader to keep it
       # aligned, which is exactly what the comment here used to do.
       - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-targets: false
           shared-key: full-parity
@@ -554,7 +554,7 @@ jobs:
       # virtual-player trace even though the required row remains failed.
       - name: Upload shard test diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-test-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}-${{ github.sha }}
           path: |
@@ -565,7 +565,7 @@ jobs:
 
       - name: Upload presentation capture failure
         if: failure() && matrix.name == 'presentation captures'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: presentation-capture-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -616,13 +616,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         if: matrix.nextest
         with:
           tool: cargo-nextest@0.9.91
           fallback: none
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: windows-runtime-msvc-v2
           save-if: false
@@ -698,7 +698,7 @@ jobs:
             --output "$RUNNER_TEMP/release-qualification-evidence.json"
 
       - name: Retain verified qualification receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-qualification-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/release-qualification-evidence.json
@@ -828,7 +828,7 @@ jobs:
 
       - name: Retain candidate latency evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-latency-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ci-latency.json
