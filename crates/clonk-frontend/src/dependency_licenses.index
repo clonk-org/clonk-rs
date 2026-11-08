@@ -116,7 +116,7 @@ drm-fourcc	2.2.0	MIT
 drm-sys	0.8.1	MIT
 either	1.19.0	MIT OR Apache-2.0
 embed-resource	3.0.12	MIT
-encoding_rs	0.8.42	(Apache-2.0 OR MIT) AND BSD-3-Clause
+encoding_rs	0.8.44	(Apache-2.0 OR MIT) AND BSD-3-Clause
 endi	1.1.1	MIT
 enum-primitive-derive	0.3.0	MIT
 enumflags2	0.7.12	MIT OR Apache-2.0
@@ -222,7 +222,7 @@ linux-raw-sys	0.9.4	Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 litemap	0.8.3	Unicode-3.0
 litrs	1.0.1	MIT OR Apache-2.0
 lock_api	0.4.14	MIT OR Apache-2.0
-log	0.4.34	MIT OR Apache-2.0
+log	0.4.35	MIT OR Apache-2.0
 mach2	0.6.0	BSD-2-Clause OR MIT OR Apache-2.0
 matchers	0.2.0	MIT
 memchr	2.8.3	Unlicense OR MIT
