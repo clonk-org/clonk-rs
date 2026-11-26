@@ -298,7 +298,7 @@ plain	0.2.3	MIT/Apache-2.0
 png	0.18.1	MIT OR Apache-2.0
 polling	3.11.0	Apache-2.0 OR MIT
 pollster	0.4.0	Apache-2.0/MIT
-pollster	1.0.2	MIT OR Apache-2.0
+pollster	1.0.3	MIT OR Apache-2.0
 portable-atomic	1.15.0	Apache-2.0 OR MIT
 portable-atomic-util	0.2.8	Apache-2.0 OR MIT
 potential_utf	0.1.6	Unicode-3.0
@@ -370,7 +370,7 @@ simdutf8	0.1.5	MIT OR Apache-2.0
 siphasher	1.0.4	MIT OR Apache-2.0
 slab	0.4.12	MIT
 slotmap	1.1.1	Zlib
-smallvec	1.16.5	MIT OR Apache-2.0
+smallvec	1.16.6	MIT OR Apache-2.0
 smithay-client-toolkit	0.19.2	MIT
 smol_str	0.2.2	MIT OR Apache-2.0
 socket2	0.6.5	MIT OR Apache-2.0
